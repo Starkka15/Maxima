@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "maxima-bootstrap",
+    "maxima-cli",
+    "maxima-lib",
+    "maxima-service",
+    #"maxima-ui",
+]
+
+[profile.release]
+strip = true

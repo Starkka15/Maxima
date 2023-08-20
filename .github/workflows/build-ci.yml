@@ -1,0 +1,78 @@
+name: Maxima Build
+
+on: [push, pull_request]
+    
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Maxima
+    runs-on: windows-latest
+
+    strategy:
+      matrix:
+        rust-version: [nightly]
+
+    steps:
+    - name: Checkout the repo
+      uses: actions/checkout@v2
+
+    - name: Cache Rust ${{ matrix.rust-version }}
+      uses: actions/cache@v2
+      with:
+        path: ${{ github.workspace }}\rust\.rustup
+        key: rust-${{ matrix.rust-version }}-${{ hashFiles('**/rust-toolchain') }}
+
+    - name: Setup Rust ${{ matrix.rust-version }}
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: ${{ matrix.rust-version }}
+        override: true
+        components: rustfmt, clippy
+
+    - name: Cache OpenSSL
+      id: cache-openssl
+      uses: actions/cache@v2
+      with:
+        path: |
+          ${{ github.workspace }}\vcpkg\installed\x64-windows-static-md
+        key: ${{ runner.os }}-vcpkg-openssl
+
+    - name: Clone vcpkg and compile OpenSSL
+      if: steps.cache-openssl.outputs.cache-hit != 'true'
+      run: |
+        git clone https://github.com/microsoft/vcpkg.git
+        cd vcpkg
+        [Environment]::SetEnvironmentVariable("VCPKG_DEFAULT_BINARY_CACHE", "${{ github.workspace }}/vcpkg/cache/", "User")
+        .\bootstrap-vcpkg.bat
+        .\vcpkg install openssl:x64-windows-static-md
+
+    - name: Cache Rust Dependencies
+      id: cache-rust-deps
+      uses: actions/cache@v2
+      with:
+        path: |
+          ~\.cargo\bin
+          ~\.cargo\registry\index
+          ~\.cargo\registry\cache
+          ~\.cargo\git\db
+          target\release
+        key: ${{ runner.os }}-rust-deps
+
+    - name: Build Maxima
+      run: |
+        cargo build --release
+      env:
+        VCPKGRS_DYNAMIC: "0"
+        OPENSSL_DIR: ${{ github.workspace }}\vcpkg\installed\x64-windows-static-md
+        OPENSSL_STATIC: "1"
+
+    - uses: actions/upload-artifact@v3
+      with:
+        name: maxima-binaries
+        path: |
+          target/release/maxima-cli.exe
+          target/release/maxima-bootstrap.exe

@@ -1,0 +1,57 @@
+{
+    "errors" : {
+        "view_not_impl" : "View not implemented",
+        "critical_thread_crashed" : "A critical background thread has crashed, and the application cannot continue functioning."
+    },
+    "menubar" : {
+        "games" : "Games",
+        "store" : "Store",
+        "friends" : "Friends",
+        "settings" : "Settings"
+    },
+    "profile_menu" : {
+        "view_profile" : "View Profile",
+        "view_wishlist" : "View Wishlist"
+    },
+    "games_view" : {
+        "toolbar" : {
+            "genre_filter" : "Show",
+            "genre_options" : {
+                "all" : "All Genres",
+                "shooter" : "Shooter",
+                "simulation" : "Simulation"
+            },
+            "platform_filter" : "Platform" ,
+            "platform_options" : {
+                "all" : "All Platforms",
+                "windows" : "Windows",
+                "mac" : "Mac"
+            },
+            "search_bar_hint" : "Search"
+        },
+        "main" : {
+            "play" : "▶ Play",
+            "uninstall" : "⛼ Uninstall",
+            "settings" : "⛭ Settings",
+            "playtime" : "Time Played",
+            "achievements" : "Achievements",
+            "no_loaded_games" : "You don't have any games, or they haven't loaded in yet."
+        }
+    },
+    "friends_view" : {
+        "toolbar" : {
+            "online" : "Online",
+            "all" : "All",
+            "pending" : "Pending",
+            "blocked" : "Blocked",
+            "add_friend" : "Add Friend",
+            "filter_options" : {
+                "name" : "Name",
+                "game" : "Game"
+            },
+            "search_hint" : "Search friends list"
+        },
+        "status_online" : "Online",
+        "status_offline" : "Offline"
+    }
+}

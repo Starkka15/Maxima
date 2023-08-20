@@ -1,0 +1,82 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+extern crate windows_service;
+
+use std::{env::{self, current_exe}, process::Command};
+
+use anyhow::{bail, Result};
+
+use base64::{engine::general_purpose, Engine};
+use maxima::{core::launch::BootstrapLaunchArgs, util::service::{register_service, is_service_valid}};
+use url::Url;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut args: Vec<String> = env::args().collect();
+    let result = run(&args).await;
+
+    if cfg!(debug_assertions) {
+        args.remove(0);
+        println!("Args: {:?}", &args);
+
+        let str_result = result
+            .map_err(|e| e.to_string())
+            .err()
+            .unwrap_or("Success".to_string());
+        println!("Result: {}", str_result);
+
+        // Pause terminal
+        //std::io::Read::read(&mut std::io::stdin(), &mut [0]).unwrap();
+    }
+
+    Ok(())
+}
+
+async fn run(args: &Vec<String>) -> Result<()> {
+    let len = args.len();
+    if len == 2 {
+        let arg = &args[1];
+        if arg.starts_with("link2ea") {
+            // TODO
+            bail!("link2ea not yet implemented!");
+        } else if arg.starts_with("origin2") {
+            let url = Url::parse(arg)?;
+            let query = querystring::querify(url.query().unwrap());
+            let offer_id = query.iter().find(|(x, _)| *x == "offerIds").unwrap().1;
+            let cmd_params = query.iter().find(|(x, _)| *x == "cmdParams").unwrap().1;
+            
+            let mut child = Command::new(current_exe()?.with_file_name("maxima-cli.exe"));
+            child.env("MAXIMA_LAUNCH_ARGS", urlencoding::decode(cmd_params)?.into_owned().replace("\\\"", "\""));
+            println!("{}", urlencoding::decode(cmd_params)?.into_owned().replace("\\\"", "\""));
+            child.env("KYBER_INTERFACE_PORT", "3005");
+            child.args(["--mode", "launch", "--offer-id", "Origin.OFR.50.0002148"]);
+            child.spawn()?.wait()?;
+        } else {
+            let query = arg.split("login_successful.html#").collect::<Vec<&str>>()[1];
+            reqwest::get(format!("http://127.0.0.1:31033/auth?{}", query)).await?;
+        }
+        return Ok(());
+    }
+    
+    if len > 2 {
+        let command = &args[1];
+        match command.as_str() {
+            "launch" => {
+                let decoded = general_purpose::STANDARD.decode(&args[2])?;
+                let launch_args: BootstrapLaunchArgs = serde_json::from_slice(&decoded)?;
+                let mut child = Command::new(launch_args.path);
+                child.args(launch_args.args);
+                let status = child.spawn()?.wait()?;
+                bail!("{}", status.code().unwrap());
+            }
+            _ => (),
+        }
+        return Ok(());
+    }
+    
+    if !is_service_valid()? {
+        register_service()?;
+    }
+
+    Ok(())
+}

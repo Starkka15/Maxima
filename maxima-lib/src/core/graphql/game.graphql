@@ -1,0 +1,177 @@
+fragment ImageFields on Image {
+  height
+  width
+  path
+}
+
+import image_fields
+
+fragment ImageRenditionFields on ImageRendition {
+  path
+  title
+  aspect1x1Image {
+    ...ImageFields
+  }
+  aspect2x1Image {
+    ...ImageFields
+  }
+  aspect3x1Image {
+    ...ImageFields
+  }
+  aspect4x1Image {
+    ...ImageFields
+  }
+  aspect4x3Image {
+    ...ImageFields
+  }
+  aspect5x3Image {
+    ...ImageFields
+  }
+  aspect5x7Image {
+    ...ImageFields
+  }
+  aspect6x5Image {
+    ...ImageFields
+  }
+  aspect7x1Image {
+    ...ImageFields
+  }
+  aspect7x2Image {
+    ...ImageFields
+  }
+  aspect7x5Image {
+    ...ImageFields
+  }
+  aspect8x3Image {
+    ...ImageFields
+  }
+  aspect9x4Image {
+    ...ImageFields
+  }
+  aspect9x10Image {
+    ...ImageFields
+  }
+  aspect9x16Image {
+    ...ImageFields
+  }
+  aspect10x3Image {
+    ...ImageFields
+  }
+  aspect16x9Image {
+    ...ImageFields
+  }
+  largestImage {
+    ...ImageFields
+  }
+  rawImages {
+    ...ImageFields
+  }
+}
+
+fragment GameFields on Game {
+  id
+  slug
+  baseGameSlug
+  gameType
+  title
+  keyArt {
+    ...ImageRenditionFields
+  }
+  packArt {
+    ...ImageRenditionFields
+  }
+  primaryLogo {
+    ...ImageRenditionFields
+  }
+  contextImage {
+    ...ImageRenditionFields
+  }
+  backgroundImage {
+    ...ImageRenditionFields
+  }
+}
+
+fragment UserFields on User {
+  pd
+}
+
+query getGames($slugs: [String!]) {
+  games(slugs: $slugs) {
+    totalCount
+    items {
+      ...GameFields
+    }
+  }
+}
+
+query getPreloadedOwnedGames(
+  $next: String
+  $locale: Locale
+  $limit: Int
+  $type: [GameProductType!]!
+  $entitlementEnabled: Boolean
+  $isMac: Boolean = false
+  $storefronts: [UserGameProductStorefront!]
+  $platforms: [GamePlatform!]!
+) {
+  me {
+    id: pd
+    ownedGameProducts(
+      storefronts: $storefronts
+      locale: $locale
+      paging: { limit: $limit, next: $next }
+      productFound: true
+      orderBy: { field: NAME, direction: ASC }
+      ownershipMethod: [
+        UNKNOWN
+        ASSOCIATION
+        PURCHASE
+        REDEMPTION
+        GIFT_RECEIPT
+        ENTITLEMENT_GRANT
+        DIRECT_ENTITLEMENT
+        PRE_ORDER_PURCHASE
+        VAULT
+        XGP_VAULT
+        STEAM
+        STEAM_VAULT
+        STEAM_SUBSCRIPTION
+        EPIC
+      ]
+      type: $type
+      downloadableOnly: false
+      entitlementEnabled: $entitlementEnabled
+      platforms: $platforms
+    ) {
+      next
+      totalCount
+      items {
+        ...userGameProductFragment
+      }
+    }
+  }
+}
+
+query CarouselGames(
+  $limit: Int!
+  $offset: Int!
+  $orderBy: [GamesOrderByInput!]! = []
+  $slugs: [String!]!
+  $genreFilter: GenreFilterInput
+  $locale: Locale!
+) {
+  games(
+    locale: $locale
+    paging: { offset: $offset, limit: $limit }
+    orderBy: $orderBy
+    slugs: $slugs
+    genreFilter: $genreFilter
+    platforms: []
+  ) @connection(key: "${e}") {
+    hasNextPage
+    totalCount
+    items {
+      ...GameItemsFragment
+    }
+  }
+}
