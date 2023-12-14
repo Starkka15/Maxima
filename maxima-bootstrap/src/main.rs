@@ -52,7 +52,7 @@ fn service_setup() -> Result<()> {
 
     register_service()?;
 
-    Ok()
+    Ok(())
 }
 
 #[cfg(not(windows))]
