@@ -61,6 +61,7 @@ jobs:
 
     - name: Save OpenSSL Cache
       id: cache-openssl-save
+      if: matrix.os == 'windows-latest'
       uses: actions/cache/save@v3
       with:
         path: |
