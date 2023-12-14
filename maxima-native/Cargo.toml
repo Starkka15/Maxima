@@ -57,6 +57,6 @@ widestring = "1.0.2"
 dll-syringe = "0.15.2"
 
 [lib]
-name = "maxima"
+name = "maxima-native"
 path = "src/lib.rs"
 crate-type = ["cdylib", "lib"]

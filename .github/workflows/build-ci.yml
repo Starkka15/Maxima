@@ -98,7 +98,7 @@ jobs:
 
     - uses: actions/upload-artifact@v3
       with:
-        name: maxima-binaries
+        name: ${{ runner.os}}-maxima-binaries
         path: |
           target/release/maxima-cli
           target/release/maxima-bootstrap
