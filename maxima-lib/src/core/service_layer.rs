@@ -169,7 +169,7 @@ where
 macro_rules! service_layer_type {
     ($name:ident, { $($field:tt)* }) => {
         paste::paste! {
-            #[derive(Debug, Serialize, Deserialize)]
+            #[derive(Clone, Debug, Serialize, Deserialize)]
             #[serde(rename_all = "camelCase")]
             #[repr(C)]
             pub struct [<Service $name>] {
@@ -182,7 +182,7 @@ macro_rules! service_layer_type {
 macro_rules! service_layer_enum {
     ($name:ident, { $($field:tt)* }) => {
         paste::paste! {
-            #[derive(Debug, Serialize, Deserialize, PartialEq)]
+            #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
             #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
             #[repr(C)]
             pub enum [<Service $name>] {

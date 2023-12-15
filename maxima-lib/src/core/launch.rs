@@ -34,13 +34,15 @@ pub struct LibraryInjection {
 pub struct ActiveGameContext {
     pub offer: CommerceOffer,
     pub injections: Vec<LibraryInjection>,
+    pub process: Child,
 }
 
 impl ActiveGameContext {
-    pub fn new(offer: CommerceOffer) -> Self {
+    pub fn new(offer: CommerceOffer, process: Child) -> Self {
         Self {
             offer,
             injections: Vec::new(),
+            process
         }
     }
 }
@@ -56,7 +58,7 @@ pub async fn start_game(
     game_path_override: Option<String>,
     mut game_args: Vec<String>,
     maxima_arc: Arc<Mutex<Maxima>>,
-) -> Result<Child> {
+) -> Result<()> {
     linux_setup().await?;
 
     let mut maxima = maxima_arc.lock().await;
@@ -71,8 +73,6 @@ pub async fn start_game(
         .as_ref()
         .unwrap()
         .to_owned();
-
-    maxima.playing = Some(ActiveGameContext::new(offer.clone()));
 
     info!(
         "Requesting pre-game license for {}...",
@@ -94,7 +94,7 @@ pub async fn start_game(
     let path = if game_path_override.is_some() {
         PathBuf::from(game_path_override.as_ref().unwrap())
     } else {
-        let software = offer.publishing.software_list.unwrap().software[0]
+        let software = offer.publishing.software_list.as_ref().unwrap().software[0]
             .fulfillment_attributes
             .installation_directory
             .as_ref()
@@ -136,13 +136,13 @@ pub async fn start_game(
         .env("EAExternalSource", "EA")
         .env("EAFreeTrialGame", "false")
         .env("EAGameLocale", maxima.locale.full_str())
-        //.env("EAGenericAuthToken", maxima.access_token.to_owned())
+        .env("EAGenericAuthToken", maxima.access_token.to_owned())
         .env("EALaunchCode", "4AULYZZ2KJSN2RMHEVUH")
         .env("EALaunchEAID", user.player.unwrap().display_name)
         .env("EALaunchEnv", "production")
         //.env("EALaunchOOAUserEmail", "")
         //.env("EALaunchOOAUserPass", "")
-        .env("EAOnErrorExitRetCode", "true")
+        //.env("EAOnErrorExitRetCode", "true")
         .env("EALaunchOfflineMode", "false")
         .env("EALaunchUserAuthToken", maxima.access_token.to_owned())
         .env("EALicenseToken", offer_id.to_owned())
@@ -155,10 +155,12 @@ pub async fn start_game(
         .env("OriginSessionKey", "5a81a155-7bf8-444c-a229-c22133447d88")
         .env("ContentId", content_id.to_owned());
 
+    let child = child.spawn().expect("Failed to start child");
+
+    maxima.playing = Some(ActiveGameContext::new(offer.clone(), child));
     drop(maxima);
 
-    let child = child.spawn().expect("Failed to start child");
-    Ok(child)
+    Ok(())
 }
 
 #[cfg(unix)]

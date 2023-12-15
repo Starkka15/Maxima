@@ -15,12 +15,13 @@ use std::{
     env,
     fs::{create_dir_all, File},
     path::PathBuf,
-    {io, io::Read}, os::raw::c_char,
+    {io, io::Read}, os::raw::c_char, any::Any, time::Duration,
 };
 
 use anyhow::{bail, Result};
 use directories::ProjectDirs;
 use log::error;
+use moka::sync::Cache;
 use strum_macros::IntoStaticStr;
 
 use std::sync::Arc;
@@ -56,6 +57,7 @@ pub struct Maxima {
     pub access_token: String,
     pub playing: Option<ActiveGameContext>,
     pub lsx_event_callback: Option<MaximaLSXEventCallback>,
+    cached_requests: Cache<String, Arc<dyn Any + Sync + Send>>,
     pending_events: Vec<MaximaEvent>,
 }
 
@@ -67,12 +69,19 @@ impl Maxima {
             3216
         };
 
+        let requests_cache = Cache::builder()
+            .max_capacity(10_000)
+            .time_to_live(Duration::from_secs(30 * 60))
+            .time_to_idle(Duration::from_secs( 5 * 60))
+            .build();
+
         Self {
             locale: Locale::EnUs,
             lsx_port,
             access_token: String::new(),
             playing: None,
             lsx_event_callback: None,
+            cached_requests: requests_cache,
             pending_events: Vec::new(),
         }
     }
@@ -86,11 +95,17 @@ impl Maxima {
             }
         });
 
-        tokio::task::yield_now().await;
+        //tokio::task::yield_now().await;
         Ok(())
     }
 
     pub async fn get_local_user(&self) -> Result<ServiceUser> {
+        let cache_key = "basic_player";
+        let cached = self.request_cache_grab(&cache_key);
+        if cached.is_some() {
+            return Ok(cached.unwrap());
+        }
+
         let user: ServiceUser = send_service_request(
             &self.access_token,
             SERVICE_REQUEST_GETUSERPLAYER,
@@ -98,6 +113,7 @@ impl Maxima {
         )
         .await?;
 
+        self.cache_request(cache_key, &user);
         Ok(user)
     }
 
@@ -136,6 +152,12 @@ impl Maxima {
     }
 
     pub async fn get_player_by_id(&self, id: &str) -> Result<ServicePlayer> {
+        let cache_key = "basic_player_".to_owned() + id;
+        let cached = self.request_cache_grab(&cache_key);
+        if cached.is_some() {
+            return Ok(cached.unwrap());
+        }
+
         let data: ServicePlayer = send_service_request(
             self.access_token.as_str(),
             SERVICE_REQUEST_GETBASICPLAYER,
@@ -147,7 +169,25 @@ impl Maxima {
         self.cache_avatar_image(&id, &data.avatar.medium).await?;
         self.cache_avatar_image(&id, &data.avatar.small).await?;
 
+        self.cache_request(&cache_key, &data);
         Ok(data)
+    }
+
+    fn request_cache_grab<T>(&self, key: &str) -> Option<T>
+        where T: Sync + Send + Clone + 'static
+    {
+        let cached = self.cached_requests.get(key);
+        if cached.is_none() {
+            return None;
+        }
+
+        return Some((*cached.unwrap().downcast::<T>().unwrap()).clone());
+    }
+
+    fn cache_request<T>(&self, key: &str, request: &T)
+        where T: Sync + Send + Clone + 'static
+    {
+        self.cached_requests.insert(key.to_owned(), Arc::new(request.clone()));
     }
 
     async fn cache_avatar_image(&self, id: &str, image: &ServiceImage) -> Result<()> {

@@ -23,10 +23,7 @@ use maxima::{
         auth::{execute_auth_exchange, login::{begin_oauth_login_flow, manual_login}},
         ecommerce::request_offer_data,
         launch,
-        service_layer::{
-            send_service_request, ServiceGetUserPlayerRequest, ServiceUser, ServiceUserGameProduct,
-            SERVICE_REQUEST_GETUSERPLAYER,
-        },
+        service_layer::ServiceUserGameProduct,
         Maxima, MaximaEvent,
     },
     util::{
@@ -152,22 +149,20 @@ async fn startup() -> Result<()> {
         info!("Received login...");
     }
 
-    let user: ServiceUser = send_service_request(
-        token.as_ref().unwrap(),
-        SERVICE_REQUEST_GETUSERPLAYER,
-        ServiceGetUserPlayerRequest {},
-    )
-    .await?;
-
-    info!("Logged in as {}!", user.player.unwrap().display_name);
-
+    info!("Logged in...");
+    
     // Take back the focus since the browser and bootstrap will take it
     take_foreground_focus()?;
 
     let maxima_arc = Arc::new(Mutex::new(Maxima::new()));
+
     {
         let mut maxima = maxima_arc.lock().await;
         maxima.access_token = token.unwrap().to_string();
+
+        let user = maxima.get_local_user().await?;
+    
+        info!("Logged in as {}!", user.player.unwrap().display_name);
     }
 
     match args.mode {
@@ -232,13 +227,7 @@ async fn interactive_start_game(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
 
 async fn print_auth_token(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
     let maxima = maxima_arc.lock().await;
-
-    let user: ServiceUser = send_service_request(
-        &maxima.access_token,
-        SERVICE_REQUEST_GETUSERPLAYER,
-        ServiceGetUserPlayerRequest {},
-    )
-    .await?;
+    let user = maxima.get_local_user().await?;
 
     info!("Access Token: {}", &maxima.access_token);
 
