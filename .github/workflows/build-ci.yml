@@ -103,6 +103,7 @@ jobs:
           target/release/maxima-service.exe
           target/release/maxima-bootstrap.exe
           target/release/maxima-cli.exe
+          target/release/maxima-ui.exe
 
     - uses: actions/upload-artifact@v3
       if: matrix.os == 'ubuntu-latest'

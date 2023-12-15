@@ -19,6 +19,7 @@ use winreg::{
     RegKey,
 };
 
+#[cfg(unix)]
 use std::{collections::HashMap, fs};
 
 use super::native::get_module_path;

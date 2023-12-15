@@ -138,4 +138,5 @@ fn run_service() -> Result<()> {
 
 pub fn start_service() -> Result<()> {
     service_dispatcher::start("MaximaBackgroundService", ffi_service_main)?;
+    Ok(())
 }
