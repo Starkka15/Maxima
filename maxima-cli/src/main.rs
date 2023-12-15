@@ -341,6 +341,7 @@ async fn start_game(
             }
         }
 
+        maxima.update_playing_status();
         if maxima.playing().is_none() {
             break;
         }

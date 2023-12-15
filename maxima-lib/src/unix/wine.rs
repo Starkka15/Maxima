@@ -219,9 +219,9 @@ pub fn setup_wine_registry() -> Result<()> {
     create_dir_all(&dir)?;
     fs::write(dir.join("wine.reg"), REG_FILE)?;
 
-    let output = Command::new(maxima_dir()?.join("wine/bin/wine"))
+    let output = Command::new(maxima_dir()?.join("wine/bin/regedit"))
         .env("WINEPREFIX", wine_prefix_dir()?)
-        .arg("C:/Windows/syswow64/regedit.exe")
+        //.arg("C:/Windows/syswow64/regedit.exe")
         .arg("/S")
         .arg("C:/wine.reg")
         .output()

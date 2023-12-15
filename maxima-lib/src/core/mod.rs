@@ -25,6 +25,7 @@ use anyhow::{bail, Result};
 use derive_getters::Getters;
 use log::error;
 use strum_macros::IntoStaticStr;
+use sysinfo::{System, SystemExt, Pid, PidExt, ProcessExt, ProcessStatus};
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -242,14 +243,31 @@ impl Maxima {
 
     pub(super) fn set_lsx_connections(&mut self, connections: u16) {
         self.lsx_connections = connections;
+    }
 
-        if self.lsx_connections > 0 || self.playing.is_none() {
+    pub fn set_player_started(&mut self) {
+        if self.playing.is_none() {
+            return;
+        }
+
+        self.playing.as_mut().unwrap().set_started();
+    }
+
+    pub fn update_playing_status(&mut self) {
+        if self.lsx_connections > 0 || self.playing.is_none() || !self.playing.as_ref().unwrap().started() {
             return;
         }
 
         let playing = self.playing.as_ref().unwrap();
-        if playing.process().id().is_some() {
-            return;
+        if let Some(pid) = playing.process().id() {
+            let sys = System::new_all();
+            let proc = sys.process(Pid::from_u32(pid));
+
+            if let Some(proc) = proc {
+                if proc.status() == ProcessStatus::Run {
+                    return;
+                }
+            }
         }
 
         self.playing = None;

@@ -14,7 +14,7 @@ use std::io::Read;
 
 use crate::core::endpoints::API_PROXY_NOVAFUSION_LICENSES;
 
-const CRYPTO_KEY: [u8; 16] = [
+pub const OOA_CRYPTO_KEY: [u8; 16] = [
     65, 50, 114, 45, 208, 130, 239, 176, 220, 100, 87, 197, 118, 104, 202, 9,
 ];
 
@@ -62,14 +62,21 @@ pub async fn request_license(
         bail!("License request failed");
     }
 
+    let size = res.header("content-length");
+    if size.is_none() {
+        bail!("Failed to retrieve the license size");
+    }
+
+    let size = size.unwrap().parse::<u64>()?;
+
     let signature = res.header("x-signature").unwrap().to_owned();
     let mut body: Vec<u8> = vec![];
     res.into_reader()
-        .take((4096 + 1) as u64)
+        .take((size + 1) as u64)
         .read_to_end(&mut body)?;
 
     let cipher = Cipher::aes_128_cbc();
-    let decrypted_data = decrypt(cipher, &CRYPTO_KEY, Some(&[0; 16]), body.as_slice())?;
+    let decrypted_data = decrypt(cipher, &OOA_CRYPTO_KEY, Some(&[0; 16]), body.as_slice())?;
     let data = String::from_utf8(decrypted_data)?;
 
     let mut license: License = quick_xml::de::from_str(data.as_str())?;
@@ -80,10 +87,13 @@ pub async fn request_license(
 pub fn save_license(license: &License, path: String) -> Result<()> {
     let mut data = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>".to_string();
     data.push_str(quick_xml::se::to_string(license)?.as_str());
-    data.remove_matches("<GameToken/>");
+
+    if !data.contains("<GameToken>") {
+        data.remove_matches("<GameToken/>");
+    }
 
     let cipher = Cipher::aes_128_cbc();
-    let encrypted_data = encrypt(cipher, &CRYPTO_KEY, Some(&[0; 16]), data.as_bytes())?;
+    let encrypted_data = encrypt(cipher, &OOA_CRYPTO_KEY, Some(&[0; 16]), data.as_bytes())?;
 
     let decoded = general_purpose::STANDARD.decode(&license.signature)?;
     let len = decoded.len();

@@ -37,6 +37,7 @@ pub struct ActiveGameContext {
     offer: CommerceOffer,
     injections: Vec<LibraryInjection>,
     process: Child,
+    started: bool,
 }
 
 impl ActiveGameContext {
@@ -44,8 +45,13 @@ impl ActiveGameContext {
         Self {
             offer,
             injections: Vec::new(),
-            process
+            process,
+            started: false,
         }
+    }
+
+    pub fn set_started(&mut self) {
+        self.started = true;
     }
 }
 
@@ -140,7 +146,10 @@ pub async fn start_game(
         .env("EAGameLocale", maxima.locale.full_str())
         .env("EAGenericAuthToken", maxima.access_token.to_owned())
         .env("EALaunchCode", "4AULYZZ2KJSN2RMHEVUH")
-        .env("EALaunchEAID", user.player().as_ref().unwrap().display_name())
+        .env(
+            "EALaunchEAID",
+            user.player().as_ref().unwrap().display_name(),
+        )
         .env("EALaunchEnv", "production")
         //.env("EALaunchOOAUserEmail", "")
         //.env("EALaunchOOAUserPass", "")
@@ -167,8 +176,11 @@ pub async fn start_game(
 
 #[cfg(unix)]
 pub async fn linux_setup() -> Result<()> {
-    use crate::unix::wine::{check_dxvk_validity, wine_install_dxvk, install_wine, wine_install_vkd3d, check_wine_validity, check_vkd3d_validity, setup_wine_registry};
-    
+    use crate::unix::wine::{
+        check_dxvk_validity, check_vkd3d_validity, check_wine_validity, install_wine,
+        setup_wine_registry, wine_install_dxvk, wine_install_vkd3d,
+    };
+
     if !check_wine_validity()? {
         install_wine().await?;
     }

@@ -49,6 +49,8 @@ pub async fn start_server(port: u16, maxima: Arc<Mutex<Maxima>>) -> Result<()> {
         conn.send_challenge().unwrap();
         connections.push(conn);
 
-        maxima.lock().await.set_lsx_connections(connections.len() as u16);
+        let mut maxima = maxima.lock().await;
+        maxima.set_lsx_connections(connections.len() as u16);
+        maxima.set_player_started();
     }
 }
