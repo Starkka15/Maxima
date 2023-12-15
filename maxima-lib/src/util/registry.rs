@@ -22,7 +22,7 @@ use winreg::{
 #[cfg(unix)]
 use std::{collections::HashMap, fs};
 
-use super::native::get_module_path;
+use super::native::module_path;
 
 #[cfg(target_pointer_width = "64")]
 pub const REG_ARCH_PATH: &str = "SOFTWARE\\WOW6432Node";
@@ -37,7 +37,7 @@ pub fn check_registry_validity() -> Result<()> {
     let origin = hklm.open_subkey(format!("{}\\Origin", REG_ARCH_PATH))?;
 
     let path: String = origin.get_value("ClientPath")?;
-    let valid = path == get_bootstrap_path()?.to_str().unwrap();
+    let valid = path == bootstrap_path()?.to_str().unwrap();
     if !valid {
         bail!("Invalid stored client path");
     }
@@ -76,7 +76,7 @@ pub fn read_game_path(name: &str) -> Result<PathBuf> {
 
 #[cfg(windows)]
 pub fn get_bootstrap_path() -> Result<PathBuf> {
-    let path = get_module_path()?
+    let path = module_path()?
         .parent()
         .unwrap()
         .join("maxima-bootstrap.exe");
@@ -86,7 +86,7 @@ pub fn get_bootstrap_path() -> Result<PathBuf> {
 
 #[cfg(windows)]
 pub fn launch_bootstrap() -> Result<()> {
-    let path = get_bootstrap_path()?;
+    let path = bootstrap_path()?;
 
     let verb = "runas";
     let file = path.to_str().unwrap();
@@ -123,7 +123,7 @@ pub fn set_up_registry() -> Result<()> {
     let (origin, _) =
         hklm.create_subkey_with_flags(format!("{}\\Origin", REG_ARCH_PATH), KEY_WRITE)?;
 
-    let bootstrap_path = &get_bootstrap_path()?.to_str().unwrap().to_string();
+    let bootstrap_path = &bootstrap_path()?.to_str().unwrap().to_string();
     origin.set_value("ClientPath", bootstrap_path)?;
 
     let (eax_32, _) = hklm.create_subkey_with_flags(REG_EAX32_PATH, KEY_WRITE)?;
@@ -169,7 +169,7 @@ fn register_custom_protocol(protocol: &str, name: &str, executable: &str) -> Res
 
 #[cfg(unix)]
 pub fn set_up_registry() -> Result<()> {
-    let bootstrap_path = &get_bootstrap_path()?.to_str().unwrap().to_string();
+    let bootstrap_path = &bootstrap_path()?.to_str().unwrap().to_string();
 
     // Hijack Qt's protocol for our login redirection
     register_custom_protocol(
@@ -272,8 +272,8 @@ pub fn read_game_path(name: &str) -> Result<PathBuf> {
 }
 
 #[cfg(unix)]
-pub fn get_bootstrap_path() -> Result<PathBuf> {
-    let path = get_module_path()?
+pub fn bootstrap_path() -> Result<PathBuf> {
+    let path = module_path()?
         .parent()
         .unwrap()
         .join("maxima-bootstrap");

@@ -8,28 +8,31 @@ use serde_json::Value;
 use sha2_const::Sha256;
 use ureq::OrAnyStatus;
 
+use derive_getters::Getters;
+use derive_builder::Builder;
+
 use super::{endpoints::API_SERVICE_AGGREGATION_LAYER, locale::Locale};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedQuery {
-    pub version: u8,
-    pub sha256_hash: String,
+    version: u8,
+    sha256_hash: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceExtensions {
-    pub persisted_query: PersistedQuery,
+    persisted_query: PersistedQuery,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FullServiceRequest<'a, T: Serialize> {
-    pub extensions: ServiceExtensions,
-    pub variables: T,
-    pub operation_name: &'a str,
-    pub query: &'static str,
+struct FullServiceRequest<'a, T: Serialize> {
+    extensions: ServiceExtensions,
+    variables: T,
+    operation_name: &'a str,
+    query: &'static str,
 }
 
 pub struct GraphQLRequest {
@@ -57,6 +60,7 @@ macro_rules! define_graphql_request {
 }
 
 define_graphql_request!(availableBuilds);
+define_graphql_request!(downloadUrl);
 define_graphql_request!(GameImages);
 define_graphql_request!(GetBasicPlayer);
 define_graphql_request!(getPreloadedOwnedGames);
@@ -170,7 +174,7 @@ where
 macro_rules! service_layer_type {
     ($name:ident, { $($field:tt)* }) => {
         paste::paste! {
-            #[derive(Clone, Debug, Serialize, Deserialize)]
+            #[derive(Clone, Debug, Serialize, Deserialize, Getters, Builder)]
             #[serde(rename_all = "camelCase")]
             #[repr(C)]
             pub struct [<Service $name>] {
@@ -196,14 +200,14 @@ macro_rules! service_layer_enum {
 // Requests
 
 service_layer_type!(GetBasicPlayerRequest, {
-    pub pd: String,
+    pd: String,
 });
 
 service_layer_type!(GameImagesRequest, {
-    pub should_fetch_context_image: bool,
-    pub should_fetch_backdrop_images: bool,
-    pub game_slug: String,
-    pub locale: String,
+    should_fetch_context_image: bool,
+    should_fetch_backdrop_images: bool,
+    game_slug: String,
+    locale: String,
 });
 
 service_layer_enum!(GameType, { DigitalFullGame, BaseGame, PrereleaseGame });
@@ -217,15 +221,15 @@ service_layer_enum!(Storefront, {
 service_layer_enum!(Platform, { Pc });
 
 service_layer_type!(GetPreloadedOwnedGamesRequest, {
-    pub is_mac: bool,
-    pub locale: Locale,
-    pub limit: u32,
-    pub next: String,
-    pub r#type: ServiceGameType,
+    is_mac: bool,
+    locale: Locale,
+    limit: u32,
+    next: String,
+    r#type: ServiceGameType,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub entitlement_enabled: Option<bool>,
-    pub storefronts: Vec<ServiceStorefront>,
-    pub platforms: Vec<ServicePlatform>,
+    entitlement_enabled: Option<bool>,
+    storefronts: Vec<ServiceStorefront>,
+    platforms: Vec<ServicePlatform>,
 });
 
 service_layer_type!(GetUserPlayerRequest, {
@@ -236,55 +240,55 @@ service_layer_type!(GetUserPlayerRequest, {
 // Responses
 
 service_layer_type!(Image, {
-    pub height: Option<u16>,
-    pub width: Option<u16>,
-    pub path: String,
+    height: Option<u16>,
+    width: Option<u16>,
+    path: String,
 });
 
 service_layer_type!(AvatarList, {
-    pub large: ServiceImage,
-    pub medium: ServiceImage,
-    pub small: ServiceImage,
+    large: ServiceImage,
+    medium: ServiceImage,
+    small: ServiceImage,
 });
 
 service_layer_type!(Player, {
-    pub id: String,
-    pub pd: String,
-    pub psd: String,
-    pub display_name: String,
-    pub unique_name: String,
-    pub nickname: String,
-    pub avatar: ServiceAvatarList,
-    pub relationship: String,
+    id: String,
+    pd: String,
+    psd: String,
+    display_name: String,
+    unique_name: String,
+    nickname: String,
+    avatar: ServiceAvatarList,
+    relationship: String,
 });
 
 service_layer_type!(ImageRendition, {
-    pub path: Option<String>,
-    pub title: Option<String>,
-    pub aspect_1x1_image: Option<ServiceImage>,
-    pub aspect_2x1_image: Option<ServiceImage>,
-    pub aspect_10x3_image: Option<ServiceImage>,
-    pub aspect_8x3_image: Option<ServiceImage>,
-    pub aspect_7x1_image: Option<ServiceImage>,
-    pub aspect_7x2_image: Option<ServiceImage>,
-    pub aspect_7x5_image: Option<ServiceImage>,
-    pub aspect_5x3_image: Option<ServiceImage>,
-    pub aspect_9x16_image: Option<ServiceImage>,
-    pub aspect_16x9_image: Option<ServiceImage>,
-    pub largest_image: Option<ServiceImage>,
-    pub raw_images: Option<Vec<ServiceImage>>,
+    path: Option<String>,
+    title: Option<String>,
+    aspect_1x1_image: Option<ServiceImage>,
+    aspect_2x1_image: Option<ServiceImage>,
+    aspect_10x3_image: Option<ServiceImage>,
+    aspect_8x3_image: Option<ServiceImage>,
+    aspect_7x1_image: Option<ServiceImage>,
+    aspect_7x2_image: Option<ServiceImage>,
+    aspect_7x5_image: Option<ServiceImage>,
+    aspect_5x3_image: Option<ServiceImage>,
+    aspect_9x16_image: Option<ServiceImage>,
+    aspect_16x9_image: Option<ServiceImage>,
+    largest_image: Option<ServiceImage>,
+    raw_images: Option<Vec<ServiceImage>>,
 });
 
 service_layer_type!(Game, {
-    pub id: String,
-    pub slug: Option<String>,
-    pub base_game_slug: Option<String>,
-    pub game_type: Option<ServiceGameType>,
-    pub title: Option<String>,
-    pub key_art: Option<ServiceImageRendition>,
-    pub pack_art: Option<ServiceImageRendition>,
-    pub primary_logo: Option<ServiceImageRendition>,
-    pub context_image: Option<Vec<ServiceImageRendition>>,
+    id: String,
+    slug: Option<String>,
+    base_game_slug: Option<String>,
+    game_type: Option<ServiceGameType>,
+    title: Option<String>,
+    key_art: Option<ServiceImageRendition>,
+    pack_art: Option<ServiceImageRendition>,
+    primary_logo: Option<ServiceImageRendition>,
+    context_image: Option<Vec<ServiceImageRendition>>,
 });
 
 // Game Product
@@ -312,19 +316,19 @@ service_layer_enum!(OwnershipStatus, {
 });
 
 service_layer_type!(GameProductUserTrial, {
-    pub trial_time_remaining_seconds: u32,
+    trial_time_remaining_seconds: u32,
 });
 
 service_layer_type!(GameProductUser, {
-    pub ownership_methods: Vec<ServiceOwnershipMethod>,
-    pub initial_entitlement_date: String,
-    pub entitlement_id: Option<String>,
-    pub game_product_user_trial: Option<ServiceGameProductUserTrial>,
-    pub status: ServiceOwnershipStatus,
+    ownership_methods: Vec<ServiceOwnershipMethod>,
+    initial_entitlement_date: String,
+    entitlement_id: Option<String>,
+    game_product_user_trial: Option<ServiceGameProductUserTrial>,
+    status: ServiceOwnershipStatus,
 });
 
 service_layer_type!(PurchaseStatus, {
-    pub repurchasable: bool,
+    repurchasable: bool,
 });
 
 service_layer_enum!(TrialType, {
@@ -333,58 +337,96 @@ service_layer_enum!(TrialType, {
 });
 
 service_layer_type!(TrialDetails, {
-    pub trial_type: ServiceTrialType,
+    trial_type: ServiceTrialType,
 });
 
 service_layer_type!(GameProduct, {
-    pub id: String,
-    pub name: String,
-    pub downloadable: bool,
-    pub game_slug: String,
-    pub trial_details: Option<ServiceTrialDetails>,
-    pub base_item: ServiceGame,
-    pub game_product_user: ServiceGameProductUser,
-    pub purchase_status: ServicePurchaseStatus,
+    id: String,
+    #[getter(skip)]
+    name: String,
+    downloadable: bool,
+    game_slug: String,
+    trial_details: Option<ServiceTrialDetails>,
+    base_item: ServiceGame,
+    game_product_user: ServiceGameProductUser,
+    purchase_status: ServicePurchaseStatus,
 });
 
 impl ServiceGameProduct {
-    pub fn get_name(&self) -> String {
+    pub fn name(&self) -> String {
         self.name.replace("\n", "")
     }
 }
 
 service_layer_type!(UserGameProduct, {
-    pub id: String,
-    pub origin_offer_id: String,
-    pub status: ServiceOwnershipStatus,
-    pub product: ServiceGameProduct,
+    id: String,
+    origin_offer_id: String,
+    status: ServiceOwnershipStatus,
+    product: ServiceGameProduct,
 });
 
 service_layer_type!(UserGameProductCursorPage, {
-    pub next: Option<String>, // Unknown
-    pub total_count: u32,
-    pub items: Vec<ServiceUserGameProduct>,
+    next: Option<String>, // Unknown
+    total_count: u32,
+    items: Vec<ServiceUserGameProduct>,
 });
 
 service_layer_type!(User, {
-    pub id: String,
-    pub pd: Option<String>, // Persona ID
-    pub player: Option<ServicePlayer>,
-    pub owned_game_products: Option<ServiceUserGameProductCursorPage>,
+    id: String,
+    pd: Option<String>, // Persona ID
+    player: Option<ServicePlayer>,
+    owned_game_products: Option<ServiceUserGameProductCursorPage>,
 });
 
 service_layer_enum!(DownloadType, {
     Staged,
-    Live
+    Live,
+    None,
 });
+
+impl ServiceDownloadType {
+    pub fn to_string(&self) -> String {
+        match self {
+            ServiceDownloadType::Staged => "Staged".to_owned(),
+            ServiceDownloadType::Live => "Live".to_owned(),
+            ServiceDownloadType::None => "None".to_owned(),
+        }
+    }
+}
 
 service_layer_type!(AvailableBuild, {
-    pub buildId: String,
-    pub downloadType: Option<ServiceDownloadType>,
-    pub gameVersion: String,
-    pub buildLiveDate: Option<String>,
+    build_id: String,
+    download_type: Option<ServiceDownloadType>,
+    game_version: String,
+    build_live_date: Option<String>,
 });
 
-service_layer_type!(AvailableBuilds, {
-    pub availableBuilds: Vec<ServiceAvailableBuild>,
+impl ServiceAvailableBuild {
+    pub fn to_string(&self) -> String {
+        let mut str = self.game_version.to_owned();
+
+        if self.download_type.is_some() {
+            str += &("/".to_owned() + &self.download_type.as_ref().unwrap().to_string());
+        }
+
+        if self.build_live_date.is_some() {
+            str += &(" - ".to_owned() + &self.build_live_date.as_ref().unwrap());
+        }
+
+        str
+    }
+}
+
+service_layer_type!(AvailableBuildsRequest, {
+    offer_id: String,
+});
+
+service_layer_type!(DownloadUrlRequest, {
+    offer_id: String,
+    build_id: String,
+});
+
+service_layer_type!(DownloadUrl, {
+    url: String,
+    sync_url: String,
 });

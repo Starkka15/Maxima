@@ -109,7 +109,7 @@ pub fn get_module_path() -> Result<PathBuf> {
 }
 
 #[cfg(unix)]
-pub fn get_module_path() -> Result<PathBuf> {
+pub fn module_path() -> Result<PathBuf> {
     let path = fs::read_link("/proc/self/exe");
     if path.is_err() {
         bail!("Invalid module path!");
@@ -119,7 +119,7 @@ pub fn get_module_path() -> Result<PathBuf> {
 }
 
 #[cfg(not(unix))]
-pub fn get_maxima_dir() -> Result<PathBuf> {
+pub fn maxima_dir() -> Result<PathBuf> {
     use directories::ProjectDirs;
 
     let dirs = ProjectDirs::from("com", "Maxima", "Maxima");
@@ -127,7 +127,7 @@ pub fn get_maxima_dir() -> Result<PathBuf> {
 }
 
 #[cfg(unix)]
-pub fn get_maxima_dir() -> Result<PathBuf> {
+pub fn maxima_dir() -> Result<PathBuf> {
     use std::{env, fs::create_dir_all};
 
     let home = env::var("HOME")?;

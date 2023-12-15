@@ -71,12 +71,12 @@ fn platform_launch(args: BootstrapLaunchArgs) -> Result<()> {
 
 #[cfg(unix)]
 fn platform_launch(args: BootstrapLaunchArgs) -> Result<()> {
-    use maxima::{unix::wine::get_wine_prefix_dir, util::native::get_maxima_dir};
+    use maxima::{unix::wine::wine_prefix_dir, util::native::maxima_dir};
 
-    let wine_path = get_maxima_dir()?.join("wine/bin/wine64");
+    let wine_path = maxima_dir()?.join("wine/bin/wine64");
     let mut binding = Command::new(wine_path);
     let child = binding
-        .env("WINEPREFIX", get_wine_prefix_dir()?)
+        .env("WINEPREFIX", wine_prefix_dir()?)
         .env("WINEDLLOVERRIDES", "dxgi,d3d11,d3d12,d3d12core=n,b")
         .arg(args.path)
         .args(args.args);

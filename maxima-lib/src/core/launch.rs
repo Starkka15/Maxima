@@ -12,7 +12,7 @@ use crate::{
     core::ecommerce::request_offer_data,
     ooa::{request_license, save_licenses},
     util::{
-        registry::{get_bootstrap_path, read_game_path},
+        registry::{bootstrap_path, read_game_path},
         simple_crypto,
     },
 };
@@ -114,7 +114,7 @@ pub async fn start_game(
         game_args.append(&mut parse_arguments(args.as_str()));
     }
 
-    let mut child = Command::new(get_bootstrap_path()?);
+    let mut child = Command::new(bootstrap_path()?);
     child.arg("launch");
 
     let bootstrap_args = BootstrapLaunchArgs {
@@ -125,7 +125,7 @@ pub async fn start_game(
     let b64 = general_purpose::STANDARD.encode(serde_json::to_string(&bootstrap_args).unwrap());
     child.arg(b64);
 
-    let user = maxima.get_local_user().await?;
+    let user = maxima.local_user().await?;
 
     child
         .current_dir(PathBuf::from(path).parent().unwrap())
@@ -138,7 +138,7 @@ pub async fn start_game(
         .env("EAGameLocale", maxima.locale.full_str())
         .env("EAGenericAuthToken", maxima.access_token.to_owned())
         .env("EALaunchCode", "4AULYZZ2KJSN2RMHEVUH")
-        .env("EALaunchEAID", user.player.unwrap().display_name)
+        .env("EALaunchEAID", user.player().as_ref().unwrap().display_name())
         .env("EALaunchEnv", "production")
         //.env("EALaunchOOAUserEmail", "")
         //.env("EALaunchOOAUserPass", "")
@@ -149,7 +149,7 @@ pub async fn start_game(
         .env("EALsxPort", maxima.lsx_port.to_string())
         .env(
             "EARtPLaunchCode",
-            simple_crypto::get_rtp_handshake().to_string(),
+            simple_crypto::rtp_handshake().to_string(),
         )
         .env("EASteamProxyIpcPort", "0")
         .env("OriginSessionKey", "5a81a155-7bf8-444c-a229-c22133447d88")

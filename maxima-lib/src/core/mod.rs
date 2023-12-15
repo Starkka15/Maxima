@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod cache;
 pub mod ecommerce;
 pub mod endpoints;
 pub mod launch;
@@ -12,14 +13,17 @@ pub mod background_service {
 }
 
 use std::{
+    any::Any,
     env,
     fs::{create_dir_all, File},
+    os::raw::c_char,
     path::PathBuf,
-    {io, io::Read}, os::raw::c_char, any::Any, time::Duration,
+    time::Duration,
+    {io, io::Read},
 };
 
 use anyhow::{bail, Result};
-use directories::ProjectDirs;
+use derive_getters::Getters;
 use log::error;
 use moka::sync::Cache;
 use strum_macros::IntoStaticStr;
@@ -27,17 +31,22 @@ use strum_macros::IntoStaticStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::{lsx::{self, types::LSXRequestType}, util::native::get_maxima_dir};
+use crate::{
+    lsx::{self, types::LSXRequestType},
+    util::native::maxima_dir,
+};
 
 use self::{
+    cache::DynamicCache,
     launch::ActiveGameContext,
     locale::Locale,
     service_layer::{
-        send_service_request, ServiceGameType, ServiceGetPreloadedOwnedGamesRequest,
-        ServiceGetUserPlayerRequest, ServiceImage, ServicePlatform, ServicePlayer,
-        ServiceGetBasicPlayerRequest, ServiceStorefront, ServiceUser,
-        SERVICE_REQUEST_GETPRELOADEDOWNEDGAMES, SERVICE_REQUEST_GETUSERPLAYER,
-        SERVICE_REQUEST_GETBASICPLAYER,
+        send_service_request, ServiceGameType, ServiceGetBasicPlayerRequest,
+        ServiceGetBasicPlayerRequestBuilder, ServiceGetPreloadedOwnedGamesRequest,
+        ServiceGetPreloadedOwnedGamesRequestBuilder, ServiceGetUserPlayerRequest, ServiceImage,
+        ServicePlatform, ServicePlayer, ServiceStorefront, ServiceUser,
+        SERVICE_REQUEST_GETBASICPLAYER, SERVICE_REQUEST_GETPRELOADEDOWNEDGAMES,
+        SERVICE_REQUEST_GETUSERPLAYER,
     },
 };
 
@@ -51,39 +60,45 @@ pub enum MaximaEvent {
 
 pub type MaximaLSXEventCallback = extern "C" fn(*const c_char);
 
+#[derive(Getters)]
 pub struct Maxima {
-    pub locale: Locale,
-    pub lsx_port: u16,
-    pub access_token: String,
-    pub playing: Option<ActiveGameContext>,
-    pub lsx_event_callback: Option<MaximaLSXEventCallback>,
-    cached_requests: Cache<String, Arc<dyn Any + Sync + Send>>,
+    locale: Locale,
+    access_token: String,
+    playing: Option<ActiveGameContext>,
+
+    lsx_port: u16,
+    lsx_event_callback: Option<MaximaLSXEventCallback>,
+
+    #[getter(skip)]
+    request_cache: DynamicCache<String>,
+
+    #[getter(skip)]
     pending_events: Vec<MaximaEvent>,
 }
 
 impl Maxima {
-    pub fn new() -> Self {
+    pub fn new() -> Arc<Mutex<Self>> {
         let lsx_port = if let Ok(lsx_port) = env::var("MAXIMA_LSX_PORT") {
             lsx_port.parse::<u16>().unwrap()
         } else {
             3216
         };
 
-        let requests_cache = Cache::builder()
-            .max_capacity(10_000)
-            .time_to_live(Duration::from_secs(30 * 60))
-            .time_to_idle(Duration::from_secs( 5 * 60))
-            .build();
+        let request_cache = DynamicCache::new(
+            10_000,
+            Duration::from_secs(30 * 60),
+            Duration::from_secs(5 * 60),
+        );
 
-        Self {
+        Arc::new(Mutex::new(Self {
             locale: Locale::EnUs,
-            lsx_port,
             access_token: String::new(),
             playing: None,
+            lsx_port,
             lsx_event_callback: None,
-            cached_requests: requests_cache,
+            request_cache,
             pending_events: Vec::new(),
-        }
+        }))
     }
 
     pub async fn start_lsx(&self, maxima: Arc<Mutex<Maxima>>) -> Result<()> {
@@ -99,11 +114,10 @@ impl Maxima {
         Ok(())
     }
 
-    pub async fn get_local_user(&self) -> Result<ServiceUser> {
+    pub async fn local_user(&self) -> Result<ServiceUser> {
         let cache_key = "user_player";
-        let cached = self.request_cache_grab(&cache_key);
-        if cached.is_some() {
-            return Ok(cached.unwrap());
+        if let Some(cached) = self.request_cache.get(cache_key) {
+            return Ok(cached);
         }
 
         let user: ServiceUser = send_service_request(
@@ -113,7 +127,8 @@ impl Maxima {
         )
         .await?;
 
-        self.cache_request(cache_key, &user);
+        self.request_cache
+            .insert(cache_key.to_owned(), user.clone());
         Ok(user)
     }
 
@@ -127,80 +142,65 @@ impl Maxima {
         events
     }
 
-    pub async fn get_owned_games(&self, page: u32) -> Result<ServiceUser> {
+    pub async fn owned_games(&self, page: u32) -> Result<ServiceUser> {
         let data: ServiceUser = send_service_request(
             self.access_token.as_str(),
             SERVICE_REQUEST_GETPRELOADEDOWNEDGAMES,
-            ServiceGetPreloadedOwnedGamesRequest {
-                is_mac: false,
-                locale: self.locale.to_owned(),
-                limit: 1000,
-                next: ((page - 1) * 100).to_string(),
-                r#type: ServiceGameType::DigitalFullGame,
-                entitlement_enabled: None,
-                storefronts: vec![
+            ServiceGetPreloadedOwnedGamesRequestBuilder::default()
+                .is_mac(false)
+                .locale(self.locale.to_owned())
+                .limit(1000)
+                .next(((page - 1) * 100).to_string())
+                .r#type(ServiceGameType::DigitalFullGame)
+                .entitlement_enabled(None)
+                .storefronts(vec![
                     ServiceStorefront::Ea,
                     ServiceStorefront::Steam,
                     ServiceStorefront::Epic,
-                ],
-                platforms: vec![ServicePlatform::Pc],
-            },
+                ])
+                .platforms(vec![ServicePlatform::Pc])
+                .build()?,
         )
         .await?;
 
         Ok(data)
     }
 
-    pub async fn get_player_by_id(&self, id: &str) -> Result<ServicePlayer> {
+    pub async fn player_by_id(&self, id: &str) -> Result<ServicePlayer> {
         let cache_key = "basic_player_".to_owned() + id;
-        let cached = self.request_cache_grab(&cache_key);
-        if cached.is_some() {
-            return Ok(cached.unwrap());
+        if let Some(cached) = self.request_cache.get(&cache_key) {
+            return Ok(cached);
         }
 
         let data: ServicePlayer = send_service_request(
             self.access_token.as_str(),
             SERVICE_REQUEST_GETBASICPLAYER,
-            ServiceGetBasicPlayerRequest { pd: id.to_string() },
+            ServiceGetBasicPlayerRequestBuilder::default()
+                .pd(id.to_string())
+                .build()?,
         )
         .await?;
 
-        self.cache_avatar_image(&id, &data.avatar.large).await?;
-        self.cache_avatar_image(&id, &data.avatar.medium).await?;
-        self.cache_avatar_image(&id, &data.avatar.small).await?;
+        let avatars = data.avatar();
+        self.cache_avatar_image(&id, avatars.large()).await?;
+        self.cache_avatar_image(&id, avatars.medium()).await?;
+        self.cache_avatar_image(&id, avatars.small()).await?;
 
-        self.cache_request(&cache_key, &data);
+        self.request_cache.insert(cache_key, data.clone());
         Ok(data)
     }
 
-    fn request_cache_grab<T>(&self, key: &str) -> Option<T>
-        where T: Sync + Send + Clone + 'static
-    {
-        let cached = self.cached_requests.get(key);
-        if cached.is_none() {
-            return None;
-        }
-
-        return Some((*cached.unwrap().downcast::<T>().unwrap()).clone());
-    }
-
-    fn cache_request<T>(&self, key: &str, request: &T)
-        where T: Sync + Send + Clone + 'static
-    {
-        self.cached_requests.insert(key.to_owned(), Arc::new(request.clone()));
-    }
-
     async fn cache_avatar_image(&self, id: &str, image: &ServiceImage) -> Result<()> {
-        let path = self.get_cached_avatar_path(
+        let path = self.cached_avatar_path(
             id,
-            image.width.unwrap_or(727),
-            image.height.unwrap_or(727),
+            image.width().unwrap_or(727),
+            image.height().unwrap_or(727),
         )?;
         if path.exists() {
             return Ok(());
         }
 
-        let response = ureq::get(&image.path).call()?;
+        let response = ureq::get(&image.path()).call()?;
         let mut body: Vec<u8> = vec![];
         response
             .into_reader()
@@ -213,10 +213,10 @@ impl Maxima {
         Ok(())
     }
 
-    pub async fn get_avatar_image(&self, id: &str, width: u16, height: u16) -> Result<PathBuf> {
-        let path = self.get_cached_avatar_path(id, width, height)?;
+    pub async fn avatar_image(&self, id: &str, width: u16, height: u16) -> Result<PathBuf> {
+        let path = self.cached_avatar_path(id, width, height)?;
         if !path.exists() {
-            self.get_player_by_id(id).await?;
+            self.player_by_id(id).await?;
         }
 
         if !path.exists() {
@@ -226,10 +226,18 @@ impl Maxima {
         Ok(path)
     }
 
-    pub fn get_cached_avatar_path(&self, id: &str, width: u16, height: u16) -> Result<PathBuf> {
-        let dir = get_maxima_dir()?.join("cache/avatars");
+    pub fn cached_avatar_path(&self, id: &str, width: u16, height: u16) -> Result<PathBuf> {
+        let dir = maxima_dir()?.join("cache/avatars");
         create_dir_all(&dir)?;
 
         Ok(dir.join(format!("{}_{}x{}.jpg", id, width, height)))
+    }
+
+    pub fn set_access_token(&mut self, token: String) {
+        self.access_token = token;
+    }
+
+    pub fn set_lsx_port(&mut self, port: u16) {
+        self.lsx_port = port;
     }
 }

@@ -12,9 +12,9 @@ pub async fn handle_show_igo_window_request(
 ) -> Result<Option<LSXResponseType>> {
     info!("Got request to show user {}", request.target_id);
 
-    let data = connection.get_maxima()
+    let data = connection.maxima()
         .await
-        .get_player_by_id(&request.target_id.to_string())
+        .player_by_id(&request.target_id.to_string())
         .await?;
 
     info!("{:?}", data);

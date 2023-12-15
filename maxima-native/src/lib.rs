@@ -212,7 +212,7 @@ pub extern "C" fn maxima_login(runtime: *mut *mut Runtime, token_out: *mut *mut 
 /// Create a Maxima object.
 #[no_mangle]
 pub extern "C" fn maxima_mx_create() -> *const c_void {
-    let maxima_arc = Arc::new(Mutex::new(Maxima::new()));
+    let maxima_arc = Maxima::new();
     Arc::into_raw(maxima_arc) as *const c_void
 }
 
@@ -233,7 +233,7 @@ pub extern "C" fn maxima_mx_set_access_token(
         let rt = Box::from_raw(*runtime);
         rt.block_on(async {
             let str_buf = parse_raw_string(token);
-            maxima_arc.lock().await.access_token = str_buf;
+            maxima_arc.lock().await.set_access_token(str_buf);
         });
 
         *runtime = Box::into_raw(rt);
@@ -255,7 +255,7 @@ pub unsafe extern "C" fn maxima_mx_set_lsx_port(
 
     let rt = Box::from_raw(*runtime);
     rt.block_on(async {
-        maxima_arc.lock().await.lsx_port = port;
+        maxima_arc.lock().await.set_lsx_port(port);
     });
 
     *runtime = Box::into_raw(rt);
@@ -405,17 +405,17 @@ pub extern "C" fn maxima_find_owned_offer(
             let game_slug = parse_raw_string(c_game_slug);
 
             let maxima = maxima_arc.lock().await;
-            let owned_games = maxima.get_owned_games(1).await?;
-            for game in owned_games.owned_game_products.unwrap().items {
-                if game.product.game_slug != game_slug {
+            let owned_games = maxima.owned_games(1).await?;
+            for game in owned_games.owned_game_products().as_ref().unwrap().items() {
+                if game.product().game_slug() != &game_slug {
                     continue;
                 }
 
-                if !game.product.downloadable {
+                if !game.product().downloadable() {
                     continue;
                 }
 
-                return Ok(game.origin_offer_id);
+                return Ok(game.origin_offer_id().to_owned());
             }
 
             bail!("Failed to find game");
@@ -455,8 +455,8 @@ pub extern "C" fn maxima_get_local_display_name(
         let rt = Box::from_raw(*runtime);
         let result: Result<String> = rt.block_on(async {
             let maxima = maxima_arc.lock().await;
-            let user = maxima.get_local_user().await?;
-            return Ok(user.player.unwrap().display_name);
+            let user = maxima.local_user().await?;
+            return Ok(user.player().as_ref().unwrap().display_name().to_owned());
         });
 
         *runtime = Box::into_raw(rt);

@@ -14,7 +14,7 @@ pub async fn handle_auth_code_request(
     connection: &mut Connection,
     request: LSXGetAuthCode,
 ) -> Result<Option<LSXResponseType>> {
-    let access_token = connection.get_access_token().await;
+    let access_token = connection.access_token().await;
     let client_id = request.attr_ClientId;
     info!("Retrieving authorization code for '{}'", client_id);
     

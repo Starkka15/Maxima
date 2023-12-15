@@ -15,9 +15,9 @@ pub async fn handle_query_entitlements_request(
     connection: &mut Connection,
     request: LSXQueryEntitlements,
 ) -> Result<Option<LSXResponseType>> {
-    let maxima = connection.get_maxima().await;
+    let maxima = connection.maxima().await;
     let entitlements = request_entitlements(
-        &maxima.access_token,
+        &maxima.access_token(),
         &request.attr_UserId.to_string(),
         Some(&request.attr_Group.to_owned()),
     )

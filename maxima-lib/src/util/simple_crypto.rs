@@ -33,7 +33,7 @@ pub fn make_challenge_response(challenge: &str) -> String {
     simple_encrypt(challenge.as_bytes(), &CRYPTO_KEY)
 }
 
-pub fn get_lsx_key(seed: u16) -> [u8; 16] {
+pub fn make_lsx_key(seed: u16) -> [u8; 16] {
     if seed == 0 {
         return CRYPTO_KEY;
     }
@@ -89,7 +89,7 @@ fn get_array(s: &str) -> Vec<u8> {
 }
 
 /// This code is required to launch games and changes daily
-pub fn get_rtp_handshake() -> u32 {
+pub fn rtp_handshake() -> u32 {
     let current_date = chrono::Utc::now();
 
     let time = (PRIME_10K * current_date.year() as u32)

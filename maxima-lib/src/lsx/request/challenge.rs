@@ -7,14 +7,14 @@ use crate::{
         types::{LSXChallengeAccepted, LSXChallengeResponse, LSXResponseType},
     },
     make_lsx_handler_response,
-    util::simple_crypto::{check_challenge_response, get_lsx_key, make_challenge_response},
+    util::simple_crypto::{check_challenge_response, make_lsx_key, make_challenge_response},
 };
 
 pub async fn handle_challenge_response(
     connection: &mut Connection,
     message: LSXChallengeResponse,
 ) -> Result<Option<LSXResponseType>> {
-    let valid = check_challenge_response(&message.attr_response, &connection.get_challenge());
+    let valid = check_challenge_response(&message.attr_response, &connection.challenge());
     if !valid {
         bail!("Invalid challenge response");
     }
@@ -27,7 +27,7 @@ pub async fn handle_challenge_response(
         _ => bail!("Unknown LSX encryption version!"),
     };
 
-    let encryption_key = get_lsx_key(seed);
+    let encryption_key = make_lsx_key(seed);
     connection.enable_encryption(encryption_key);
 
     debug!(

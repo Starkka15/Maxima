@@ -18,27 +18,27 @@ pub async fn handle_profile_request(
     connection: &mut Connection,
     _: LSXGetProfile,
 ) -> Result<Option<LSXResponseType>> {
-    let maxima = connection.get_maxima().await;
-    let user = maxima.get_local_user().await?;
+    let maxima = connection.maxima().await;
+    let user = maxima.local_user().await?;
 
-    let path = maxima.get_avatar_image(&user.id, 208, 208).await?;
+    let path = maxima.avatar_image(&user.id(), 208, 208).await?;
 
-    let player = user.player.unwrap();
-    let name = player.unique_name;
+    let player = user.player().as_ref().unwrap();
+    let name = player.unique_name();
     debug!("Got profile for {}", &name);
 
     make_lsx_handler_response!(Response, GetProfileResponse, {
-       attr_Persona: name,
+       attr_Persona: name.to_owned(),
        attr_SubscriberLevel: 0,
        attr_CommerceCurrency: "USD".to_string(),
        attr_IsTrialSubscriber: false,
        attr_Country: "US".to_string(),
-       attr_UserId: user.id.parse::<u64>()?,
+       attr_UserId: user.id().parse::<u64>()?,
        attr_GeoCountry: "US".to_string(),
        attr_AvatarId: path.to_str().unwrap().to_string(),
        attr_IsSubscriber: false,
        attr_IsSteamSubscriber: false,
-       attr_PersonaId: player.psd.parse::<u64>()?,
+       attr_PersonaId: player.psd().parse::<u64>()?,
        attr_IsUnderAge: false,
        attr_UserIndex: 0,
     })
@@ -128,9 +128,9 @@ pub async fn handle_query_image_request(
 ) -> Result<Option<LSXResponseType>> {
     let parts = request.attr_ImageId.split(":").collect::<Vec<_>>();
 
-    let maxima = connection.get_maxima().await;
+    let maxima = connection.maxima().await;
     let path = maxima
-        .get_avatar_image(parts[1], request.attr_Width, request.attr_Height)
+        .avatar_image(parts[1], request.attr_Width, request.attr_Height)
         .await?;
 
     let mut images = Vec::new();

@@ -120,9 +120,9 @@ fn get_license_dir() -> Result<String> {
 
 #[cfg(unix)]
 fn get_license_dir() -> Result<String> {
-    use crate::unix::wine::get_wine_prefix_dir;
+    use crate::unix::wine::wine_prefix_dir;
 
-    let path = format!("{}/drive_c/{}", get_wine_prefix_dir()?.to_str().unwrap(), LICENSE_PATH.to_string());
+    let path = format!("{}/drive_c/{}", wine_prefix_dir()?.to_str().unwrap(), LICENSE_PATH.to_string());
     create_dir_all(&path)?;
 
     Ok(path)

@@ -16,8 +16,8 @@ pub async fn handle_license_request(
 ) -> Result<Option<LSXResponseType>> {
     info!("Requesting OOA License and Denuvo Token");
 
-    let offer = connection.get_offer().await;
-    let access_token = connection.get_access_token().await;
+    let offer = connection.current_offer().await;
+    let access_token = connection.access_token().await;
 
     let license = request_license(
         offer.publishing.publishing_attributes.content_id.unwrap().as_str(),

@@ -9,7 +9,7 @@ use serde::{Serialize, Deserialize};
 use tar::Archive;
 use xz2::read::XzDecoder;
 
-use crate::util::{native::get_maxima_dir, github::{fetch_github_release, github_download_asset, fetch_github_releases, GithubRelease}};
+use crate::util::{native::maxima_dir, github::{fetch_github_release, github_download_asset, fetch_github_releases, GithubRelease}};
 
 lazy_static! {
     static ref DXVK_PATTERN: Regex = Regex::new(r"dxvk-([0-9]\.[0-9])\.tar\.gz").unwrap();
@@ -27,12 +27,12 @@ struct Versions {
     vkd3d: String,
 }
 
-pub fn get_wine_prefix_dir() -> Result<PathBuf> {
-    Ok(get_maxima_dir()?.join("pfx"))
+pub fn wine_prefix_dir() -> Result<PathBuf> {
+    Ok(maxima_dir()?.join("pfx"))
 }
 
-fn get_versions() -> Result<Versions> {
-    let file = get_maxima_dir()?.join(VERSION_FILE);
+fn versions() -> Result<Versions> {
+    let file = maxima_dir()?.join(VERSION_FILE);
     if !file.exists() {
         return Ok(Versions::default());
     }
@@ -42,24 +42,24 @@ fn get_versions() -> Result<Versions> {
 }
 
 fn set_versions(versions: Versions) -> Result<()> {
-    let file = get_maxima_dir()?.join(VERSION_FILE);
+    let file = maxima_dir()?.join(VERSION_FILE);
     fs::write(file, toml::to_string(&versions)?)?;
     Ok(())
 }
 
 pub fn check_wine_validity() -> Result<bool> {
     let release = get_wine_release()?;
-    Ok(get_versions()?.wine == release.tag_name)
+    Ok(versions()?.wine == release.tag_name)
 }
 
 pub fn check_dxvk_validity() -> Result<bool> {
     let release = fetch_github_release("doitsujin", "dxvk", "latest")?;
-    Ok(get_versions()?.dxvk == release.tag_name)
+    Ok(versions()?.dxvk == release.tag_name)
 }
 
 pub fn check_vkd3d_validity() -> Result<bool> {
     let release = fetch_github_release("HansKristian-Work", "vkd3d-proton", "latest")?;
-    Ok(get_versions()?.vkd3d == release.tag_name)
+    Ok(versions()?.vkd3d == release.tag_name)
 }
 
 fn get_wine_release() -> Result<GithubRelease> {
@@ -91,14 +91,14 @@ pub async fn install_wine() -> Result<()> {
 
     let asset = asset.unwrap();
 
-    let dir = get_maxima_dir()?.join("downloads");
+    let dir = maxima_dir()?.join("downloads");
     create_dir_all(&dir)?;
 
     let path = dir.join(&asset.name);
     github_download_asset(asset, &path)?;
     extract_wine(&path)?;
 
-    let mut versions = get_versions()?;
+    let mut versions = versions()?;
     versions.wine = release.tag_name;
     set_versions(versions)?;
 
@@ -108,7 +108,7 @@ pub async fn install_wine() -> Result<()> {
 fn extract_wine(archive_path: &PathBuf) -> Result<()> {
     info!("Extracting wine...");
 
-    let dir = get_maxima_dir()?.join("wine");
+    let dir = maxima_dir()?.join("wine");
     if dir.exists() {
         remove_dir_all(&dir)?;
     }
@@ -143,7 +143,7 @@ pub async fn wine_install_dxvk() -> Result<()> {
 
     let asset = asset.unwrap();
 
-    let dir = get_maxima_dir()?.join("downloads");
+    let dir = maxima_dir()?.join("downloads");
     create_dir_all(&dir)?;
 
     let path = dir.join(&asset.name);
@@ -152,7 +152,7 @@ pub async fn wine_install_dxvk() -> Result<()> {
     let version = DXVK_PATTERN.captures(&asset.name).unwrap().get(1).unwrap().as_str();
     extract_dynamic_archive(GzDecoder::new(File::open(path)?), "dxvk", version)?;
 
-    let mut versions = get_versions()?;
+    let mut versions = versions()?;
     versions.dxvk = release.tag_name;
     set_versions(versions)?;
 
@@ -166,7 +166,7 @@ pub async fn wine_install_vkd3d() -> Result<()> {
         bail!("Failed to find VKD3D asset! the name pattern might be outdated, please make an issue at https://github.com/ArmchairDevelopers/Maxima/issues.");
     }
 
-    let dir = get_maxima_dir()?.join("downloads");
+    let dir = maxima_dir()?.join("downloads");
     create_dir_all(&dir)?;
 
     let asset = &release.assets[0];
@@ -176,7 +176,7 @@ pub async fn wine_install_vkd3d() -> Result<()> {
     let version = VKD3D_PATTERN.captures(&asset.name).unwrap().get(1).unwrap().as_str();
     extract_dynamic_archive(zstd::Decoder::new(File::open(path)?)?, "vkd3d-proton", version)?;
 
-    let mut versions = get_versions()?;
+    let mut versions = versions()?;
     versions.vkd3d = release.tag_name;
     set_versions(versions)?;
 
@@ -186,7 +186,7 @@ pub async fn wine_install_vkd3d() -> Result<()> {
 fn extract_dynamic_archive<R>(reader: R, label: &str, version: &str) -> Result<()>
     where R: Read,
 {
-    let windows_dir = get_wine_prefix_dir()?.join("drive_c/windows");
+    let windows_dir = wine_prefix_dir()?.join("drive_c/windows");
     let strip_prefix = format!("{}-{}/", label, version);
 
     let mut archive = Archive::new(reader);
@@ -215,12 +215,12 @@ fn extract_dynamic_archive<R>(reader: R, label: &str, version: &str) -> Result<(
 }
 
 pub fn setup_wine_registry() -> Result<()> {
-    let dir = get_wine_prefix_dir()?.join("drive_c");
+    let dir = wine_prefix_dir()?.join("drive_c");
     create_dir_all(&dir)?;
     fs::write(dir.join("wine.reg"), REG_FILE)?;
 
-    let output = Command::new(get_maxima_dir()?.join("wine/bin/wine"))
-        .env("WINEPREFIX", get_wine_prefix_dir()?)
+    let output = Command::new(maxima_dir()?.join("wine/bin/wine"))
+        .env("WINEPREFIX", wine_prefix_dir()?)
         .arg("C:/Windows/syswow64/regedit.exe")
         .arg("/S")
         .arg("C:/wine.reg")

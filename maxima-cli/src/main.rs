@@ -15,22 +15,22 @@ use is_elevated::is_elevated;
 #[cfg(windows)]
 use maxima::{
     core::background_service::request_registry_setup,
-    util::service::{is_service_running, is_service_valid, register_service_user, start_service}
+    util::service::{is_service_running, is_service_valid, register_service_user, start_service},
 };
 
 use maxima::{
+    content::{zip::fetch_zip_manifest, ContentService},
     core::{
-        auth::{execute_auth_exchange, login::{begin_oauth_login_flow, manual_login}},
+        auth::{
+            execute_auth_exchange,
+            login::{begin_oauth_login_flow, manual_login},
+        },
         ecommerce::request_offer_data,
         launch,
         service_layer::ServiceUserGameProduct,
         Maxima, MaximaEvent,
     },
-    util::{
-        log::init_logger,
-        native::take_foreground_focus,
-        registry::check_registry_validity,
-    },
+    util::{log::init_logger, native::take_foreground_focus, registry::check_registry_validity},
 };
 
 lazy_static! {
@@ -148,19 +148,22 @@ async fn startup() -> Result<()> {
     if args.login.is_none() {
         info!("Received login...");
     }
-    
+
     // Take back the focus since the browser and bootstrap will take it
     take_foreground_focus()?;
 
-    let maxima_arc = Arc::new(Mutex::new(Maxima::new()));
+    let maxima_arc = Maxima::new();
 
     {
         let mut maxima = maxima_arc.lock().await;
-        maxima.access_token = token.unwrap().to_string();
+        maxima.set_access_token(token.unwrap().to_owned());
 
-        let user = maxima.get_local_user().await?;
-    
-        info!("Logged in as {}!", user.player.unwrap().display_name);
+        let user = maxima.local_user().await?;
+
+        info!(
+            "Logged in as {}!",
+            user.player().as_ref().unwrap().display_name()
+        );
     }
 
     match args.mode {
@@ -175,7 +178,7 @@ async fn startup() -> Result<()> {
 }
 
 async fn run_interactive(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
-    let launch_options = vec!["Launch Game", "List Games", "Account Info"];
+    let launch_options = vec!["Launch Game", "Install Game", "List Games", "Account Info"];
     let name = Select::new(
         "Welcome to Maxima! What would you like to do?",
         launch_options,
@@ -184,6 +187,7 @@ async fn run_interactive(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
 
     match name {
         "Launch Game" => interactive_start_game(maxima_arc.clone()).await?,
+        "Install Game" => interactive_install_game(maxima_arc.clone()).await?,
         "List Games" => list_games(maxima_arc.clone()).await?,
         "Account Info" => print_account_info(maxima_arc.clone()).await?,
         _ => bail!("Something went wrong."),
@@ -194,27 +198,23 @@ async fn run_interactive(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
 
 async fn interactive_start_game(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
     let maxima = maxima_arc.lock().await;
-    let owned_games = maxima
-        .get_owned_games(1)
-        .await?
-        .owned_game_products
-        .unwrap()
-        .items;
 
+    let owned_games = maxima.owned_games(1).await?;
+    let owned_games = owned_games.owned_game_products().as_ref().unwrap().items();
     let owned_games_strs = owned_games
         .iter()
-        .map(|g| g.product.name.replace("\n", ""))
+        .map(|g| g.product().name())
         .collect::<Vec<String>>();
 
     let name = Select::new("What game would you like to play?", owned_games_strs).prompt()?;
     let game: &ServiceUserGameProduct = owned_games
         .iter()
-        .find(|g| g.product.name.replace("\n", "") == name)
+        .find(|g| g.product().name() == name)
         .unwrap();
 
     drop(maxima);
     start_game(
-        game.origin_offer_id.as_str(),
+        game.origin_offer_id().as_str(),
         None,
         Vec::new(),
         maxima_arc.clone(),
@@ -224,23 +224,63 @@ async fn interactive_start_game(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
     Ok(())
 }
 
+async fn interactive_install_game(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
+    let maxima = maxima_arc.lock().await;
+
+    let owned_games = maxima.owned_games(1).await?;
+    let owned_games = owned_games.owned_game_products().as_ref().unwrap().items();
+    let owned_games_strs = owned_games
+        .iter()
+        .map(|g| g.product().name())
+        .collect::<Vec<String>>();
+
+    let name = Select::new("What game would you like to install?", owned_games_strs).prompt()?;
+    let game: &ServiceUserGameProduct = owned_games
+        .iter()
+        .find(|g| g.product().name() == name)
+        .unwrap();
+
+    drop(maxima);
+
+    let content_service = ContentService::new(maxima_arc);
+    let builds = content_service
+        .available_builds(&game.origin_offer_id())
+        .await?;
+    let build = builds.live_build();
+    if build.is_none() {
+        bail!("Couldn't find a suitable game build");
+    }
+
+    let build = build.unwrap();
+    info!("Installing game build {}", build.to_string());
+
+    let url = content_service
+        .download_url(&game.origin_offer_id(), Some(&build.build_id()))
+        .await?;
+
+    let manifest = fetch_zip_manifest(&url.url())?;
+    info!("Entries: {}", manifest.entries().len());
+
+    Ok(())
+}
+
 async fn print_account_info(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
     let maxima = maxima_arc.lock().await;
-    let user = maxima.get_local_user().await?;
+    let user = maxima.local_user().await?;
 
-    info!("Access Token: {}", &maxima.access_token);
+    info!("Access Token: {}", maxima.access_token());
 
-    let player = user.player.unwrap();
-    info!("Username: {}", player.unique_name);
-    info!("User ID: {}", user.id);
-    info!("Persona ID: {}", player.psd);
+    let player = user.player().as_ref().unwrap();
+    info!("Username: {}", player.unique_name());
+    info!("User ID: {}", user.id());
+    info!("Persona ID: {}", player.psd());
     Ok(())
 }
 
 async fn create_auth_code(maxima_arc: Arc<Mutex<Maxima>>, client_id: &str) -> Result<()> {
     let maxima = maxima_arc.lock().await;
 
-    let auth_code = execute_auth_exchange(&maxima.access_token, client_id, "code").await?;
+    let auth_code = execute_auth_exchange(&maxima.access_token(), client_id, "code").await?;
     info!("Auth Code for {}: {}", client_id, auth_code);
     Ok(())
 }
@@ -249,12 +289,12 @@ async fn list_games(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
     let maxima = maxima_arc.lock().await;
 
     info!("Owned games:");
-    let owned_games = maxima.get_owned_games(1).await?;
-    for game in owned_games.owned_game_products.unwrap().items {
+    let owned_games = maxima.owned_games(1).await?;
+    for game in owned_games.owned_game_products().as_ref().unwrap().items() {
         let offer = request_offer_data(
-            &maxima.access_token,
-            &game.origin_offer_id,
-            maxima.locale.full_str(),
+            &maxima.access_token(),
+            &game.origin_offer_id(),
+            maxima.locale().full_str(),
         )
         .await?;
 
@@ -267,8 +307,8 @@ async fn list_games(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
 
         info!(
             "{:<width$} - {:<width2$} - {}",
-            game.product.name.replace("\n", ""),
-            game.origin_offer_id,
+            game.product().name(),
+            game.origin_offer_id(),
             content_id,
             width = 55,
             width2 = 25

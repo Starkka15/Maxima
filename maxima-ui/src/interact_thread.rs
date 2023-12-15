@@ -10,7 +10,7 @@ use std::{
     vec::Vec, fs,
 };
 
-use maxima::core::{auth::login, launch, service_layer::{ServiceOwnershipMethod, ServiceGame, SERVICE_REQUEST_GAMEIMAGES, ServiceGameImagesRequest}};
+use maxima::core::{auth::login, launch, service_layer::{ServiceOwnershipMethod, ServiceGame, SERVICE_REQUEST_GAMEIMAGES, ServiceGameImagesRequest, ServiceGameImagesRequestBuilder}};
 use maxima::{
     core::{
         self,
@@ -26,7 +26,7 @@ use maxima::{
         self,
         log::LOGGER,
         native::take_foreground_focus,
-        registry::{check_registry_validity, get_bootstrap_path, launch_bootstrap, read_game_path},
+        registry::{check_registry_validity, bootstrap_path, launch_bootstrap, read_game_path},
     },
 };
 
@@ -95,13 +95,13 @@ impl MaximaThread {
                     .unwrap();
 
                     let lmessage = MaximaLibResponse::LoginResponse(InteractThreadLoginResponse {
-                        res: Some(user.player.unwrap().display_name),
+                        res: Some(user.player().as_ref().unwrap().display_name().to_owned()),
                     });
 
-                    let local_maxima_arc = Arc::new(Mutex::new(Maxima::new()));
+                    let local_maxima_arc = Maxima::new();
                     {
                         let mut maxima = local_maxima_arc.lock().await;
-                        maxima.access_token = token;
+                        maxima.set_access_token(token);
                         if maxima.start_lsx(local_maxima_arc.clone()).await.is_ok() {
                             info!("LSX started");
                         } else {
@@ -120,71 +120,69 @@ impl MaximaThread {
                     println!("recieved request to load games");
                     if let Some(maxima) = maxima_arc.clone() {
                         let maxima = maxima.lock().await;
-                        let owned_games = maxima.get_owned_games(1).await.unwrap();
+                        let owned_games = maxima.owned_games(1).await.unwrap();
                         println!("{:?}", owned_games);
-                        if let Some(games_list) = owned_games.owned_game_products {
-                            for game in games_list.items {
+                        if let Some(games_list) = owned_games.owned_game_products() {
+                            for game in games_list.items() {
                                 // includes EA play titles, but also lesser editions of owned games
                                 /* !game.product.game_product_user.ownership_methods.contains(&ServiceOwnershipMethod::XgpVault) */
                                 if true {
                                     
                                     let images: Option<ServiceGame> = // TODO: make it a result
                                         if 
-                                        !fs::metadata(format!("./res/{}/hero.jpg",game.product.game_slug.clone())).is_ok()
-                                        || !fs::metadata(format!("./res/{}/logo.png",game.product.game_slug.clone())).is_ok()
+                                        !fs::metadata(format!("./res/{}/hero.jpg",game.product().game_slug().clone())).is_ok()
+                                        || !fs::metadata(format!("./res/{}/logo.png",game.product().game_slug().clone())).is_ok()
                                         { //game hasn't been cached yet
                                             // TODO: image downloading
-                                            send_service_request(&maxima.access_token, SERVICE_REQUEST_GAMEIMAGES, ServiceGameImagesRequest {
-                                                should_fetch_context_image: true, should_fetch_backdrop_images: true, game_slug: game.product.game_slug.clone(), locale: maxima.locale.short_str().to_owned()
-                                            }).await?
+                                            send_service_request(&maxima.access_token(), SERVICE_REQUEST_GAMEIMAGES, ServiceGameImagesRequestBuilder::default().should_fetch_context_image(true).should_fetch_backdrop_images(true).game_slug(game.product().game_slug().clone()).locale(maxima.locale().short_str().to_owned()).build()?).await?
                                         } else { None };
 
                                     let game = GameInfo {
-                                        slug: game.product.game_slug.clone(),
-                                        name: game.product.get_name().clone(),
-                                        offer: game.origin_offer_id.clone(),
+                                        slug: game.product().game_slug().clone(),
+                                        name: game.product().name().clone(),
+                                        offer: game.origin_offer_id().clone(),
                                         icon: None,
                                         icon_renderable: None,
                                         hero: GameImage {
                                             retained: None,
                                             renderable: None,
-                                            fs_path: format!("./res/{}/hero.jpg",game.product.game_slug.clone()),
+                                            fs_path: format!("./res/{}/hero.jpg",game.product().game_slug().clone()),
                                             url: if let Some(img) = &images {
-                                                if let Some(pack) = &img.pack_art {
-                                                    if let Some(img) = &pack.aspect_2x1_image {
-                                                        info!("Setting hero path for {} to {:?}", game.product.game_slug.clone(), img.path.clone());
-                                                        img.path.clone()
+                                                if let Some(pack) = &img.pack_art() {
+                                                    if let Some(img) = &pack.aspect_2x1_image() {
+                                                        info!("Setting hero path for {} to {:?}", game.product().game_slug().clone(), img.path().clone());
+                                                        img.path().clone()
                                                     } else {
-                                                        error!("Failed to get hero path for {}", game.product.game_slug.clone());
+                                                        error!("Failed to get hero path for {}", game.product().game_slug().clone());
                                                         String::new()
                                                     }
                                                 } else {
-                                                    error!("Failed to get pack art for {}", game.product.game_slug.clone());
+                                                    error!("Failed to get pack art for {}", game.product().game_slug().clone());
                                                     String::new()
                                                 }
                                             } else {
-                                                error!("Failed to get pack art image container for {}", game.product.game_slug.clone());
+                                                error!("Failed to get pack art image container for {}", game.product().game_slug().clone());
                                                 String::new()
                                             }
                                         }.into(),
                                         logo: GameImage {
                                             retained: None,
                                             renderable: None,
-                                            fs_path: format!("./res/{}/logo.png",game.product.game_slug.clone()),
+                                            fs_path: format!("./res/{}/logo.png",game.product().game_slug().clone()),
                                             url: if let Some(img) = &images {
-                                                if let Some(logo) = &img.primary_logo {
-                                                    if let Some(l_image) = &logo.largest_image {
-                                                        l_image.path.clone()
+                                                if let Some(logo) = &img.primary_logo() {
+                                                    if let Some(l_image) = &logo.largest_image() {
+                                                        l_image.path().clone()
                                                     } else {
-                                                        error!("Failed to get largest logo for {}", game.product.game_slug.clone());
+                                                        error!("Failed to get largest logo for {}", game.product().game_slug().clone());
                                                         String::new()
                                                     }
                                                 } else {
-                                                    error!("Failed to get logo for {}", game.product.game_slug.clone());
+                                                    error!("Failed to get logo for {}", game.product().game_slug().clone());
                                                     String::new()
                                                 }
                                             } else {
-                                                error!("Failed to get logo image container for {}", game.product.game_slug.clone());
+                                                error!("Failed to get logo image container for {}", game.product().game_slug().clone());
                                                 String::new()
                                             }
                                         }.into(),
@@ -199,7 +197,7 @@ impl MaximaThread {
                                         InteractThreadGameListResponse {
                                             game,
                                             idx: 0,
-                                            total: games_list.total_count as usize,
+                                            total: *games_list.total_count() as usize,
                                         },
                                     );
                                     tx1.send(res)?;

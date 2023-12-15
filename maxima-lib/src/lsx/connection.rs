@@ -122,28 +122,28 @@ impl Connection {
 
     // State
 
-    pub fn get_process_id(&self) -> u32 {
+    pub fn process_id(&self) -> u32 {
         self.pid
     }
 
-    pub async fn get_maxima(&self) -> MutexGuard<Maxima> {
+    pub async fn maxima(&self) -> MutexGuard<Maxima> {
         self.maxima.lock().await
     }
 
-    pub fn get_challenge(&self) -> String {
+    pub fn challenge(&self) -> String {
         self.challenge.to_owned()
     }
 
     // IPC shorthands
 
-    pub async fn get_access_token(&self) -> String {
-        self.get_maxima().await.access_token.to_owned()
+    pub async fn access_token(&self) -> String {
+        self.maxima().await.access_token().to_owned()
     }
 
-    pub async fn get_offer(&self) -> CommerceOffer {
-        self.get_maxima()
+    pub async fn current_offer(&self) -> CommerceOffer {
+        self.maxima()
             .await
-            .playing
+            .playing()
             .as_ref()
             .unwrap()
             .offer

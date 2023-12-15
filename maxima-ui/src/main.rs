@@ -67,7 +67,7 @@ use maxima::{
         self,
         native::{take_foreground_focus},
         log::LOGGER,
-        registry::{check_registry_validity, get_bootstrap_path, launch_bootstrap, read_game_path},
+        registry::{check_registry_validity, bootstrap_path, launch_bootstrap, read_game_path},
     },
 };
 
