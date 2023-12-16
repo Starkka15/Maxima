@@ -634,7 +634,7 @@ lsx_message!(
         EntitlementTag: String,
         Type: CommerceEntitlementType,
         Expiration: String,
-        Source: CommerceEntitlementSource,
+        Source: String,
     },
     data {}
 );

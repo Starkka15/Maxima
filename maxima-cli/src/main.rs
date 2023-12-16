@@ -25,7 +25,6 @@ use maxima::{
             execute_auth_exchange,
             login::{begin_oauth_login_flow, manual_login},
         },
-        ecommerce::request_offer_data,
         launch,
         service_layer::ServiceUserGameProduct,
         Maxima, MaximaEvent,

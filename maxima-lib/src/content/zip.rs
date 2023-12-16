@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use bytebuffer::{ByteBuffer, Endian};
 use derive_getters::Getters;
 use log::warn;
+use reqwest::Client;
 use ureq::Agent;
 
 use std::io::Read;
@@ -223,7 +224,45 @@ impl EndOfCentralDirectory {
 }
 
 impl ZipFile {
-    pub fn load(&mut self, data: &mut ByteBuffer, total_size: i64) -> Result<i64> {
+    pub async fn fetch(url: &str) -> Result<Self> {
+        let client = Client::new();
+
+        let response = client.head(url).send().await?;
+        let content_length = response.headers().get("content-length").unwrap();
+        let content_length = content_length.to_str()?.parse::<i64>().unwrap_or(0);
+    
+        let mut data: Vec<u8> = Vec::with_capacity(MAX_BACKSCAN_OFFSET);
+        let mut offset = content_length - 8 * 1024;
+        if offset < 0 {
+            bail!("Something went wrong while requesting a zip manifest");
+        }
+    
+        let mut zip = Self::default();
+    
+        while offset >= 0 && data.len() < MAX_BACKSCAN_OFFSET {
+            let read = content_length - offset - data.len() as i64;
+            let start_offset = content_length - data.len() as i64 - read;
+            let end_offset = start_offset + read;
+            
+            let range_header = format!("bytes={}-{}", start_offset, end_offset);
+            let response = client.get(url).header("range", &range_header).send().await?;
+            let this_data: Vec<u8> = response.bytes().await?.to_vec();
+            data = [this_data, data].concat();
+    
+            offset = zip.load(&mut ByteBuffer::from_vec(data.clone()), content_length)?;
+            if offset > content_length {
+                bail!("Requested read was too big");
+            }
+    
+            if offset == 0 {
+                break;
+            }
+        }
+    
+        Ok(zip)
+    }
+
+    fn load(&mut self, data: &mut ByteBuffer, total_size: i64) -> Result<i64> {
         data.set_endian(Endian::LittleEndian);
 
         let pos = signature_scan(data.as_bytes(), ZIP_EOCD_SIGNATURE);
@@ -317,47 +356,4 @@ impl ZipFile {
 
         Ok(())
     }
-}
-
-pub fn fetch_zip_manifest(url: &str) -> Result<ZipFile> {
-    let agent = Agent::new();
-
-    let response = agent.head(url).call()?;
-    let content_length = response.header("content-length").unwrap();
-    let content_length = content_length.parse::<i64>().unwrap_or(0);
-
-    let mut data: Vec<u8> = Vec::with_capacity(MAX_BACKSCAN_OFFSET);
-    let mut offset = content_length - 8 * 1024;
-    if offset < 0 {
-        bail!("Something went wrong while requesting a zip manifest");
-    }
-
-    let mut zip = ZipFile::default();
-
-    while offset >= 0 && data.len() < MAX_BACKSCAN_OFFSET {
-        let read = content_length - offset - data.len() as i64;
-        let start_offset = content_length - data.len() as i64 - read;
-        let end_offset = start_offset + read;
-        
-        let range_header = format!("bytes={}-{}", start_offset, end_offset);
-        let response = agent.get(url).set("range", &range_header).call()?;
-
-        let mut this_data: Vec<u8> = Vec::with_capacity(read as usize);
-        response.into_reader()
-            .take(read as u64)
-            .read_to_end(&mut this_data)?;
-
-        data = [this_data, data].concat();
-
-        offset = zip.load(&mut ByteBuffer::from_vec(data.clone()), content_length)?;
-        if offset > content_length {
-            bail!("Requested read was too big");
-        }
-
-        if offset == 0 {
-            break;
-        }
-    }
-
-    Ok(zip)
 }

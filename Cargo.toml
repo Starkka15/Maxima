@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-
+default-members = ["maxima-cli"]
 members = [
     "maxima-bootstrap",
     "maxima-cli",

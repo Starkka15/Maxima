@@ -7,10 +7,8 @@ use anyhow::{bail, Result};
 
 use base64::{engine::general_purpose, Engine};
 use openssl::symm::{decrypt, encrypt, Cipher};
-use reqwest::StatusCode;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
-
-use std::io::Read;
 
 use crate::core::endpoints::API_PROXY_NOVAFUSION_LICENSES;
 
@@ -53,34 +51,26 @@ pub async fn request_license(
         query.push(("requestType", request_type.unwrap()));
     }
 
-    let res = ureq::get(API_PROXY_NOVAFUSION_LICENSES)
-        .query_pairs(query)
-        .set("X-Requester-Id", "Origin Online Activation")
-        .set("User-Agent", "EACTransaction")
-        .call()?;
+    let res = Client::new()
+        .get(API_PROXY_NOVAFUSION_LICENSES)
+        .query(&query)
+        .header("X-Requester-Id", "Origin Online Activation")
+        .header("User-Agent", "EACTransaction")
+        .send()
+        .await?;
     if res.status() != StatusCode::OK {
         bail!("License request failed");
     }
 
-    let size = res.header("content-length");
-    if size.is_none() {
-        bail!("Failed to retrieve the license size");
-    }
-
-    let size = size.unwrap().parse::<u64>()?;
-
-    let signature = res.header("x-signature").unwrap().to_owned();
-    let mut body: Vec<u8> = vec![];
-    res.into_reader()
-        .take((size + 1) as u64)
-        .read_to_end(&mut body)?;
+    let signature = res.headers().get("x-signature").unwrap().to_owned();
+    let body: Vec<u8> = res.bytes().await?.to_vec();
 
     let cipher = Cipher::aes_128_cbc();
     let decrypted_data = decrypt(cipher, &OOA_CRYPTO_KEY, Some(&[0; 16]), body.as_slice())?;
     let data = String::from_utf8(decrypted_data)?;
 
     let mut license: License = quick_xml::de::from_str(data.as_str())?;
-    license.signature = signature;
+    license.signature = signature.to_str()?.to_owned();
     Ok(license)
 }
 
@@ -132,7 +122,11 @@ fn get_license_dir() -> Result<String> {
 fn get_license_dir() -> Result<String> {
     use crate::unix::wine::wine_prefix_dir;
 
-    let path = format!("{}/drive_c/{}", wine_prefix_dir()?.to_str().unwrap(), LICENSE_PATH.to_string());
+    let path = format!(
+        "{}/drive_c/{}",
+        wine_prefix_dir()?.to_str().unwrap(),
+        LICENSE_PATH.to_string()
+    );
     create_dir_all(&path)?;
 
     Ok(path)

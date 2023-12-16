@@ -180,12 +180,6 @@ ecommerce_enum!(EntitlementExternalType, {
     Subscription,
 });
 
-ecommerce_enum!(EntitlementSource, {
-    Steam,
-    #[serde(rename = "ORIGIN-STORE-CLIENT-US")]
-    OriginStoreClientUs,
-});
-
 ecommerce_enum!(EntitlementType, {
     Default,
     OnlineAccess,
@@ -202,7 +196,7 @@ ecommerce_type!(
         external_type: Option<CommerceEntitlementExternalType>,
         product_id: String,
         last_modified_date: String,
-        entitlement_source: CommerceEntitlementSource,
+        entitlement_source: String,
         entitlement_id: u64,
         grant_date: String,
         entitlement_type: CommerceEntitlementType,
