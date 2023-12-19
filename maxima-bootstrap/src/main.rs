@@ -9,7 +9,6 @@ use anyhow::{bail, Result};
 use base64::{engine::general_purpose, Engine};
 use maxima::core::launch::BootstrapLaunchArgs;
 use url::Url;
-use maxima::unix::wine::run_wine_command;
 
 #[cfg(windows)]
 use maxima::util::service::{register_service, is_service_valid};
