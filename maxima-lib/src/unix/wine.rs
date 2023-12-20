@@ -1,4 +1,4 @@
-use std::{path::PathBuf, fs::{create_dir_all, File, self, remove_dir_all}, io::Read, process::Command};
+use std::{path::PathBuf, fs::{create_dir_all, File, self, remove_dir_all}, io::Read, process::Command, ffi::OsStr};
 
 use anyhow::{Result, bail};
 use flate2::read::GzDecoder;
@@ -18,7 +18,6 @@ lazy_static! {
 }
 
 const VERSION_FILE: &str = "dependency-versions.toml";
-const REG_FILE: &str = include_str!("wine.reg");
 
 #[derive(Serialize, Deserialize, Default)]
 struct Versions {
@@ -82,6 +81,52 @@ fn get_wine_release() -> Result<GithubRelease> {
     Ok(release.unwrap())
 }
 
+pub fn run_wine_command<I: IntoIterator<Item = T>, T:AsRef<OsStr>>(
+    program: &str,
+    arg: T,
+    args: Option<I>
+) -> Result<()> {
+    let path = maxima_dir()?.join(format!("wine/bin/{}", program));
+
+    // Create command with all necessary wine env variables
+    let mut binding = Command::new(path);
+    let mut output = binding
+        .env("WINEPREFIX", wine_prefix_dir()?)
+        .env("WINEDLLOVERRIDES", "winemenubuilder.exe=d") // Disable winemenubuilder so it doesnt mess with file associations
+        .env("WINEDLLPATH", format!("{}:{}", maxima_dir()?.join("wine/lib64/wine").display(), maxima_dir()?.join("wine/lib/wine").display()))
+
+        // These should probably be settings for the user to enable/disable
+        .env("WINE_FULLSCREEN_FSR", "0")
+        .env("WINEESYNC", "1")
+        .env("WINEFSYNC", "1")
+
+        .env("LD_PRELOAD", "") // Fixes some log errors for some games
+        .env("LD_LIBRARY_PATH", format!("{}:{}", maxima_dir()?.join("wine/lib64").display(), maxima_dir()?.join("wine/lib").display()))
+        .env("GST_PLUGIN_SYSTEM_PATH_1_0", format!("{}:{}", maxima_dir()?.join("wine/lib64/gstreamer-1.0").display(), maxima_dir()?.join("wine/lib/gstreamer-1.0").display()))
+
+        .arg(arg);
+
+    if let Some(arguments) = args {
+        output = output.args(arguments);
+    }
+
+    let status = output.spawn()?.wait()?;
+
+    // Start wineserver so we actually wait until the wine process finished (idk its weird)
+    let wine_server_path = maxima_dir()?.join("wine/bin/wineserver");
+    let mut wine_server_binding = Command::new(wine_server_path);
+    let wine_server = wine_server_binding
+        .env("WINEPREFIX", wine_prefix_dir()?)
+        .arg("--wait");
+    wine_server.spawn()?.wait()?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    bail!("{}", status.code().unwrap());
+}
+
 pub async fn install_wine() -> Result<()> {
     let release = get_wine_release()?;
     let asset = release.assets.iter().find(|x| PROTON_PATTERN.captures(&x.name).is_some());
@@ -101,6 +146,8 @@ pub async fn install_wine() -> Result<()> {
     let mut versions = versions()?;
     versions.wine = release.tag_name;
     set_versions(versions)?;
+
+    run_wine_command("wine", "wineboot", Some(vec![" --init"]))?;
 
     Ok(())
 }
@@ -134,6 +181,12 @@ fn extract_wine(archive_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn add_dll_override(dll_name: &str) -> Result<()> {
+    run_wine_command("wine", "reg", Some(vec!["add", "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides", "/v", dll_name,  "/d", "native,builtin", "/f"]))?;
+
+    Ok(())
+}
+
 pub async fn wine_install_dxvk() -> Result<()> {
     let release = fetch_github_release("doitsujin", "dxvk", "latest")?;
     let asset = release.assets.iter().find(|x| DXVK_PATTERN.captures(&x.name).is_some());
@@ -155,6 +208,11 @@ pub async fn wine_install_dxvk() -> Result<()> {
     let mut versions = versions()?;
     versions.dxvk = release.tag_name;
     set_versions(versions)?;
+
+    add_dll_override("d3d10core")?;
+    add_dll_override("d3d11")?;
+    add_dll_override("d3d9")?;
+    add_dll_override("dxgi")?;
 
     Ok(())
 }
@@ -179,6 +237,9 @@ pub async fn wine_install_vkd3d() -> Result<()> {
     let mut versions = versions()?;
     versions.vkd3d = release.tag_name;
     set_versions(versions)?;
+
+    add_dll_override("d3d12core")?;
+    add_dll_override("d3d12")?;
 
     Ok(())
 }
@@ -215,22 +276,8 @@ fn extract_dynamic_archive<R>(reader: R, label: &str, version: &str) -> Result<(
 }
 
 pub fn setup_wine_registry() -> Result<()> {
-    let dir = wine_prefix_dir()?.join("drive_c");
-    create_dir_all(&dir)?;
-    fs::write(dir.join("wine.reg"), REG_FILE)?;
-
-    let output = Command::new(maxima_dir()?.join("wine/bin/regedit"))
-        .env("WINEPREFIX", wine_prefix_dir()?)
-        //.arg("C:/Windows/syswow64/regedit.exe")
-        .arg("/S")
-        .arg("C:/wine.reg")
-        .output()
-        .expect("Failed to execute wine while modifying the registry");
-
-    let output_str = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() && !output_str.is_empty() {
-        bail!("Failed to modify the wine registry: {}", output_str);
-    }
+    run_wine_command("wine", "reg", Some(vec!["add", "HKLM\\Software\\Electronic Arts\\EA Desktop", "/v", "InstallSuccessful",  "/d", "true", "/f", "/reg:64"]))?;
+    run_wine_command("wine", "reg", Some(vec!["add", "HKLM\\Software\\Origin", "/v", "ClientPath",  "/d", "C:/Windows/System32/conhost.exe", "/f", "/reg:32"]))?;
 
     Ok(())
 }

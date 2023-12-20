@@ -71,23 +71,11 @@ fn platform_launch(args: BootstrapLaunchArgs) -> Result<()> {
 
 #[cfg(unix)]
 fn platform_launch(args: BootstrapLaunchArgs) -> Result<()> {
-    use maxima::{unix::wine::wine_prefix_dir, util::native::maxima_dir};
+    use maxima::unix::wine::run_wine_command;
 
-    let wine_path = maxima_dir()?.join("wine/bin/wine64");
-    let mut binding = Command::new(wine_path);
-    let child = binding
-        .env("WINEPREFIX", wine_prefix_dir()?)
-        .env("WINEDLLOVERRIDES", "CryptBase,bcrypt,dxgi,d3d11,d3d12,d3d12core=n,b")
-        .arg(args.path)
-        .args(args.args);
-    
-    let status = child.spawn()?.wait()?;
-    let code = status.code();
-    if code.is_none() {
-        return Ok(());
-    }
+    run_wine_command("wine", args.path, Some(args.args))?;
 
-    bail!("{}", code.unwrap());
+    Ok(())
 }
 
 async fn run(args: &Vec<String>) -> Result<()> {

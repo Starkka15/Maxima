@@ -1,7 +1,0 @@
-Windows Registry Editor Version 5.00
-
-[HKEY_LOCAL_MACHINE\Software\Wow6432Node\Origin]
-"ClientPath"="C:/Windows/System32/conhost.exe"
-
-[HKEY_LOCAL_MACHINE\Software\Electronic Arts\EA Desktop]
-"InstallSuccessful"="true"
