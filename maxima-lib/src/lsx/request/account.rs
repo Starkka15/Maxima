@@ -47,7 +47,7 @@ pub async fn handle_query_entitlements_request(
             attr_EntitlementTag: entitlement.entitlement_tag,
             attr_Type: entitlement.entitlement_type,
             attr_Expiration: "0000-00-00T00:00:00".to_string(),
-            attr_Source: entitlement.entitlement_source,
+            attr_Source: entitlement.entitlement_source.unwrap_or_default(),
         });
     }
 

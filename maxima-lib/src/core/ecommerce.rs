@@ -183,6 +183,7 @@ ecommerce_enum!(EntitlementExternalType, {
 ecommerce_enum!(EntitlementType, {
     Default,
     OnlineAccess,
+    OriginDownload,
 });
 
 ecommerce_enum!(EntitlementStatus, {
@@ -196,18 +197,18 @@ ecommerce_type!(
         external_type: Option<CommerceEntitlementExternalType>,
         product_id: Option<String>,
         last_modified_date: String,
-        entitlement_source: String,
+        entitlement_source: Option<String>,
         entitlement_id: u64,
         grant_date: String,
         entitlement_type: CommerceEntitlementType,
         version: u16,
         is_consumable: bool,
         product_catalog: Option<String>,
-        group_name: String,
+        group_name: Option<String>,
         entitlement_tag: String,
         origin_permissions: String,
         use_count: u32,
-        project_id: String,
+        project_id: Option<String>,
         status: CommerceEntitlementStatus,
     }
 );
