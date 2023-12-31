@@ -1,5 +1,4 @@
 pub mod github;
-pub mod hw_info;
 pub mod log;
 pub mod native;
 pub mod registry;

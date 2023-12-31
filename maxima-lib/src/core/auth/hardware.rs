@@ -1,6 +1,6 @@
 use regex::Regex;
 
-use super::simple_crypto::hash_fnv1a;
+use crate::util::simple_crypto::hash_fnv1a;
 
 #[derive(Debug)]
 pub struct HardwareInfo {

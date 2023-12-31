@@ -1,3 +1,4 @@
+pub mod hardware;
 pub mod login;
 
 use anyhow::{bail, Result};
