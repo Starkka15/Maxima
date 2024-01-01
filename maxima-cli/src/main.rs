@@ -1,4 +1,4 @@
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand};
 
 use anyhow::{bail, Result};
 use inquire::Select;
@@ -38,35 +38,35 @@ lazy_static! {
     static ref MANUAL_LOGIN_PATTERN: Regex = Regex::new(r"^(.*):(.*)$").unwrap();
 }
 
-#[derive(ValueEnum, Debug, Clone, PartialEq)]
+#[derive(Subcommand, Debug)]
 enum Mode {
-    Launch,
+    Launch {
+        #[arg(long)]
+        game_path: Option<String>,
+
+        #[arg(long)]
+        game_args: Vec<String>,
+
+        #[arg(short, long)]
+        offer_id: Option<String>,
+    },
     ListGames,
     AccountInfo,
-    CreateAuthCode,
-    Interactive,
+    CreateAuthCode {
+        #[arg(long)]
+        client_id: Option<String>,
+    },
 }
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(value_enum, long, default_value_t = Mode::Interactive)]
-    mode: Mode,
+    #[command(subcommand)]
+    mode: Option<Mode>,
 
     #[arg(long)]
+    #[clap(global = true)]
     login: Option<String>,
-
-    #[arg(long)]
-    client_id: Option<String>,
-
-    #[arg(short, long)]
-    offer_id: Option<String>,
-
-    #[arg(long)]
-    game_path: Option<String>,
-
-    #[arg(long)]
-    game_args: Vec<String>,
 }
 
 #[tokio::main]
@@ -140,8 +140,9 @@ async fn startup() -> Result<()> {
         } else {
             access_token.to_owned()
         };
-        
-        let code = execute_auth_exchange(&&access_token, "JUNO_PC_CLIENT", &auth_context, "code").await?;
+
+        let code =
+            execute_auth_exchange(&&access_token, "JUNO_PC_CLIENT", &auth_context, "code").await?;
         auth_context.set_code(&code);
     } else {
         let result = begin_oauth_login_flow(&mut auth_context).await;
@@ -155,7 +156,7 @@ async fn startup() -> Result<()> {
         error!("Login failed!");
         return Ok(());
     }
-    
+
     let token_res = execute_connect_token(&auth_context).await;
     if token_res.is_err() {
         error!("Login failed: {}", token_res.err().unwrap().to_string());
@@ -185,12 +186,17 @@ async fn startup() -> Result<()> {
         );
     }
 
-    match args.mode {
-        Mode::Launch => start_game(&args.offer_id.as_ref().expect("Please pass an Origin Offer ID with `--offer-id`. You can obtain one through the `list-games` mode"), args.game_path, args.game_args, maxima_arc.clone()).await,
+    if args.mode.is_none() {
+        run_interactive(maxima_arc.clone()).await?;
+        return Ok(());
+    }
+
+    let mode = args.mode.unwrap();
+    match mode {
+        Mode::Launch{game_path, game_args, offer_id} => start_game(&offer_id.as_ref().expect("Please pass an Origin Offer ID with `--offer-id`. You can obtain one through the `list-games` mode"), game_path, game_args, maxima_arc.clone()).await,
         Mode::ListGames => list_games(maxima_arc.clone()).await,
         Mode::AccountInfo => print_account_info(maxima_arc.clone()).await,
-        Mode::CreateAuthCode => create_auth_code(maxima_arc.clone(), &args.client_id.unwrap()).await,
-        Mode::Interactive => run_interactive(maxima_arc.clone()).await,
+        Mode::CreateAuthCode{client_id} => create_auth_code(maxima_arc.clone(), &client_id.unwrap()).await,
     }?;
 
     Ok(())
@@ -305,8 +311,13 @@ async fn print_account_info(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
 async fn create_auth_code(maxima_arc: Arc<Mutex<Maxima>>, client_id: &str) -> Result<()> {
     let maxima = maxima_arc.lock().await;
 
-    let auth_code =
-        execute_auth_exchange(&maxima.access_token(), client_id, &AuthContext::new()?, "code").await?;
+    let auth_code = execute_auth_exchange(
+        &maxima.access_token(),
+        client_id,
+        &AuthContext::new()?,
+        "code",
+    )
+    .await?;
     info!("Auth Code for {}: {}", client_id, auth_code);
     Ok(())
 }
