@@ -4,7 +4,7 @@ use reqwest::Client;
 use super::zip::{ZipFile, ZipFileEntry};
 
 pub struct ZipDownloadRequest {
-    entries: Vec<ZipFileEntry>,
+    _entries: Vec<ZipFileEntry>,
 }
 
 pub struct ZipDownloader {
@@ -31,7 +31,7 @@ impl ZipDownloader {
     pub async fn download_single_file(&self, entry: &ZipFileEntry) -> Result<()> {
         let offset = entry.data_offset();
         let range = format!("bytes={}-{}", offset, entry.compressed_size() - offset);
-        let data = self
+        let _data = self
             .client
             .get(&self.url)
             .header("range", range)

@@ -11,10 +11,10 @@ use derive_getters::Getters;
 use log::{debug, error, warn};
 use regex::Regex;
 use sysinfo::{PidExt, ProcessExt, System, SystemExt};
-use tokio::sync::{Mutex, MutexGuard, RwLock};
+use tokio::sync::{MutexGuard, RwLock};
 
 use crate::{
-    core::{Maxima, MaximaEvent},
+    core::{LockedMaxima, Maxima, MaximaEvent},
     lsx::types::LSXRequestType,
     util::simple_crypto::{simple_decrypt, simple_encrypt},
 };
@@ -76,7 +76,7 @@ pub enum EncryptionState {
 #[derive(Getters)]
 pub struct ConnectionState {
     #[getter(skip)]
-    maxima: Arc<Mutex<Maxima>>,
+    maxima: LockedMaxima,
     challenge: String,
     encryption: EncryptionState,
     pid: u32,
@@ -96,12 +96,22 @@ impl ConnectionState {
         self.maxima.lock().await
     }
 
-    pub fn maxima_arc(&mut self) -> Arc<Mutex<Maxima>> {
+    pub fn maxima_arc(&mut self) -> LockedMaxima {
         self.maxima.clone()
     }
 
-    pub async fn access_token(&mut self) -> String {
-        self.maxima().await.access_token().to_owned()
+    pub async fn access_token(&mut self) -> Result<String> {
+        Ok(self
+            .maxima()
+            .await
+            .auth_storage()
+            .lock()
+            .await
+            .current()
+            .unwrap()
+            .access_token()
+            .await?
+            .to_owned())
     }
 
     pub fn queue_message(&mut self, message: LSX) -> Result<()> {
@@ -119,13 +129,13 @@ impl ConnectionState {
 }
 
 pub struct Connection {
-    maxima: Arc<Mutex<Maxima>>,
+    maxima: LockedMaxima,
     stream: TcpStream,
     state: LockedConnectionState,
 }
 
 impl Connection {
-    pub fn new(maxima: Arc<Mutex<Maxima>>, stream: TcpStream) -> Self {
+    pub fn new(maxima: LockedMaxima, stream: TcpStream) -> Self {
         stream.set_nodelay(true).unwrap();
         stream.set_nonblocking(true).unwrap();
         stream
@@ -184,12 +194,6 @@ impl Connection {
 
     pub async fn maxima(&self) -> MutexGuard<Maxima> {
         self.maxima.lock().await
-    }
-
-    // IPC shorthands
-
-    pub async fn access_token(&self) -> String {
-        self.maxima().await.access_token().to_owned()
     }
 
     // Initialization

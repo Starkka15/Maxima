@@ -29,7 +29,7 @@ pub async fn handle_query_entitlements_request(
             .to_owned()
     };
 
-    let token = state.write().await.access_token().await;
+    let token = state.write().await.access_token().await?;
     let entitlements =
         request_entitlements(&token, &user_id, Some(&request.attr_Group.to_owned())).await?;
 

@@ -224,7 +224,7 @@ pub extern "C" fn maxima_login(runtime: *mut *mut Runtime, token_out: *mut *mut 
 /// Create a Maxima object.
 #[no_mangle]
 pub extern "C" fn maxima_mx_create() -> *const c_void {
-    let maxima_arc = Maxima::new();
+    let maxima_arc = Maxima::new().expect("Failed to initialize Maxima");
     Arc::into_raw(maxima_arc) as *const c_void
 }
 
@@ -245,7 +245,8 @@ pub extern "C" fn maxima_mx_set_access_token(
         let rt = Box::from_raw(*runtime);
         rt.block_on(async {
             let str_buf = parse_raw_string(token);
-            maxima_arc.lock().await.set_access_token(str_buf);
+            //maxima_arc.lock().await.set_access_token(str_buf);
+            todo!(); // I need to deal with this later, I have too much of a headache right now - BattleDash
         });
 
         *runtime = Box::into_raw(rt);

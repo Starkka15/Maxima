@@ -2,16 +2,17 @@
 
 use anyhow::{bail, Result};
 
-use reqwest::StatusCode;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2_const::Sha256;
-use ureq::OrAnyStatus;
 
-use derive_getters::Getters;
 use derive_builder::Builder;
+use derive_getters::Getters;
 
-use super::{endpoints::API_SERVICE_AGGREGATION_LAYER, locale::Locale};
+use super::{
+    auth::storage::LockedAuthStorage, endpoints::API_SERVICE_AGGREGATION_LAYER, locale::Locale,
+};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,7 +36,7 @@ struct FullServiceRequest<'a, T: Serialize> {
     query: &'static str,
 }
 
-pub struct GraphQLRequest {
+pub struct ServiceLayerGraphQLRequest {
     query: &'static str,
     operation: &'static str,
     hash: [u8; 32],
@@ -45,7 +46,7 @@ macro_rules! load_graphql_request {
     ($operation:expr) => {{
         let content = include_str!(concat!("graphql/", $operation, ".gql"));
         let hash = Sha256::new().update(content.as_bytes()).finalize();
-        GraphQLRequest {
+        ServiceLayerGraphQLRequest {
             query: content,
             operation: $operation,
             hash,
@@ -55,7 +56,7 @@ macro_rules! load_graphql_request {
 
 macro_rules! define_graphql_request {
     ($operation:expr) => { paste::paste! {
-        pub const [<SERVICE_REQUEST_ $operation:upper>]: &GraphQLRequest = &load_graphql_request!(stringify!($operation));
+        pub const [<SERVICE_REQUEST_ $operation:upper>]: &ServiceLayerGraphQLRequest = &load_graphql_request!(stringify!($operation));
     }}
 }
 
@@ -66,109 +67,129 @@ define_graphql_request!(GetBasicPlayer);
 define_graphql_request!(getPreloadedOwnedGames);
 define_graphql_request!(GetUserPlayer);
 
-pub async fn send_service_request<T, R>(
-    access_token: &str,
-    operation: &GraphQLRequest,
-    variables: T,
-) -> Result<R>
-where
-    T: Serialize,
-    R: for<'a> Deserialize<'a>,
-{
-    let mut result = send_service_request2(access_token, operation, &variables, false).await;
-
-    // On first error, try sending the full query
-    if result.is_err() {
-        result = send_service_request2(access_token, operation, variables, true).await;
-    }
-
-    result
+pub struct ServiceLayerClient {
+    auth: LockedAuthStorage,
+    client: Client,
 }
 
-async fn send_service_request2<T, R>(
-    access_token: &str,
-    operation: &GraphQLRequest,
-    variables: T,
-    full_query: bool,
-) -> Result<R>
-where
-    T: Serialize,
-    R: for<'a> Deserialize<'a>,
-{
-    let extensions = ServiceExtensions {
-        persisted_query: PersistedQuery {
-            version: 1,
-            sha256_hash: hex::encode(operation.hash),
-        },
-    };
+impl ServiceLayerClient {
+    pub fn new(auth: LockedAuthStorage) -> Self {
+        Self {
+            auth,
+            client: Client::new(),
+        }
+    }
 
-    let agent = ureq::AgentBuilder::new().try_proxy_from_env(true).build();
+    pub async fn request<T, R>(
+        &self,
+        operation: &ServiceLayerGraphQLRequest,
+        variables: T,
+    ) -> Result<R>
+    where
+        T: Serialize,
+        R: for<'a> Deserialize<'a>,
+    {
+        let mut result = self.request2(operation, &variables, false).await;
 
-    let mut request = if full_query {
-        agent.post(API_SERVICE_AGGREGATION_LAYER)
-    } else {
-        agent.get(API_SERVICE_AGGREGATION_LAYER)
-    };
+        // On first error, try sending the full query
+        if result.is_err() {
+            result = self.request2(operation, variables, true).await;
+        }
 
-    request = request.set("Authorization", &("Bearer ".to_string() + access_token));
+        result
+    }
 
-    let res = if full_query {
-        let data = FullServiceRequest {
-            extensions,
-            variables,
-            operation_name: operation.operation,
-            query: operation.query,
+    async fn request2<T, R>(
+        &self,
+        operation: &ServiceLayerGraphQLRequest,
+        variables: T,
+        full_query: bool,
+    ) -> Result<R>
+    where
+        T: Serialize,
+        R: for<'a> Deserialize<'a>,
+    {
+        let extensions = ServiceExtensions {
+            persisted_query: PersistedQuery {
+                version: 1,
+                sha256_hash: hex::encode(operation.hash),
+            },
         };
 
-        request
-            .set("Content-Type", "application/json")
-            .send_string(&serde_json::to_string(&data)?)
-    } else {
-        request
-            .query("extensions", &serde_json::to_string(&extensions)?)
-            .query("operationName", operation.operation)
-            .query("variables", &serde_json::to_string(&variables)?)
-            .call()
-    }
-    .or_any_status()?;
-
-    if res.status() != StatusCode::OK {
-        bail!(
-            "Service request '{}' failed: {}",
-            operation.operation,
-            res.into_string()?
-        );
-    }
-
-    let text = res.into_string()?;
-    let result = serde_json::from_str::<Value>(text.as_str())?;
-    let errors = result.get("errors");
-    if errors.is_some() {
-        let errors = errors.unwrap().as_array().unwrap();
-        let error = if let Value::Object(o) = &errors[0] {
-            o
+        let mut request = if full_query {
+            self.client.post(API_SERVICE_AGGREGATION_LAYER)
         } else {
-            bail!("Service request '{}' failed", operation.operation);
+            self.client.get(API_SERVICE_AGGREGATION_LAYER)
         };
 
-        bail!(
-            "Service request '{}' failed: {}",
-            operation.operation,
-            error.get("message").unwrap().as_str().unwrap()
-        );
+        let mut auth = self.auth.lock().await;
+        let current_account = auth.current();
+        if let Some(account) = current_account {
+            request = request.header(
+                "Authorization",
+                &("Bearer ".to_owned() + account.access_token().await?),
+            );
+        }
+
+        let res = if full_query {
+            let data = FullServiceRequest {
+                extensions,
+                variables,
+                operation_name: operation.operation,
+                query: operation.query,
+            };
+
+            request
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_string(&data)?)
+        } else {
+            request.query(&[
+                ("extensions", serde_json::to_string(&extensions)?.as_str()),
+                ("operationName", operation.operation),
+                ("variables", serde_json::to_string(&variables)?.as_str()),
+            ])
+        }
+        .send()
+        .await?;
+
+        if res.status() != StatusCode::OK {
+            bail!(
+                "Service request '{}' failed: {}",
+                operation.operation,
+                res.text().await?
+            );
+        }
+
+        let text = res.text().await?;
+        let result = serde_json::from_str::<Value>(text.as_str())?;
+        let errors = result.get("errors");
+        if errors.is_some() {
+            let errors = errors.unwrap().as_array().unwrap();
+            let error = if let Value::Object(o) = &errors[0] {
+                o
+            } else {
+                bail!("Service request '{}' failed", operation.operation);
+            };
+
+            bail!(
+                "Service request '{}' failed: {}",
+                operation.operation,
+                error.get("message").unwrap().as_str().unwrap()
+            );
+        }
+
+        let data = result
+            .get("data")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .to_owned();
+
+        Ok(serde_json::from_value::<R>(data).unwrap())
     }
-
-    let data = result
-        .get("data")
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .values()
-        .next()
-        .unwrap()
-        .to_owned();
-
-    Ok(serde_json::from_value::<R>(data).unwrap())
 }
 
 macro_rules! service_layer_type {
@@ -210,7 +231,7 @@ service_layer_type!(GameImagesRequest, {
     locale: String,
 });
 
-service_layer_enum!(GameType, { DigitalFullGame, BaseGame, PrereleaseGame });
+service_layer_enum!(GameType, { DigitalFullGame, DigitalExtraContent, BaseGame, PrereleaseGame });
 
 service_layer_enum!(Storefront, {
     Ea,

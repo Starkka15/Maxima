@@ -17,10 +17,10 @@ pub async fn handle_license_request(
     info!("Requesting OOA License and Denuvo Token");
 
     let arc = state.write().await.maxima_arc();
-    let maxima = arc.lock().await;
+    let mut maxima = arc.lock().await;
 
     let offer = maxima.current_offer().await.unwrap();
-    let access_token = maxima.access_token();
+    let access_token = maxima.access_token().await?;
 
     let license = request_license(
         offer

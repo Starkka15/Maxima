@@ -1,0 +1,133 @@
+query GetMyFriends($offset: Int!, $limit: Int!, $isMutualFriendsEnabled: Boolean = false) {
+  me {
+    id: pd
+    pd
+    ...InboundFriendInvitationFragment
+    ...OutboundFriendInvitationFragment
+    friends(paging: {limit: $limit, offset: $offset}) {
+      ...FriendsOffsetPage
+      __typename
+    }
+    blockedPlayers(paging: {offset: 0, limit: 20}) {
+      items {
+        pd
+        timestamp
+        playerV2 {
+          ...PlayerWithMutualFriendsCount
+          __typename
+        }
+        __typename
+      }
+      __typename
+    }
+    __typename
+  }
+}
+
+fragment FriendsOffsetPage on FriendsOffsetPage {
+  totalCount
+  hasNextPage
+  hasPreviousPage
+  items {
+    ...friend
+    __typename
+  }
+  __typename
+}
+
+fragment friend on Friend {
+  id: pd
+  pd
+  player {
+    ...PlayerWithMutualFriendsCount
+    __typename
+  }
+  source
+  __typename
+}
+
+fragment PlayerWithMutualFriendsCount on Player {
+  ...Player
+  mutualFriends @include(if: $isMutualFriendsEnabled) {
+    totalCount
+    __typename
+  }
+  __typename
+}
+
+fragment Player on Player {
+  id: pd
+  pd
+  psd
+  displayName
+  uniqueName
+  nickname
+  avatar {
+    ...Avatar
+    __typename
+  }
+  relationship
+  __typename
+}
+
+fragment Avatar on AvatarList {
+  large {
+    ...image
+    __typename
+  }
+  medium {
+    ...image
+    __typename
+  }
+  small {
+    ...image
+    __typename
+  }
+  __typename
+}
+
+fragment image on Image {
+  height
+  width
+  path
+  __typename
+}
+
+fragment InboundFriendInvitationFragment on User {
+  inboundFriendInvitations(paging: {offset: 0, limit: 99}) {
+    items {
+      ...friendInvitation
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
+
+fragment friendInvitation on FriendInvitation {
+  id: pd
+  date
+  pd
+  player {
+    ...PlayerWithMutualFriendsCount
+    __typename
+  }
+  __typename
+}
+
+fragment OutboundFriendInvitationFragment on User {
+  outboundFriendInvitations(paging: {offset: 0, limit: 99}) {
+    items {
+      id: pd
+      pd
+      date
+      player {
+        ...PlayerWithMutualFriendsCount
+        __typename
+      }
+      __typename
+    }
+    __typename
+  }
+  __typename
+}

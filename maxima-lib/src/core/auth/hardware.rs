@@ -101,11 +101,13 @@ impl HardwareInfo {
             Ok(vendor) => vendor.trim().to_owned(),
             Err(_) => String::from("Linux Foundation"),
         };
+
         let board_sn = String::from("None");
         let bios_manufacturer = match fs::read_to_string("/sys/class/dmi/id/bios_vendor") {
             Ok(vendor) => vendor.trim().to_owned(),
             Err(_) => String::from("Linux Foundation"),
         };
+
         let bios_sn = String::from("None");
         let os_install_date = get_root_creation_str();
         let os_sn = match fs::read_to_string("/etc/machine-id") {
@@ -197,6 +199,7 @@ impl HardwareInfo {
             board_manufacturer = board.manufacturer().to_string();
             board_sn = board.serial_number().to_string();
         }
+
         let mut bios_manufacturer = String::from("Apple Inc.");
         let mut bios_sn = String::from("None");
         if let Some(bios) = bios_data.as_ref() {
@@ -281,6 +284,7 @@ impl HardwareInfo {
         if let Some(mac) = get_ea_mac_address() {
             buffer += mac.as_str();
         }
+        
         Ok(hash_fnv1a(buffer.as_bytes()).to_string())
     }
 }
@@ -313,12 +317,15 @@ fn get_root_creation_str() -> String {
 #[cfg(unix)]
 fn generate_pci_pnp_id(vendor: Option<u16>, device: Option<u16>, revision: Option<u16>) -> String {
     let mut sections = vec![];
+
     if let Some(vendor) = vendor {
         sections.push(format!("VEN_{:04X}", vendor));
     }
+
     if let Some(device) = device {
         sections.push(format!("DEV_{:04X}", device));
     }
+
     if let Some(revision) = revision {
         sections.push(format!("REV_{:02X}", revision));
     }

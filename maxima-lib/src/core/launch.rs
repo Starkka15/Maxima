@@ -71,9 +71,16 @@ pub async fn start_game(
 
     let mut maxima = maxima_arc.lock().await;
     info!("Retrieving data about '{}'...", offer_id);
+    
+    let access_token = &maxima.access_token().await?;
 
-    let offer =
-        request_offer_data(&maxima.access_token, offer_id, maxima.locale.full_str()).await?;
+    let offer = request_offer_data(
+        access_token,
+        offer_id,
+        maxima.locale.full_str(),
+    )
+    .await?;
+
     let content_id = offer
         .publishing
         .publishing_attributes
@@ -90,7 +97,7 @@ pub async fn start_game(
     let license = request_license(
         content_id.as_str(),
         "ca5f9ae34d7bcd895e037a17769de60338e6e84", // Need to figure out how this is calculated
-        maxima.access_token.as_str(),
+        &maxima.access_token().await?,
         None,
         None,
     )
@@ -144,7 +151,7 @@ pub async fn start_game(
         .env("EAExternalSource", "EA")
         .env("EAFreeTrialGame", "false")
         .env("EAGameLocale", maxima.locale.full_str())
-        .env("EAGenericAuthToken", maxima.access_token.to_owned())
+        .env("EAGenericAuthToken", access_token)
         .env("EALaunchCode", "4AULYZZ2KJSN2RMHEVUH")
         .env(
             "EALaunchEAID",
@@ -155,7 +162,7 @@ pub async fn start_game(
         //.env("EALaunchOOAUserPass", "")
         //.env("EAOnErrorExitRetCode", "true")
         .env("EALaunchOfflineMode", "false")
-        .env("EALaunchUserAuthToken", maxima.access_token.to_owned())
+        .env("EALaunchUserAuthToken", access_token)
         .env("EALicenseToken", offer_id.to_owned())
         .env("EALsxPort", maxima.lsx_port.to_string())
         .env(

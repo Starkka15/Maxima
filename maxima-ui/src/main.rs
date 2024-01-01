@@ -62,7 +62,7 @@ use maxima::{
         self,
         ecommerce::request_offer_data,
         service_layer::{
-            send_service_request, ServiceGetUserPlayerRequest, ServiceUser, ServiceUserGameProduct,
+            ServiceGetUserPlayerRequest, ServiceUser, ServiceUserGameProduct,
             SERVICE_REQUEST_GETUSERPLAYER,
         },
         Maxima, MaximaEvent,
@@ -606,6 +606,7 @@ impl eframe::App for DemoEguiApp {
         if let Ok(rcv) = self.backend.rx.try_recv() {
             match rcv {
                 interact_thread::MaximaLibResponse::LoginResponse(res) => {
+                    println!("Got something");
                     if let Some(name) = res.res {
                         self.logged_in = true;
                         println!("Logged in as {}!", name);

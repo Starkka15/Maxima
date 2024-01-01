@@ -1,14 +1,15 @@
 use std::time::Duration;
-use std::{io::ErrorKind, net::TcpListener, sync::Arc};
+use std::{io::ErrorKind, net::TcpListener};
 
 use anyhow::Result;
 
 use log::{info, warn};
-use tokio::{sync::Mutex, time::sleep};
+use tokio::time::sleep;
 
-use crate::{core::Maxima, lsx::connection::Connection};
+use crate::core::LockedMaxima;
+use crate::lsx::connection::Connection;
 
-pub async fn start_server(port: u16, maxima: Arc<Mutex<Maxima>>) -> Result<()> {
+pub async fn start_server(port: u16, maxima: LockedMaxima) -> Result<()> {
     let addr = "127.0.0.1:".to_string() + port.to_string().as_str();
 
     let listener = TcpListener::bind(&addr)?;
@@ -29,7 +30,10 @@ pub async fn start_server(port: u16, maxima: Arc<Mutex<Maxima>>) -> Result<()> {
             if let Err(_) = connection.listen().await {
                 warn!("LSX connection closed");
                 connections.remove(idx);
-                maxima.lock().await.set_lsx_connections(connections.len() as u16);
+                maxima
+                    .lock()
+                    .await
+                    .set_lsx_connections(connections.len() as u16);
                 continue;
             }
 
@@ -50,7 +54,7 @@ pub async fn start_server(port: u16, maxima: Arc<Mutex<Maxima>>) -> Result<()> {
         };
 
         info!("New LSX connection: {:?}", addr);
-        
+
         let mut conn = Connection::new(maxima.clone(), socket);
         conn.send_challenge().await.unwrap();
         connections.push(conn);

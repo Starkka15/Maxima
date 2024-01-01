@@ -39,14 +39,14 @@ pub async fn request_offer_data(
     offer: &str,
     locale: &str,
 ) -> Result<CommerceOffer> {
-    let res = ureq::get(&format!("{}/public/{}/{}", API_ECOMMERCE, offer, locale))
-        .set("AuthToken", access_token)
-        .call()?;
+    let res = Client::new().get(&format!("{}/public/{}/{}", API_ECOMMERCE, offer, locale))
+        .header("AuthToken", access_token)
+        .send().await?;
     if res.status() != StatusCode::OK {
-        bail!("Ecommerce request failed: {}", res.into_string()?);
+        bail!("Ecommerce request failed: {}", res.text().await?);
     }
 
-    let text = res.into_string()?;
+    let text = res.text().await?;
     let result = serde_json::from_str(text.as_str())?;
     Ok(result)
 }

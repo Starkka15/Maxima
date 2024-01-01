@@ -25,7 +25,7 @@ lazy_static! {
 }
 
 pub async fn begin_oauth_login_flow<'a>(context: &mut AuthContext<'a>) -> Result<()> {
-    open::that(context.nucleus_auth_url(JUNO_PC_CLIENT_ID, None)?)?;
+    open::that(context.nucleus_auth_url(JUNO_PC_CLIENT_ID, "code")?)?;
     let listener = TcpListener::bind("127.0.0.1:31033").await?;
 
     loop {

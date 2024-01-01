@@ -2,6 +2,8 @@ pub mod context;
 pub mod hardware;
 pub mod login;
 pub mod pc_sign;
+pub mod storage;
+pub mod token_info;
 
 use anyhow::{bail, Result};
 use context::AuthContext;
@@ -15,12 +17,15 @@ use super::{
 };
 
 pub async fn execute_auth_exchange<'a>(
-    access_token: &str,
-    client_id: &str,
     auth_context: &AuthContext<'a>,
+    client_id: &str,
     mut response_type: &str,
 ) -> Result<String> {
-    let url: String = auth_context.nucleus_auth_url(client_id, Some(access_token))?;
+    if auth_context.access_token().is_none() {
+        bail!("To execute an auth exchange you must provide an access token in the auth context");
+    }
+
+    let url: String = auth_context.nucleus_auth_url(client_id, response_type)?;
 
     let client = Client::builder()
         .redirect(redirect::Policy::none())
@@ -67,12 +72,11 @@ pub async fn execute_auth_exchange<'a>(
     Ok(token.to_owned())
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize, Getters)]
 pub struct TokenResponse {
     access_token: String,
     token_type: String,
-    expires_in: u32,
+    expires_in: u64,
     refresh_token: String,
 }
 
@@ -95,7 +99,11 @@ pub async fn execute_connect_token(auth_context: &AuthContext<'_>) -> Result<Tok
 
     let status = res.status();
     if status.is_client_error() || status.is_server_error() {
-        bail!("Token exchange failed with code {}: {}", auth_context.code().unwrap(), res.text().await?);
+        bail!(
+            "Token exchange failed with code {}: {}",
+            auth_context.code().unwrap(),
+            res.text().await?
+        );
     }
 
     let response: TokenResponse = serde_json::from_str(&res.text().await?)?;

@@ -1,0 +1,57 @@
+query GetUserPdWithGameAndFriendsCount {
+  me {
+    id: pd
+    pd
+    player {
+      ...Player
+      __typename
+    }
+    friends(paging: {offset: 0, limit: 1}) {
+      totalCount
+      __typename
+    }
+    ownedGameProducts(paging: {limit: 1}, productFound: true) {
+      totalCount
+      __typename
+    }
+    __typename
+  }
+}
+
+fragment Player on Player {
+  id: pd
+  pd
+  psd
+  displayName
+  uniqueName
+  nickname
+  avatar {
+    ...Avatar
+    __typename
+  }
+  relationship
+  __typename
+}
+
+fragment Avatar on AvatarList {
+  large {
+    ...image
+    __typename
+  }
+  medium {
+    ...image
+    __typename
+  }
+  small {
+    ...image
+    __typename
+  }
+  __typename
+}
+
+fragment image on Image {
+  height
+  width
+  path
+  __typename
+}

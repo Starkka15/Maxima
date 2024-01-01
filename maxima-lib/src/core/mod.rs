@@ -42,12 +42,12 @@ use self::{
     launch::ActiveGameContext,
     locale::Locale,
     service_layer::{
-        send_service_request, ServiceGameType, ServiceGetBasicPlayerRequestBuilder,
+        ServiceGameType, ServiceGetBasicPlayerRequestBuilder,
         ServiceGetPreloadedOwnedGamesRequestBuilder, ServiceGetUserPlayerRequest, ServiceImage,
         ServicePlatform, ServicePlayer, ServiceStorefront, ServiceUser,
         SERVICE_REQUEST_GETBASICPLAYER, SERVICE_REQUEST_GETPRELOADEDOWNEDGAMES,
-        SERVICE_REQUEST_GETUSERPLAYER,
-    },
+        SERVICE_REQUEST_GETUSERPLAYER, ServiceLayerClient,
+    }, auth::storage::{AuthStorage, LockedAuthStorage},
 };
 
 #[derive(Clone, IntoStaticStr)]
@@ -63,7 +63,10 @@ pub type MaximaLSXEventCallback = extern "C" fn(*const c_char);
 #[derive(Getters)]
 pub struct Maxima {
     locale: Locale,
-    access_token: String,
+
+    auth_storage: LockedAuthStorage,
+    service_layer: ServiceLayerClient,
+
     playing: Option<ActiveGameContext>,
 
     lsx_port: u16,
@@ -77,8 +80,10 @@ pub struct Maxima {
     pending_events: Vec<MaximaEvent>,
 }
 
+pub type LockedMaxima = Arc<Mutex<Maxima>>;
+
 impl Maxima {
-    pub fn new() -> Arc<Mutex<Self>> {
+    pub fn new() -> Result<Arc<Mutex<Self>>> {
         let lsx_port = if let Ok(lsx_port) = env::var("MAXIMA_LSX_PORT") {
             lsx_port.parse::<u16>().unwrap()
         } else {
@@ -91,16 +96,19 @@ impl Maxima {
             Duration::from_secs(5 * 60),
         );
 
-        Arc::new(Mutex::new(Self {
+        let auth_storage = AuthStorage::load()?;
+
+        Ok(Arc::new(Mutex::new(Self {
             locale: Locale::EnUs,
-            access_token: String::new(),
+            auth_storage: auth_storage.clone(),
+            service_layer: ServiceLayerClient::new(auth_storage),
             playing: None,
             lsx_port,
             lsx_event_callback: None,
             lsx_connections: 0,
             request_cache,
             pending_events: Vec::new(),
-        }))
+        })))
     }
 
     pub async fn start_lsx(&self, maxima: Arc<Mutex<Maxima>>) -> Result<()> {
@@ -116,14 +124,23 @@ impl Maxima {
         Ok(())
     }
 
+    pub async fn access_token(&mut self) -> Result<String> {
+        let mut auth_storage = self.auth_storage.lock().await;
+        let account = auth_storage.current();
+        if account.is_none() {
+            bail!("You are not signed in");
+        }
+
+        Ok(account.unwrap().access_token().await?.to_owned())
+    }
+
     pub async fn local_user(&self) -> Result<ServiceUser> {
         let cache_key = "user_player";
         if let Some(cached) = self.request_cache.get(cache_key) {
             return Ok(cached);
         }
 
-        let user: ServiceUser = send_service_request(
-            &self.access_token,
+        let user: ServiceUser = self.service_layer.request(
             SERVICE_REQUEST_GETUSERPLAYER,
             ServiceGetUserPlayerRequest {},
         )
@@ -145,8 +162,7 @@ impl Maxima {
     }
 
     pub async fn owned_games(&self, page: u32) -> Result<ServiceUser> {
-        let data: ServiceUser = send_service_request(
-            self.access_token.as_str(),
+        let data: ServiceUser = self.service_layer.request(
             SERVICE_REQUEST_GETPRELOADEDOWNEDGAMES,
             ServiceGetPreloadedOwnedGamesRequestBuilder::default()
                 .is_mac(false)
@@ -182,8 +198,7 @@ impl Maxima {
             return Ok(cached);
         }
 
-        let data: ServicePlayer = send_service_request(
-            self.access_token.as_str(),
+        let data: ServicePlayer = self.service_layer.request(
             SERVICE_REQUEST_GETBASICPLAYER,
             ServiceGetBasicPlayerRequestBuilder::default()
                 .pd(id.to_string())
@@ -206,6 +221,7 @@ impl Maxima {
             image.width().unwrap_or(727),
             image.height().unwrap_or(727),
         )?;
+
         if path.exists() {
             return Ok(());
         }
@@ -241,10 +257,6 @@ impl Maxima {
         create_dir_all(&dir)?;
 
         Ok(dir.join(format!("{}_{}x{}.jpg", id, width, height)))
-    }
-
-    pub fn set_access_token(&mut self, token: String) {
-        self.access_token = token;
     }
 
     pub fn set_lsx_port(&mut self, port: u16) {

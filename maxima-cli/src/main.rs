@@ -5,9 +5,8 @@ use inquire::Select;
 use lazy_static::lazy_static;
 use log::{error, info, warn};
 use regex::Regex;
-use tokio::sync::Mutex;
 
-use std::{sync::Arc, vec::Vec};
+use std::vec::Vec;
 
 #[cfg(windows)]
 use is_elevated::is_elevated;
@@ -18,7 +17,10 @@ use maxima::{
     util::service::{is_service_running, is_service_valid, register_service_user, start_service},
 };
 
-use maxima::core::auth::execute_connect_token;
+use maxima::core::{
+    auth::{execute_connect_token, TokenResponse},
+    LockedMaxima,
+};
 use maxima::{
     content::{zip::ZipFile, ContentService},
     core::{
@@ -72,8 +74,12 @@ struct Args {
 #[tokio::main]
 async fn main() {
     let result = startup().await;
-    if result.is_err() {
-        error!("{}", result.err().unwrap());
+
+    if let Some(e) = result.err() {
+        match std::env::var("RUST_BACKTRACE") {
+            Ok(_) => error!("{}:\n{}", e, e.backtrace().to_string()),
+            Err(_) => error!("{}", e),
+        }
     }
 }
 
@@ -112,6 +118,47 @@ async fn native_setup() -> Result<()> {
     Ok(())
 }
 
+pub async fn login_flow(login_override: Option<String>) -> Result<TokenResponse> {
+    let mut auth_context = AuthContext::new()?;
+
+    if let Some(access_token) = &login_override {
+        let access_token = if let Some(captures) = MANUAL_LOGIN_PATTERN.captures(&access_token) {
+            let persona = &captures[1];
+            let password = &captures[2];
+
+            let login_result = manual_login(persona, password).await;
+            if login_result.is_err() {
+                bail!("Login failed: {}", login_result.err().unwrap().to_string());
+            }
+
+            login_result.unwrap()
+        } else {
+            access_token.to_owned()
+        };
+
+        auth_context.set_access_token(&access_token);
+        let code = execute_auth_exchange(&auth_context, "JUNO_PC_CLIENT", "code").await?;
+        auth_context.set_code(&code);
+    } else {
+        begin_oauth_login_flow(&mut auth_context).await?
+    };
+
+    if auth_context.code().is_none() {
+        bail!("Login failed!");
+    }
+
+    if login_override.is_none() {
+        info!("Received login...");
+    }
+
+    let token_res = execute_connect_token(&auth_context).await;
+    if token_res.is_err() {
+        bail!("Login failed: {}", token_res.err().unwrap().to_string());
+    }
+
+    token_res
+}
+
 async fn startup() -> Result<()> {
     let args = Args::parse();
 
@@ -121,62 +168,23 @@ async fn startup() -> Result<()> {
 
     native_setup().await?;
 
-    info!("Logging in...");
-
-    let mut auth_context = AuthContext::new()?;
-
-    if let Some(access_token) = &args.login {
-        let access_token = if let Some(captures) = MANUAL_LOGIN_PATTERN.captures(&access_token) {
-            let persona = &captures[1];
-            let password = &captures[2];
-
-            let login_result = manual_login(persona, password).await;
-            if login_result.is_err() {
-                error!("Login failed: {}", login_result.err().unwrap().to_string());
-                return Ok(());
-            }
-
-            login_result.unwrap()
-        } else {
-            access_token.to_owned()
-        };
-
-        let code =
-            execute_auth_exchange(&&access_token, "JUNO_PC_CLIENT", &auth_context, "code").await?;
-        auth_context.set_code(&code);
-    } else {
-        let result = begin_oauth_login_flow(&mut auth_context).await;
-        if result.is_err() {
-            error!("Login failed: {}", result.err().unwrap().to_string());
-            return Ok(());
-        }
-    };
-
-    if auth_context.code().is_none() {
-        error!("Login failed!");
-        return Ok(());
-    }
-
-    let token_res = execute_connect_token(&auth_context).await;
-    if token_res.is_err() {
-        error!("Login failed: {}", token_res.err().unwrap().to_string());
-        return Ok(());
-    }
-
-    let token = token_res.unwrap().access_token().to_owned();
-
-    if args.login.is_none() {
-        info!("Received login...");
-    }
-
     // Take back the focus since the browser and bootstrap will take it
     take_foreground_focus()?;
 
-    let maxima_arc = Maxima::new();
+    let maxima_arc = Maxima::new()?;
 
     {
-        let mut maxima = maxima_arc.lock().await;
-        maxima.set_access_token(token.to_owned());
+        let maxima = maxima_arc.lock().await;
+
+        {
+            let mut auth_storage = maxima.auth_storage().lock().await;
+            let logged_in = auth_storage.logged_in().await?;
+            if !logged_in || args.login.is_some() {
+                info!("Logging in...");
+                let token_res = login_flow(args.login).await?;
+                auth_storage.add_account(&token_res).await?;
+            }
+        }
 
         let user = maxima.local_user().await?;
 
@@ -202,7 +210,7 @@ async fn startup() -> Result<()> {
     Ok(())
 }
 
-async fn run_interactive(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
+async fn run_interactive(maxima_arc: LockedMaxima) -> Result<()> {
     let launch_options = vec!["Launch Game", "Install Game", "List Games", "Account Info"];
     let name = Select::new(
         "Welcome to Maxima! What would you like to do?",
@@ -221,7 +229,7 @@ async fn run_interactive(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
     Ok(())
 }
 
-async fn interactive_start_game(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
+async fn interactive_start_game(maxima_arc: LockedMaxima) -> Result<()> {
     let maxima = maxima_arc.lock().await;
 
     let owned_games = maxima.owned_games(1).await?;
@@ -249,7 +257,7 @@ async fn interactive_start_game(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
     Ok(())
 }
 
-async fn interactive_install_game(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
+async fn interactive_install_game(maxima_arc: LockedMaxima) -> Result<()> {
     let maxima = maxima_arc.lock().await;
 
     let owned_games = maxima.owned_games(1).await?;
@@ -265,9 +273,7 @@ async fn interactive_install_game(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> 
         .find(|g| g.product().name() == name)
         .unwrap();
 
-    drop(maxima);
-
-    let content_service = ContentService::new(maxima_arc);
+    let content_service = ContentService::new(maxima.auth_storage().clone());
     let builds = content_service
         .available_builds(&game.origin_offer_id())
         .await?;
@@ -295,11 +301,11 @@ async fn interactive_install_game(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> 
     Ok(())
 }
 
-async fn print_account_info(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
-    let maxima = maxima_arc.lock().await;
+async fn print_account_info(maxima_arc: LockedMaxima) -> Result<()> {
+    let mut maxima = maxima_arc.lock().await;
     let user = maxima.local_user().await?;
 
-    info!("Access Token: {}", maxima.access_token());
+    info!("Access Token: {}", maxima.access_token().await?);
 
     let player = user.player().as_ref().unwrap();
     info!("Username: {}", player.unique_name());
@@ -308,21 +314,18 @@ async fn print_account_info(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
     Ok(())
 }
 
-async fn create_auth_code(maxima_arc: Arc<Mutex<Maxima>>, client_id: &str) -> Result<()> {
-    let maxima = maxima_arc.lock().await;
+async fn create_auth_code(maxima_arc: LockedMaxima, client_id: &str) -> Result<()> {
+    let mut maxima = maxima_arc.lock().await;
 
-    let auth_code = execute_auth_exchange(
-        &maxima.access_token(),
-        client_id,
-        &AuthContext::new()?,
-        "code",
-    )
-    .await?;
+    let mut context = AuthContext::new()?;
+    context.set_access_token(&maxima.access_token().await?);
+
+    let auth_code = execute_auth_exchange(&context, client_id, "code").await?;
     info!("Auth Code for {}: {}", client_id, auth_code);
     Ok(())
 }
 
-async fn list_games(maxima_arc: Arc<Mutex<Maxima>>) -> Result<()> {
+async fn list_games(maxima_arc: LockedMaxima) -> Result<()> {
     let maxima = maxima_arc.lock().await;
 
     info!("Owned games:");
@@ -344,7 +347,7 @@ async fn start_game(
     offer_id: &str,
     game_path_override: Option<String>,
     game_args: Vec<String>,
-    maxima_arc: Arc<Mutex<Maxima>>,
+    maxima_arc: LockedMaxima,
 ) -> Result<()> {
     {
         let maxima = maxima_arc.lock().await;

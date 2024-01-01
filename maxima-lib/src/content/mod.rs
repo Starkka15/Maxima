@@ -1,16 +1,15 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use anyhow::Result;
-use tokio::sync::Mutex;
 
 use crate::core::{
+    auth::storage::LockedAuthStorage,
     cache::DynamicCache,
     service_layer::{
-        send_service_request, ServiceAvailableBuild, ServiceAvailableBuildsRequestBuilder,
-        ServiceDownloadType, ServiceDownloadUrlMetadata, ServiceDownloadUrlRequestBuilder,
+        ServiceAvailableBuild, ServiceAvailableBuildsRequestBuilder, ServiceDownloadType,
+        ServiceDownloadUrlMetadata, ServiceDownloadUrlRequestBuilder, ServiceLayerClient,
         SERVICE_REQUEST_AVAILABLEBUILDS, SERVICE_REQUEST_DOWNLOADURL,
     },
-    Maxima,
 };
 
 pub mod downloader;
@@ -34,12 +33,12 @@ impl ServiceAvailableBuilds {
 }
 
 pub struct ContentService {
-    maxima: Arc<Mutex<Maxima>>,
+    service_layer: ServiceLayerClient,
     request_cache: DynamicCache<String>,
 }
 
 impl ContentService {
-    pub fn new(maxima: Arc<Mutex<Maxima>>) -> Self {
+    pub fn new(auth: LockedAuthStorage) -> Self {
         let request_cache = DynamicCache::new(
             100,
             Duration::from_secs(30 * 60),
@@ -47,7 +46,7 @@ impl ContentService {
         );
 
         Self {
-            maxima,
+            service_layer: ServiceLayerClient::new(auth),
             request_cache,
         }
     }
@@ -58,14 +57,15 @@ impl ContentService {
             return Ok(cached);
         }
 
-        let builds: Vec<ServiceAvailableBuild> = send_service_request(
-            &self.maxima.lock().await.access_token(),
-            SERVICE_REQUEST_AVAILABLEBUILDS,
-            ServiceAvailableBuildsRequestBuilder::default()
-                .offer_id(offer_id.to_owned())
-                .build()?,
-        )
-        .await?;
+        let builds: Vec<ServiceAvailableBuild> = self
+            .service_layer
+            .request(
+                SERVICE_REQUEST_AVAILABLEBUILDS,
+                ServiceAvailableBuildsRequestBuilder::default()
+                    .offer_id(offer_id.to_owned())
+                    .build()?,
+            )
+            .await?;
 
         let builds = ServiceAvailableBuilds { builds };
         self.request_cache.insert(cache_key, builds.clone());
@@ -82,15 +82,16 @@ impl ContentService {
             return Ok(cached);
         }
 
-        let url: ServiceDownloadUrlMetadata = send_service_request(
-            &self.maxima.lock().await.access_token(),
-            SERVICE_REQUEST_DOWNLOADURL,
-            ServiceDownloadUrlRequestBuilder::default()
-                .offer_id(offer_id.to_owned())
-                .build_id(build_id.unwrap_or_default().to_owned())
-                .build()?,
-        )
-        .await?;
+        let url: ServiceDownloadUrlMetadata = self
+            .service_layer
+            .request(
+                SERVICE_REQUEST_DOWNLOADURL,
+                ServiceDownloadUrlRequestBuilder::default()
+                    .offer_id(offer_id.to_owned())
+                    .build_id(build_id.unwrap_or_default().to_owned())
+                    .build()?,
+            )
+            .await?;
 
         self.request_cache.insert(cache_key, url.clone());
         Ok(url)
