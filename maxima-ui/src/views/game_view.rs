@@ -33,7 +33,12 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
   StripBuilder::new(ui).size(Size::remainder()).vertical(|mut strip| {
     strip.cell(|ui| {
       let mut hero_rect = Rect::clone(&ui.available_rect_before_wrap());
-      let aspect_ratio = game.hero.size.x / game.hero.size.y;
+      let aspect_ratio = 
+      if game.hero.size.x != 0.0 && game.hero.size.y != 0.0 {
+        game.hero.size.x / game.hero.size.y
+      } else {
+        16.0 / 9.0
+      };
       let style = ui.style_mut();
       style.visuals.clip_rect_margin = 0.0;
       style.spacing.item_spacing = vec2(0.0,0.0);

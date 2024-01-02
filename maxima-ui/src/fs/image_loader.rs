@@ -15,11 +15,7 @@ impl ImageLoader {
   pub fn load_from_fs(path : &str) -> Result<egui_extras::RetainedImage> {
     debug!("Loading image {:?}",path);
     if let Ok(img) = ImageReader::open(path) {
-      debug!("Image loaded, trying decode");
       if let Ok(img_decoded) = img.decode() {
-        debug!("Image decoded, trying generate");
-        debug!("{} bytes per pixel", img_decoded.color().bytes_per_pixel());
-        debug!("{} channels", img_decoded.color().channel_count());
         match img_decoded.color().channel_count() {
           2 => {
               let img_a = DynamicImage::ImageRgba8(img_decoded.into_rgba8());
@@ -45,7 +41,6 @@ impl ImageLoader {
         let mut buffer = String::new();
         f.read_to_string(&mut buffer)?;
         if let Ok(yeah) = RetainedImage::from_svg_str(format!("{:?}_Retained_Decoded",path), &buffer) {
-          error!("Loaded SVG at {}x{}", yeah.width(), yeah.height());
           return Ok(yeah)
         } else {
           error!("Failed to read SVG from \"{}\"!", path);

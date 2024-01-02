@@ -11,10 +11,22 @@ use std::{
     vec::Vec, fs,
 };
 
-use maxima::core::{auth::{login, context::AuthContext, execute_auth_exchange}, launch, service_layer::{ServiceGame, SERVICE_REQUEST_GAMEIMAGES, ServiceGameImagesRequestBuilder}, clients::JUNO_PC_CLIENT_ID};
 use maxima::{
-    core::Maxima,
-    util::native::take_foreground_focus,
+    core::{
+        auth::{
+            login, context::AuthContext, execute_auth_exchange
+        },
+        launch,
+        Maxima,
+        service_layer::{
+            ServiceGame, SERVICE_REQUEST_GAMEIMAGES, ServiceGameImagesRequestBuilder
+        },
+        clients::JUNO_PC_CLIENT_ID
+    },
+    util::native::{
+        maxima_dir,
+        take_foreground_focus
+    }
 };
 use maxima::core::auth::nucleus_connect_token;
 
@@ -192,11 +204,14 @@ impl MaximaThread {
                     debug!("{:?}", owned_games);
                     if let Some(games_list) = owned_games.owned_game_products() {
                         for game in games_list.items() {
+                            let slug = game.product().game_slug();
+                            let game_hero = maxima_dir().unwrap().join("cache/ui/images/").join(&slug).join("hero.jpg");
+                            let game_logo = maxima_dir().unwrap().join("cache/ui/images/").join(&slug).join("logo.png");
                             // includes EA play titles, but also lesser editions of owned games
                             /* !game.product.game_product_user.ownership_methods.contains(&ServiceOwnershipMethod::XgpVault) */
                             if true {
-                                let has_hero = fs::metadata(format!("./res/{}/hero.jpg",game.product().game_slug().clone())).is_ok();
-                                let has_logo = fs::metadata(format!("./res/{}/logo.png",game.product().game_slug().clone())).is_ok();
+                                let has_hero = fs::metadata(&game_hero).is_ok();
+                                let has_logo = fs::metadata(&game_logo).is_ok();
                                 let images: Option<ServiceGame> = // TODO: make it a result
                                     if 
                                         !has_hero
@@ -215,11 +230,11 @@ impl MaximaThread {
                                     if let Some(largest_logo) = &logos.largest_image() {
                                         Some(largest_logo.path().clone())
                                     } else {
-                                        error!("Failed to get largest ServiceImage logo for {}", game.product().game_slug().clone());
+                                        error!("Failed to get largest ServiceImage logo for {}", &slug);
                                         None
                                     }
                                 } else {
-                                    error!("Failed to get ServiceImageRendition logos for {}", game.product().game_slug().clone());
+                                    error!("Failed to get ServiceImageRendition logos for {}", &slug);
                                     None
                                 }
                             } else {
@@ -229,11 +244,11 @@ impl MaximaThread {
 
                             let game_logo: Option<Arc<GameImage>> = 
                             if let Some(logo_url) = logo_url_option {
-                                debug!("sending GameImage struct for {}", game.product().game_slug().clone());
+                                debug!("sending GameImage struct for {}", &slug);
                                 Some(GameImage {
                                     retained: None,
                                     renderable: None,
-                                    _fs_path: format!("./res/{}/logo.png",game.product().game_slug().clone()),
+                                    _fs_path: game_logo.to_str().unwrap().to_string().clone(),
                                     url: logo_url,
                                     size: vec2(0.0, 0.0)
                                 }.into())
@@ -242,7 +257,7 @@ impl MaximaThread {
                                 Some(GameImage {
                                     retained: None,
                                     renderable: None,
-                                    _fs_path: format!("./res/{}/logo.png",game.product().game_slug().clone()),
+                                    _fs_path: game_logo.to_str().unwrap().to_string().clone(),
                                     url: String::new(),
                                     size: vec2(0.0, 0.0)
                                 }.into())
@@ -259,28 +274,28 @@ impl MaximaThread {
                                     hero: GameImage {
                                         retained: None,
                                         renderable: None,
-                                        _fs_path: format!("./res/{}/hero.jpg",game.product().game_slug().clone()),
+                                        _fs_path: game_hero.to_str().unwrap().to_string().clone(),
                                         url: if let Some(img) = &images {
-                                            if let Some(pack) = &img.pack_art() {
+                                            if let Some(pack) = &img.key_art() {
                                                 if let Some(img) = &pack.aspect_2x1_image() {
-                                                    info!("Setting hero path for {} to {:?}", game.product().game_slug().clone(), img.path().clone());
+                                                    info!("Setting hero path for {} to {:?}", &slug, img.path().clone());
                                                     img.path().clone()
                                                 } else if let Some(img) = &pack.aspect_16x9_image() {
-                                                    info!("Setting hero path for {} to {:?}", game.product().game_slug().clone(), img.path().clone());
+                                                    info!("Setting hero path for {} to {:?}", &slug, img.path().clone());
                                                     img.path().clone()
                                                 } else if let Some(img) = &pack.largest_image() {
-                                                    info!("Setting hero path for {} to {:?}", game.product().game_slug().clone(), img.path().clone());
+                                                    info!("Setting hero path for {} to {:?}", &slug, img.path().clone());
                                                     img.path().clone()
                                                 } else {
-                                                    error!("Failed to get hero path for {}", game.product().game_slug().clone());
+                                                    error!("Failed to get hero path for {}", &slug);
                                                     String::new()
                                                 }
                                             } else {
-                                                error!("Failed to get pack art for {}", game.product().game_slug().clone());
+                                                error!("Failed to get pack art for {}", &slug);
                                                 String::new()
                                             }
                                         } else {
-                                            error!("Failed to get pack art image container for {}", game.product().game_slug().clone());
+                                            error!("Failed to get pack art image container for {}", &slug);
                                             String::new()
                                         },
                                         size: vec2(0.0, 0.0)

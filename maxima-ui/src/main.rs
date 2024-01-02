@@ -312,7 +312,7 @@ impl DemoEguiApp {
                 .expect("Could not load translation file"),
             //critical_bg_thread_crashed: false,
             backend: MaximaThread::new(&cc.egui_ctx), //please don't fucking break
-            logged_in: args.no_login, //temporary hack to just let me work on UI without needing to implement everything on unix lmao
+            logged_in: args.no_login, // largely deprecated but i'm going to keep it here
             in_progress_login: false,
             in_progress_login_type: InProgressLoginType::Oauth,
             in_progress_username: String::new(),

@@ -16,6 +16,7 @@ use log::{debug, error, info};
 use crate::GameImage;
 use crate::GameInfo;
 use crate::ImageLoader;
+use maxima::util::native::maxima_dir;
 
 #[derive(Clone, PartialEq)]
 pub enum GameImageType {
@@ -67,18 +68,21 @@ impl GameImageHandler {
             let slug0 = received.game_slug.clone();
             debug!("[Loader thread] received request to load {} for game \"{}\"", filename, slug0);
 
-            if !fs::metadata(format!("./res/{}/",&slug0)).is_ok() { // folder is missing
-              fs::create_dir(format!("./res/{}/",&slug0)).expect("FS ERROR, couldn't create a directory")
+            let cache_folder = maxima_dir().unwrap().join("cache/ui/images").join(&slug0);
+            if !fs::metadata(&cache_folder).is_ok() { // folder is missing
+              let res = fs::create_dir_all(&cache_folder);
+              if res.is_err() {
+                error!("Failed to create directory {:?}", &cache_folder);
+              }
             }
-
-            if !fs::metadata(format!("./res/{}/{}",&slug0, &filename)).is_ok() { //image hasn't been cached yet
+            let file_name = &cache_folder.join(&filename);
+            if !fs::metadata(&file_name).is_ok() { //image hasn't been cached yet
               if let Some(img_url) = received.url {
                 info!("Downloading image at {:?}", img_url);
                 let result = reqwest::get(&img_url).await;
                 if let Ok(response) = result {
-                  if let Ok(body) = response.bytes().await {  
-                    let filename = format!("./res/{}/{}",&slug0, &filename);
-                    if let Ok(mut file) = File::create(&filename).await {
+                  if let Ok(body) = response.bytes().await {
+                    if let Ok(mut file) = File::create(&file_name).await {
                       let copy_result = io::copy(&mut body.as_slice(), &mut file).await;
                       if copy_result.is_ok() {
                         debug!("Copied file!")
@@ -86,7 +90,7 @@ impl GameImageHandler {
                         error!("Failed to copy file! Reason: {:?}", copy_result.err())
                       }
                     } else {
-                      error!("Failed to create {}", &filename);
+                      error!("Failed to create {:?}", &file_name);
                     }
                   }
                 } else {
@@ -96,7 +100,7 @@ impl GameImageHandler {
               }
               // TODO: image downloading
             }
-            if let Ok(img) = ImageLoader::load_from_fs(&format!("./res/{}/{}",&String::from(slug0.clone()),filename)) {
+            if let Ok(img) = ImageLoader::load_from_fs(&file_name.to_str().unwrap()) {
 
               let tmp_size = img.size_vec2();
               let rtn = ImageResponse {
@@ -113,35 +117,6 @@ impl GameImageHandler {
               tx1.send(rtn).expect("Failed to send from loader thread");
               context.request_repaint();
             }
-
-            /* shitass cold code, keeping it in here in case i need to fall back to a system that wasn't a hail mary
-            if received.game_slug.contains("battlefield-4") && received.image_type == GameImageType::Hero {
-              panic!("Intentional test panic");
-            }
-
-            let img_type = match received.image_type {
-              GameImageType::Icon => "icon.png",
-              GameImageType::Hero => "hero.jpg",
-              GameImageType::Logo => "logo.png",
-            };
-            let strng = received.game_slug.clone();
-            let strng1 = received.game_slug.clone();
-            
-            debug!("[Loader thread] received request to load {} for game \"{}\"", img_type, strng);
-            if !fs::metadata(format!("./res/{}/",strng.clone())).is_ok() {
-
-            } else {
-              if let Ok(img) = ImageLoader::load_from_fs(&format!("./res/{}/{}",&String::from(strng),img_type)) {
-
-                let rtn = ImageResponse {
-                  game_slug : String::from(&strng1),
-                  image_type : received.image_type,
-                  image : img.into()
-                };
-                tx1.send(rtn).expect("Failed to send from loader thread");
-              }
-            }
-            */
           }
         }
       })
@@ -167,7 +142,6 @@ impl GameImageHandler {
     } else {
       bail!("kys");
     }
-    //Ok(ImageLoader::load_from_fs(&format!("./res/{}/{}.png",id,name)))
   }
 }
 
