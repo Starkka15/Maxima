@@ -178,6 +178,7 @@ ecommerce_type!(
 ecommerce_enum!(EntitlementExternalType, {
     Steam,
     Subscription,
+    XgpVaultGame,
 });
 
 ecommerce_enum!(EntitlementType, {

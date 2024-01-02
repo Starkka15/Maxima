@@ -152,6 +152,7 @@ pub async fn start_game(
         .env("EAAuthCode", "unavailable")
         .env("EAConnectionId", offer_id.to_owned())
         .env("EAEgsProxyIpcPort", "0")
+        .env("EAEntitlementSource", "EA")
         .env("EAExternalSource", "EA")
         .env("EAFreeTrialGame", "false")
         .env("EAGameLocale", maxima.locale.full_str())
@@ -170,6 +171,7 @@ pub async fn start_game(
             "EARtPLaunchCode",
             simple_crypto::rtp_handshake().to_string(),
         )
+        .env("EASecureLaunchTokenTemp", user.id())
         .env("EASteamProxyIpcPort", "0")
         .env("OriginSessionKey", "5a81a155-7bf8-444c-a229-c22133447d88")
         .env("ContentId", content_id.to_owned());
