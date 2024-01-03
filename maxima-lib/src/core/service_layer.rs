@@ -60,12 +60,13 @@ macro_rules! define_graphql_request {
     }}
 }
 
-define_graphql_request!(availableBuilds);
-define_graphql_request!(downloadUrl);
-define_graphql_request!(GameImages);
-define_graphql_request!(GetBasicPlayer);
-define_graphql_request!(getPreloadedOwnedGames);
-define_graphql_request!(GetUserPlayer);
+define_graphql_request!(availableBuilds); // Input: ServiceAvailableBuildsRequest, Output: ServiceAvailableBuild[]
+define_graphql_request!(downloadUrl); // Input: ServiceDownloadUrlRequest, Output: ServiceDownloadUrlMetadata
+define_graphql_request!(GameImages); // Input: ServiceGameImagesRequest, Output: ServiceGame
+define_graphql_request!(GetBasicPlayer); // Input: ServiceGetBasicPlayerRequest, Output: ServicePlayer
+define_graphql_request!(getPreloadedOwnedGames); // Input: ServiceGetPreloadedOwnedGamesRequest, Output: ServiceUser (with owned_game_products field set)
+define_graphql_request!(GetUserPlayer); // Input: ServiceGetUserPlayerRequest, Output: ServiceUser
+define_graphql_request!(GameSystemRequirements); // Input: ServiceGameSystemRequirementsRequest, Output: ServiceGameSystemRequirements
 
 #[derive(Clone)]
 pub struct ServiceLayerClient {
@@ -492,4 +493,21 @@ service_layer_type!(GameBundleInput, {
 service_layer_type!(GameBundleRequest, {
     bundles: Vec<ServiceGameBundleInput>,
     region: String,
+});
+
+service_layer_type!(GameSystemRequirementsRequest, {
+    slug: String,
+    locale: String, // Short string, eg "en"
+});
+
+service_layer_type!(SystemRequirements, {
+    minimum: String,
+    recommended: String,
+    platform: ServicePlatform,
+});
+
+service_layer_type!(GameSystemRequirements, {
+    id: String,
+    game_type: ServiceGameProductType,
+    system_requirements: Vec<ServiceSystemRequirements>,
 });
