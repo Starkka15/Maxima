@@ -1,9 +1,10 @@
-use std::cmp;
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use bytebuffer::{ByteBuffer, Endian};
 use derive_getters::Getters;
+use encoding::{all::WINDOWS_1252, DecoderTrap, Encoding};
 use log::warn;
 use reqwest::Client;
+use std::cmp;
 
 /// This module is based on https://users.cs.jmu.edu/buchhofp/forensics/formats/pkzip.html
 
@@ -87,7 +88,7 @@ impl ZipFileEntry {
         entry.crc32 = data.read_u32()?;
         entry.compressed_size = data.read_u32()? as i64;
         entry.uncompressed_size = data.read_u32()? as i64;
-        
+
         let file_name_len = data.read_u16()?;
         let extra_field_len = data.read_u16()?;
         let file_comment_len = data.read_u16()?;
@@ -96,10 +97,21 @@ impl ZipFileEntry {
 
         data.read_u16()?; // Internal attr.
         data.read_u32()?; // External attr.
-        
+
         entry.local_header_offset = data.read_u32()? as i64;
 
-        entry.name = String::from_utf8(data.read_bytes(file_name_len as usize)?)?;
+        entry.name = match WINDOWS_1252.decode(
+            &data.read_bytes(file_name_len as usize)?,
+            DecoderTrap::Strict,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                bail!(
+                    "Failed to decode file name with Windows-1252 encoding: {}",
+                    e
+                );
+            }
+        };
         entry.extra_field = data.read_bytes(extra_field_len as usize)?;
 
         if let Ok(data) = entry.extra_field(0x01) {
@@ -147,7 +159,11 @@ impl ZipFileEntry {
             }
         }
 
-        bail!("Failed to find extra field {} for zip entry {}", id, self.name);
+        bail!(
+            "Failed to find extra field {} for zip entry {}",
+            id,
+            self.name
+        );
     }
 }
 
@@ -229,31 +245,35 @@ impl ZipFile {
         let response = client.head(url).send().await?;
         let content_length = response.headers().get("content-length").unwrap();
         let content_length = content_length.to_str()?.parse::<i64>().unwrap_or(0);
-    
+
         let mut data: Vec<u8> = Vec::with_capacity(MAX_BACKSCAN_OFFSET);
         let mut offset = content_length - 8 * 1024;
         if offset < 0 {
             bail!("Something went wrong while requesting a zip manifest");
         }
-    
+
         let mut zip = Self::default();
-    
+
         while offset > 0 && data.len() < MAX_BACKSCAN_OFFSET {
             let read = content_length - offset - data.len() as i64;
             let start_offset = content_length - data.len() as i64 - read;
             let end_offset = start_offset + read;
-            
+
             let range_header = format!("bytes={}-{}", start_offset, end_offset - 1);
-            let response = client.get(url).header("range", &range_header).send().await?;
+            let response = client
+                .get(url)
+                .header("range", &range_header)
+                .send()
+                .await?;
             let this_data = response.bytes().await?.to_vec();
             data = [this_data, data].concat();
-    
+
             offset = zip.load(&mut ByteBuffer::from_vec(data.clone()), content_length)?;
             if offset > content_length {
                 bail!("Requested read was too big");
             }
         }
-    
+
         Ok(zip)
     }
 
@@ -271,7 +291,10 @@ impl ZipFile {
         let mut eocd = EndOfCentralDirectory::default();
         let result = eocd.parse(data);
         if result.is_err() {
-            bail!("Failed to read end of central directory: {}", result.err().unwrap());
+            bail!(
+                "Failed to read end of central directory: {}",
+                result.err().unwrap()
+            );
         }
 
         // Check if we're Zip64
@@ -310,7 +333,7 @@ impl ZipFile {
         }
 
         if data.len() < (total_size - eocd.cd_offset) as usize {
-            if eocd.cd_offset < total_size { 
+            if eocd.cd_offset < total_size {
                 return Ok(eocd.cd_offset);
             }
 
@@ -326,11 +349,20 @@ impl ZipFile {
         Ok(0)
     }
 
-    fn load_central_directory(&mut self, data: &mut ByteBuffer, eocd: EndOfCentralDirectory) -> Result<()> {
+    fn load_central_directory(
+        &mut self,
+        data: &mut ByteBuffer,
+        eocd: EndOfCentralDirectory,
+    ) -> Result<()> {
         for i in 0..eocd.total_entries {
             let result = ZipFileEntry::parse(data);
             if let Some(err) = result.as_ref().err() {
-                bail!("Failed to load central directory entry {} (out of {}): {}", i, eocd.total_entries, err);
+                bail!(
+                    "Failed to load central directory entry {} (out of {}): {}",
+                    i,
+                    eocd.total_entries,
+                    err
+                );
             }
 
             let entry = result.unwrap();
