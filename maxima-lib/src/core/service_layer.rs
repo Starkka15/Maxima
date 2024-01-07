@@ -248,7 +248,7 @@ service_layer_enum!(Storefront, {
     Epic,
 });
 
-service_layer_enum!(Platform, { Pc });
+service_layer_enum!(Platform, { Pc, MacPc });
 
 service_layer_type!(GetPreloadedOwnedGamesRequest, {
     is_mac: bool,

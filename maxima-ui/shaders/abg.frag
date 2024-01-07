@@ -1,12 +1,13 @@
 precision mediump float;
-in vec4 v_color;
-in vec2 og_pos;
+in vec3 og_pos;
 in vec2 tex_coords;
 out vec4 out_color;
 uniform sampler2D u_hero;
 uniform vec2 u_dimensions;
 
-void main() {
+
+
+void bg() {
     float gamma = 1.8;
     float Pi = 6.28318530718; // Pi*2
 
@@ -31,8 +32,16 @@ void main() {
         }
     }
 
-    vec2 uvv = (gl_FragCoord.xy)/u_dimensions.xy;
-    uvv *= 2.0;
+    // Output to screen
+    Color /= Quality * Directions - 15.0;
+    Color = pow(Color, vec3(1.0/gamma));
+    Color *= 0.25;
+    out_color = vec4(Color, 1.0);
+}
+
+void vignette() {
+    vec2 uvv = og_pos.xy + vec2(1.0);
+    //uvv *= 2.0;
 
     if (uvv.x > 1.0) uvv.x = abs(2.0 - uvv.x);
     if (uvv.y > 1.0) uvv.y = abs(2.0 - uvv.y);
@@ -42,11 +51,13 @@ void main() {
     vig = min(vig, 1.0);
     vig = max(vig, 0.2);
 
+    out_color = vec4(0.0,0.0,0.0, 1.0-vig);
+}
 
-    // Output to screen
-    Color /= Quality * Directions - 15.0;
-    Color = pow(Color, vec3(1.0/gamma));
-    Color *= vig;
-    Color *= 0.25;
-    out_color = vec4(Color, 1.0);
+void main() {
+    if (og_pos.z == 0.0) {
+        bg();
+    } else {
+        vignette();
+    }
 }

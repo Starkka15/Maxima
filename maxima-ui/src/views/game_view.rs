@@ -1,6 +1,7 @@
 use egui::{Ui, Color32, vec2, Margin, ScrollArea, Rect, Pos2, Mesh, Shape, Rounding, RichText, Stroke};
 use egui_extras::{StripBuilder, Size};
-use crate::{DemoEguiApp, GameInfo};
+use log::debug;
+use crate::{DemoEguiApp, GameInfo, GameUIImagesWrapper, interact_thread, GameUIImages, GameDetails, GameDetailsWrapper};
 
 #[derive(Debug, PartialEq, Default)]
 pub enum GameViewBarGenre {
@@ -26,16 +27,42 @@ pub struct GameViewBar {
 pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
   if app.games.len() < 1 { return }
   if app.game_sel > app.games.len() { return }
-  let game = &app.games[app.game_sel];
+  let game = &mut app.games[app.game_sel];
   //let's just load the logo now, the hero usually takes longer and it
   //just looks better if the logo is there first
-  let _ = game.logo(&mut app.game_image_handler);
+  let game_images: Option<&GameUIImages> = match &game.images {
+    GameUIImagesWrapper::Unloaded => {
+      debug!("Loading images for {:?}", game.name);
+      app.backend.tx.send(interact_thread::MaximaLibRequest::GetGameImagesRequest(game.slug.clone())).unwrap();
+      game.images = GameUIImagesWrapper::Loading;
+      None
+    },
+    GameUIImagesWrapper::Loading => {
+      None
+    },
+    GameUIImagesWrapper::Available(images) => {
+      Some(images) },
+  };
+
+  let game_details: Option<&GameDetails> = match &game.details {
+    GameDetailsWrapper::Unloaded => {
+      debug!("Loading details for {:?}", game.name);
+      app.backend.tx.send(interact_thread::MaximaLibRequest::GetGameDetailsRequest(game.slug.clone())).unwrap();
+      game.details = GameDetailsWrapper::Loading;
+      None
+    },
+    GameDetailsWrapper::Loading => {
+      None
+    },
+    GameDetailsWrapper::Available(details) => {
+      Some(details) },
+};
   StripBuilder::new(ui).size(Size::remainder()).vertical(|mut strip| {
     strip.cell(|ui| {
       let mut hero_rect = Rect::clone(&ui.available_rect_before_wrap());
-      let aspect_ratio = 
-      if game.hero.size.x != 0.0 && game.hero.size.y != 0.0 {
-        game.hero.size.x / game.hero.size.y
+      let aspect_ratio: f32 = 
+      if let Some(images) = game_images {
+        images.hero.size.x / images.hero.size.y
       } else {
         16.0 / 9.0
       };
@@ -53,12 +80,12 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
       ui.push_id("GameViewPanel_ScrollerArea", |ui| {
         ui.style_mut().visuals.widgets.inactive.bg_fill = Color32::WHITE;
         ui.vertical(|ui| {
-          if let Ok(hero) = (&game).hero(&mut app.game_image_handler) {
+          if let Some(images) = game_images {
             if let Some(gvbg) = &app.game_view_bg_renderer {
-              gvbg.draw(ui, hero_rect, game.hero.size, hero, app.game_view_frac);
+              gvbg.draw(ui, hero_rect, images.hero.size, images.hero.renderable, app.game_view_frac);
               ui.allocate_space(hero_rect.size());
             } else {
-              ui.put(hero_rect, egui::Image::new(hero, hero_rect_2.size()));
+              ui.put(hero_rect, egui::Image::new(images.hero.renderable, hero_rect_2.size()));
             }
             ui.allocate_space(vec2(0.0,-hero_rect.size().y));
           } else {
@@ -106,11 +133,30 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
                     stats_frame.show(ui, |stats| {
                       stats.horizontal(|stats| {
                         stats.style_mut().spacing.item_spacing.x = 4.0;
-                        stats.label(RichText::new(&app.locale.localization.games_view.main.playtime).color(Color32::BLACK).strong());
-                        stats.label(RichText::new(format!(": {:?} hours",app.games[app.game_sel].time as f32 / 10.0)).color(Color32::BLACK));
-                        stats.separator();
-                        stats.label(RichText::new(&app.locale.localization.games_view.main.achievements).color(Color32::BLACK).strong());
-                        stats.label(RichText::new(format!(": {:?} / {:?}",app.games[app.game_sel].achievements_unlocked,app.games[app.game_sel].achievements_total)).color(Color32::BLACK));
+                        if let Some(details) = game_details {
+                          stats.label(
+                            RichText::new(&app.locale.localization.games_view.main.playtime)
+                            .color(Color32::BLACK)
+                            .strong()
+                          );
+                          stats.label(
+                            RichText::new(format!(": {:?} hours", details.time as f32 / 10.0))
+                            .color(Color32::BLACK)
+                          );
+                          stats.separator();
+                          stats.label(
+                            RichText::new(&app.locale.localization.games_view.main.achievements)
+                            .color(Color32::BLACK)
+                            .strong()
+                          );
+                          stats.label(
+                            RichText::new(format!(": {:?} / {:?}", details.achievements_unlocked, details.achievements_total))
+                            .color(Color32::BLACK)
+                          );
+                        } else {
+                          stats.label("game details not loaded");
+                        }
+
                         stats.allocate_space(vec2(stats.available_width(),0.0));
                       });
                     });
@@ -200,9 +246,30 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
 
                   ui.strong("Frac");
                   ui.label(format!("{:?}",app.game_view_frac));
-                  ui.strong("Hero Aspect Ratio");
-                  ui.label(format!("{:?}",(app.games[app.game_sel].hero.size.x / app.games[app.game_sel].hero.size.y)));
-                  ui.heading("ngl this looks clean as hell");
+
+                  ui.allocate_space(vec2(0.0,16.0));
+
+                  
+                  let req_width = (ui.available_size_before_wrap().x - 5.0) / 2.0;
+                  ui.horizontal(|sysreq| {
+                    if let Some(details) = game_details {
+
+                      sysreq.vertical(|min| {
+                        min.set_min_width(req_width);
+                        min.set_max_width(req_width);
+                        min.heading(&app.locale.localization.games_view.details.min_system_req);
+                        egui_demo_lib::easy_mark::easy_mark(min, &details.system_requirements_min);
+                      });
+                      sysreq.vertical(|rec| {
+                        rec.set_min_width(req_width);
+                        rec.set_max_width(req_width);
+                        rec.heading(&app.locale.localization.games_view.details.rec_system_req);
+                        egui_demo_lib::easy_mark::easy_mark(rec, &details.system_requirements_rec);
+                      });
+                    } else {
+                      sysreq.heading("System requirements unloaded");
+                    }
+                  });
                   for _idx in 0..75 {
                     ui.heading("");
                   }
@@ -210,30 +277,25 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
               })
             }) // StripBuilder
           }); // ScrollArea
-          if let Some(logo) = &game.logo {
-            let logo_size_pre = 
-            if logo.size.x >= logo.size.y {
-              // wider than it is tall, scale based on X as max
-              let mult_frac = 320.0 / logo.size.x;
-              logo.size.y * mult_frac
-            } else {
-              // taller than it is wide, scale based on Y
-              // fringe edge case, here in case EA decides they want to pull something really fucking stupid
-              0.0 // TODO:: CALCULATE IT
-            };
-            let frac2 = app.game_view_frac.clone();
-            let logo_size = vec2(egui::lerp(320.0..=160.0, frac2), egui::lerp(logo_size_pre..=(logo_size_pre/2.0), frac2));
-            let logo_rect = Rect::from_min_max(
-              Pos2 { x: (egui::lerp(hero_rect.min.x..=hero_rect.max.x-180.0, frac2)), y: (hero_rect.min.y) },
-              Pos2 { x: (egui::lerp(hero_rect.max.x..=hero_rect.max.x-20.0, frac2)), y: (egui::lerp(hero_rect.max.y..=hero_rect.min.y+80.0, frac2)) }
-            );
-            if let Ok(logo) = game.logo(&mut app.game_image_handler) {
-              ui.put(logo_rect, egui::Image::new(logo, logo_size));
-            } else {
-              ui.put(logo_rect, egui::Spinner::new().size(logo_size.min_elem()/2.0));
-              //ui.add_sized(logo_rect.size(), egui::Spinner::new());
-              //ui.painter().rect_filled(logo_rect, Rounding::same(0.0), Color32::TRANSPARENT);
-            }
+          if let Some(images) = game_images {
+            if let Some(logo) = &images.logo {
+              let logo_size_pre = if logo.size.x >= logo.size.y {
+                // wider than it is tall, scale based on X as max
+                let mult_frac = 320.0 / logo.size.x;
+                logo.size.y * mult_frac
+              } else {
+                // taller than it is wide, scale based on Y
+                // fringe edge case, here in case EA decides they want to pull something really fucking stupid
+                0.0 // TODO:: CALCULATE IT
+              };
+              let frac2 = app.game_view_frac.clone();
+              let logo_size = vec2(egui::lerp(320.0..=160.0, frac2), egui::lerp(logo_size_pre..=(logo_size_pre/2.0), frac2));
+              let logo_rect = Rect::from_min_max(
+                Pos2 { x: (egui::lerp(hero_rect.min.x..=hero_rect.max.x-180.0, frac2)), y: (hero_rect.min.y) },
+                Pos2 { x: (egui::lerp(hero_rect.max.x..=hero_rect.max.x-20.0, frac2)), y: (egui::lerp(hero_rect.max.y..=hero_rect.min.y+80.0, frac2)) }
+              );
+              ui.put(logo_rect, egui::Image::new(logo.renderable, logo_size));
+              }
           } else {
             //ui.put(hero_rect, egui::Label::new("NO LOGO"));
           }
@@ -409,7 +471,7 @@ fn show_game_list_buttons(app : &mut DemoEguiApp, ui : &mut Ui) {
           style.visuals.widgets.inactive.fg_stroke = Stroke::new(2.0, Color32::WHITE);
         }
         let game = filtered_games[game_idx];
-        if let Ok(icon) = game.icon(&mut app.game_image_handler) {
+        /*if let Ok(icon) = game.icon(&mut app.game_image_handler) {
           if games_list.add_sized(vec2(250.0, icon_size.y),
             egui::Button::image_and_text(icon, icon_size, RichText::new(&game.name).color(Color32::WHITE).strong())
             .rounding(Rounding::same(0.0)))
@@ -417,7 +479,7 @@ fn show_game_list_buttons(app : &mut DemoEguiApp, ui : &mut Ui) {
             .clicked() {
               app.game_sel = game_idx;
           }
-        } else {
+        } else {*/
           if games_list.add_sized(vec2(250.0, icon_size.y+4.0), egui::Button::image_and_text(egui::TextureId::Managed(0), vec2(0.0, 0.0), &game.name)
               //.fill(if app.game_sel == game_idx {  ACCENT_COLOR } else { Color32::TRANSPARENT })
               .rounding(Rounding::same(0.0)))
@@ -425,7 +487,7 @@ fn show_game_list_buttons(app : &mut DemoEguiApp, ui : &mut Ui) {
               .clicked() {
                 app.game_sel = game_idx;
             }
-        }
+        //}
       }
       games_list.allocate_space(games_list.available_size_before_wrap());
     });

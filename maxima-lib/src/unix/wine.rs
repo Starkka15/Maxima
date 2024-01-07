@@ -99,6 +99,7 @@ pub fn run_wine_command<I: IntoIterator<Item = T>, T:AsRef<OsStr>>(
         .env("WINE_FULLSCREEN_FSR", "0")
         .env("WINEESYNC", "1")
         .env("WINEFSYNC", "1")
+        .env("WINEDEBUG", "fixme-all")
 
         .env("LD_PRELOAD", "") // Fixes some log errors for some games
         .env("LD_LIBRARY_PATH", format!("{}:{}", maxima_dir()?.join("wine/lib64").display(), maxima_dir()?.join("wine/lib").display()))

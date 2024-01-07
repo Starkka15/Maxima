@@ -4,6 +4,7 @@ use clap::{arg, command, Parser};
 //lmao?
 //use winapi::um::winuser::{SetWindowLongA, GWL_STYLE, ShowWindow, SW_SHOW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, SetWindowTextA};
 use log::{error, info, warn};
+use ui_image::UIImage;
 use std::{ops::RangeInclusive, rc::Rc, sync::Arc};
 
 use eframe::egui;
@@ -16,7 +17,6 @@ use egui::{
 use egui_extras::{RetainedImage, Size, StripBuilder};
 use egui_glow::glow;
 
-use game_info_image_handler::{GameImageHandler, GameImageType};
 use interact_thread::MaximaThread;
 
 use app_bg_renderer::AppBgRenderer;
@@ -38,13 +38,16 @@ use views::{
     undefinied_view::undefined_view,
 };
 
+pub mod bridge;
 mod fs;
+pub mod util;
 mod views;
 
-mod game_info_image_handler;
+mod ui_image;
 mod interact_thread;
 mod renderers;
 mod translation_manager;
+mod frontend_processor;
 
 use maxima::util::registry::check_registry_validity;
 
@@ -110,22 +113,6 @@ enum InProgressLoginType {
     UsernamePass,
 }
 
-//haha,
-//fuck.
-#[derive(Clone)]
-pub struct GameImage {
-    /// Holds the actual texture data
-    retained: Option<Arc<RetainedImage>>,
-    /// Pass to egui to render
-    renderable: Option<TextureId>,
-    /// Look for this on FS first
-    _fs_path: String, //TODO
-    /// If it's not on fs, download it here
-    url: String,
-    /// width and height of the image, in pixels
-    size: Vec2,
-}
-
 /// Which tab is selected in the game list info panel
 #[derive(PartialEq, Default)]
 pub enum GameInfoTab {
@@ -138,6 +125,41 @@ pub enum GameInfoTab {
 /// TBD
 pub struct GameInstalledModsInfo {}
 
+pub struct GameUIImages {
+    /// YOOOOO
+    hero: Arc<UIImage>,
+    /// The stylized logo of the game, some games don't have this!
+    logo: Option<Arc<UIImage>>,
+}
+
+pub enum GameUIImagesWrapper {
+    Unloaded,
+    Loading,
+    Available(GameUIImages),
+}
+
+#[derive(PartialEq, Clone)]
+pub struct GameDetails {
+    /// Time (in hours/10) you have logged in the game
+    time: u32, // hours/10 allows for better precision, i'm only using one decimal place
+    /// Achievements you have unlocked
+    achievements_unlocked: u16,
+    /// Total achievements in the game
+    achievements_total: u16,
+    /// Path the game is installed to
+    path: String,
+    /// Minimum specs to run the game, in EasyMark spec
+    system_requirements_min: String,
+    /// Recommended specs to run the game, in EasyMark spec
+    system_requirements_rec: String,
+}
+
+pub enum GameDetailsWrapper {
+    Unloaded,
+    Loading,
+    Available(GameDetails),
+}
+
 pub struct GameInfo {
     /// Origin slug of the game
     slug: String,
@@ -145,28 +167,10 @@ pub struct GameInfo {
     offer: String,
     /// Display name of the game
     name: String,
-    // DO NOT USE THIS unless you KNOW it's not null.
-    //icon: Option<Arc<RetainedImage>>,
-    /// May be deprecated or otherwise not used, EA doesn't provide them
-    icon_renderable: Option<TextureId>,
-    /// YOOOOO
-    hero: Arc<GameImage>,
-    /// The stylized logo of the game, some games don't have this!
-    logo: Option<Arc<GameImage>>,
-    /// Time (in hours/10) you have logged in the game
-    time: u32, // hours/10 allows for better precision, i'm only using one decimal place
-    /// Achievements you have unlocked
-    achievements_unlocked: u16,
-    /// Total achievements in the game
-    achievements_total: u16,
-    // Is the game installed
-    //installed: bool,
-    /// Path the game is installed to
-    path: String,
-    // If the game has any, stats on mods
-    //mods: Option<GameInstalledModsInfo>,
-    // Which tab is active
-    //tab: GameInfoTab,
+    /// Art Assets
+    images: GameUIImagesWrapper,
+    /// Game info
+    details: GameDetailsWrapper,
 }
 
 impl GameInfo {
@@ -185,21 +189,20 @@ pub struct DemoEguiApp {
     game_view_bar: GameViewBar,       // stuff for the bar on the top of the Games view
     friends_view_bar: FriendsViewBar, // stuff for the bar on the top of the Friends view
     user_name: String,                // Logged in user's display name
-    _user_pfp: Rc<RetainedImage>,      // temp icon for the user's profile picture
+    _user_pfp: Rc<RetainedImage>,     // temp icon for the user's profile picture
     user_pfp_renderable: TextureId,   // actual renderable for the user's profile picture //TODO
     games: Vec<GameInfo>,             // games
     game_sel: usize,                  // selected game
     //game_view_rows: bool,                               // if the game view is in rows mode
     page_view: PageType, // what page you're on (games, friends, etc)
-    game_image_handler: GameImageHandler, // Game image loader, i will probably replace this with a more robust all images loader
     game_view_bg_renderer: Option<GameViewBgRenderer>, // Renderer for the blur effect in the game view
     game_view_frac: f32, // Multi-purpose fraction, how far along the bottom edge of the initial bottom edge of the hero image has scrolled up
     app_bg_renderer: Option<AppBgRenderer>, // Renderer for the app's background
     locale: TranslationManager, // Translations
-    //critical_bg_thread_crashed: bool,                   // If a core thread has crashed and made the UI unstable
-    backend: MaximaThread,                       // pepega
-    logged_in: bool,                             // temp book to track login status
-    in_progress_login: bool,                     // if the login flow is in progress
+    critical_bg_thread_crashed: bool, // If a core thread has crashed and made the UI unstable
+    backend: MaximaThread, // pepega
+    logged_in: bool,     // temp book to track login status
+    in_progress_login: bool, // if the login flow is in progress
     in_progress_login_type: InProgressLoginType, // what type of login we're using
     in_progress_username: String, // Username buffer for logging in with a username/password
     in_progress_password: String, // Password buffer for logging in with a username/password
@@ -304,13 +307,12 @@ impl DemoEguiApp {
             game_sel: 0,
             //game_view_rows: false,
             page_view: PageType::Games,
-            game_image_handler: GameImageHandler::new(&cc.egui_ctx),
             game_view_bg_renderer: GameViewBgRenderer::new(cc),
             game_view_frac: 0.0,
             app_bg_renderer: AppBgRenderer::new(cc),
             locale: TranslationManager::new("./res/locale/en_us.json".to_owned())
                 .expect("Could not load translation file"),
-            //critical_bg_thread_crashed: false,
+            critical_bg_thread_crashed: false,
             backend: MaximaThread::new(&cc.egui_ctx), //please don't fucking break
             logged_in: args.no_login, // largely deprecated but i'm going to keep it here
             in_progress_login: false,
@@ -536,77 +538,8 @@ fn tab_button(ui: &mut Ui, edit_var: &mut PageType, page: PageType, label: Strin
 
 impl eframe::App for DemoEguiApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let rec = self.game_image_handler.rx.try_recv();
-        if let Ok(rcv) = rec {
-            for idx in 0..self.games.len() {
-                if self.games[idx].slug.eq(&rcv.game_slug) {
-                    info!("loading image for slug {}", rcv.game_slug);
-                    match rcv.image_type {
-                        GameImageType::Icon => {}
-                        GameImageType::Hero => {
-                            let temp_name = rcv.image.to_owned();
-                            let renderable = if temp_name.retained.is_some() {
-                                Some(temp_name.retained.clone().expect("what").texture_id(ctx))
-                            } else {
-                                None
-                            };
+        frontend_processor::frontend_processor(self, ctx);
 
-                            let assign = GameImage {
-                                retained: temp_name.retained.clone(),
-                                renderable,
-                                _fs_path: String::new(),
-                                url: String::new(),
-                                size: temp_name.retained.clone().expect("what").size_vec2(), // TODO:: fix this
-                            };
-                            self.games[idx].hero = assign.into();
-                        }
-                        GameImageType::Logo => {
-                            let temp_name = rcv.image.to_owned();
-                            let renderable = if temp_name.retained.is_some() {
-                                Some(temp_name.retained.clone().expect("what").texture_id(ctx))
-                            } else {
-                                None
-                            };
-
-                            let assign = GameImage {
-                                retained: temp_name.retained.clone(),
-                                renderable,
-                                _fs_path: String::new(),
-                                url: String::new(),
-                                size: temp_name.retained.clone().expect("what").size_vec2(), // TODO:: fix this
-                            };
-                            self.games[idx].logo = Some(assign.into());
-                        }
-                    }
-                }
-            }
-        } else {
-            //info!("lol, lmao");
-        }
-
-        if let Ok(rcv) = self.backend.rx.try_recv() {
-            match rcv {
-                interact_thread::MaximaLibResponse::LoginResponse(res) => {
-                    info!("Got something");
-                    if res.success {
-                        self.logged_in = true;
-                        info!("Logged in as {}!", &res.description);
-                        self.user_name = res.description.clone();
-                        self.backend
-                            .tx
-                            .send(interact_thread::MaximaLibRequest::GetGamesRequest)
-                            .unwrap();
-                    } else {
-                        warn!("Login failed.");
-                        self.in_progress_credential_status = res.description
-                    }
-                }
-                interact_thread::MaximaLibResponse::GameInfoResponse(res) => {
-                    self.games.push(res.game);
-                    ctx.request_repaint(); // Run this loop once more, just to see if any games got lost
-                }
-            }
-        }
         custom_window_frame(ctx, frame, "Maxima", |ui| {
             if let Some(render) = &self.app_bg_renderer {
                 let mut fullrect = ui.available_rect_before_wrap().clone();
@@ -616,10 +549,13 @@ impl eframe::App for DemoEguiApp {
                     && self.logged_in
                     && self.games.len() > self.game_sel
                 {
-                    if let Ok(hero) = self.games[self.game_sel].hero(&mut self.game_image_handler) {
-                        render.draw(ui, fullrect, self.games[self.game_sel].hero.size, hero);
-                    } else {
-                        render.draw(ui, fullrect, fullrect.size(), TextureId::Managed(1));
+                    match &self.games[self.game_sel].images {
+                        GameUIImagesWrapper::Unloaded | GameUIImagesWrapper::Loading => {
+                            render.draw(ui, fullrect, fullrect.size(), TextureId::Managed(1));
+                        }
+                        GameUIImagesWrapper::Available(images) => {
+                            render.draw(ui, fullrect, images.hero.size, images.hero.renderable);
+                        }
                     }
                 } else {
                     render.draw(ui, fullrect, fullrect.size(), TextureId::Managed(1));
@@ -739,6 +675,24 @@ impl eframe::App for DemoEguiApp {
                 let main_width = ui.available_width() - (300.0 + ui.spacing().item_spacing.x);
                 let size_width = 300.0;
                 let outside_spacing = ui.spacing().item_spacing.x.clone();
+                if self.critical_bg_thread_crashed {
+                    let mut warning_margin = Margin::same(0.0 - APP_MARGIN.x);
+                    warning_margin.bottom = APP_MARGIN.y;
+                    egui::Frame::default()
+                        .fill(Color32::RED)
+                        .outer_margin(warning_margin)
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.heading(
+                                    egui::RichText::new(
+                                        &self.locale.localization.errors.critical_thread_crashed,
+                                    )
+                                    .color(Color32::BLACK)
+                                    .size(16.0),
+                                );
+                            });
+                        });
+                }
                 StripBuilder::new(ui)
                     .size(Size::exact(main_width))
                     .size(Size::exact(size_width))
@@ -880,7 +834,6 @@ impl eframe::App for DemoEguiApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
-        self.game_image_handler.shutdown();
         self.backend
             .tx
             .send(interact_thread::MaximaLibRequest::ShutdownRequest)

@@ -1,45 +1,58 @@
 // hacky shit to get steam-style background hero blur
 // :)
 
-use std::sync::Arc;
 use eframe::egui_glow;
 use eframe::glow::{BLEND, TEXTURE_2D};
-use egui::{Vec2, TextureId};
 use egui::mutex::Mutex;
+use egui::{TextureId, Vec2};
 use egui_glow::glow;
 use log::error;
+use std::sync::Arc;
 
 /// FUCK
 pub struct GameViewBgRenderer {
-    render : Arc<Mutex<GVBGUnsafe>>,
+    render: Arc<Mutex<GVBGUnsafe>>,
 }
 
 impl GameViewBgRenderer {
-    pub fn new<'a>(cc : &'a eframe::CreationContext<'a>) -> Option<Self> {
+    pub fn new<'a>(cc: &'a eframe::CreationContext<'a>) -> Option<Self> {
         let gl = cc.gl.as_ref()?;
         Some(Self {
-            render : Arc::new(Mutex::new(GVBGUnsafe::new(gl)?))
+            render: Arc::new(Mutex::new(GVBGUnsafe::new(gl)?)),
         })
     }
 
-    pub fn draw(&self, ui: &mut egui::Ui, rect : egui::Rect, img_size: Vec2, img : TextureId, frac: f32) {
+    pub fn draw(
+        &self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        img_size: Vec2,
+        img: TextureId,
+        frac: f32,
+    ) {
         let render = self.render.clone();
 
         let cb = egui_glow::CallbackFn::new(move |_info, painter| {
-            
-            render.lock().paint(painter.gl(), rect.size(), img_size, painter.texture(img).expect("fuck you"), frac);
+            render.lock().paint(
+                painter.gl(),
+                rect.size(),
+                img_size,
+                painter.texture(img).expect("fuck you"),
+                frac,
+            );
         });
 
         let callback = egui::PaintCallback {
             rect,
-            callback : Arc::new(cb),
+            callback: Arc::new(cb),
         };
         ui.painter().add(callback);
     }
 }
 
 #[allow(unsafe_code)] //MOM COME PICK ME UP, THEY'RE USING UNSAFE CODE
-struct GVBGUnsafe {   //I say this despite having used C++ for years before rust
+struct GVBGUnsafe {
+    //I say this despite having used C++ for years before rust
     program: glow::Program,
     frac_uniform: Option<glow::NativeUniformLocation>,
 }
@@ -50,7 +63,8 @@ impl GVBGUnsafe {
 
         let glsl_version = egui_glow::ShaderVersion::get(gl);
 
-        unsafe { //here we go lmao
+        unsafe {
+            //here we go lmao
             let program = gl
                 .create_program()
                 .expect("Cannot create OpenGL shader program");
@@ -102,13 +116,20 @@ impl GVBGUnsafe {
             }
 
             Some(Self {
-                program : program,
+                program: program,
                 frac_uniform: gl.get_uniform_location(program, "u_frac"),
             })
         }
     }
 
-    fn paint(&self, gl : &glow::Context, dimensions : Vec2, img_dimensions: Vec2, img : glow::Texture, frac: f32) {
+    fn paint(
+        &self,
+        gl: &glow::Context,
+        dimensions: Vec2,
+        img_dimensions: Vec2,
+        img: glow::Texture,
+        frac: f32,
+    ) {
         use glow::HasContext as _;
         unsafe {
             // WHY CAN I DISABLE SO MUCH OF THIS AND STILL HAVE IT WORK
@@ -122,17 +143,21 @@ impl GVBGUnsafe {
             // FUCK YOU, 2020 HEADASS WITH THE BEAT SABER MODS, IT WAS NOT WORTH IT
             gl.use_program(Some(self.program));
             gl.uniform_2_f32(
-                gl.get_uniform_location(self.program, "u_dimensions").as_ref(),
-                dimensions.x, dimensions.y
+                gl.get_uniform_location(self.program, "u_dimensions")
+                    .as_ref(),
+                dimensions.x,
+                dimensions.y,
             );
             gl.uniform_2_f32(
-                gl.get_uniform_location(self.program, "u_img_dimensions").as_ref(),
-                img_dimensions.x, img_dimensions.y
+                gl.get_uniform_location(self.program, "u_img_dimensions")
+                    .as_ref(),
+                img_dimensions.x,
+                img_dimensions.y,
             );
             gl.uniform_1_f32(self.frac_uniform.as_ref(), frac);
-            
+
             gl.bind_texture(TEXTURE_2D, Some(img));
-            
+
             /*
             gl.bind_vertex_array(Some(self.vert_array));
             */

@@ -44,6 +44,10 @@
             "playtime" : "Time Played",
             "achievements" : "Achievements",
             "no_loaded_games" : "You don't have any games, or they haven't loaded in yet."
+        },
+        "details" : {
+            "min_system_req" : "Minimum System Requirements",
+            "rec_system_req" : "Recommended System Requirements"
         }
     },
     "friends_view" : {

@@ -1,42 +1,47 @@
-use std::sync::Arc;
 use eframe::egui_glow;
 use eframe::glow::{BLEND, TEXTURE_2D};
-use egui::{Vec2, TextureId};
 use egui::mutex::Mutex;
+use egui::{TextureId, Vec2};
 use egui_glow::glow;
 use log::error;
+use std::sync::Arc;
 
 /// FUCK
 pub struct AppBgRenderer {
-    render : Arc<Mutex<ABGUnsafe>>,
+    render: Arc<Mutex<ABGUnsafe>>,
 }
 
 impl AppBgRenderer {
-    pub fn new<'a>(cc : &'a eframe::CreationContext<'a>) -> Option<Self> {
+    pub fn new<'a>(cc: &'a eframe::CreationContext<'a>) -> Option<Self> {
         let gl = cc.gl.as_ref()?;
         Some(Self {
-            render : Arc::new(Mutex::new(ABGUnsafe::new(gl)?))
+            render: Arc::new(Mutex::new(ABGUnsafe::new(gl)?)),
         })
     }
 
-    pub fn draw(&self, ui: &mut egui::Ui, rect : egui::Rect, img_size: Vec2, img : TextureId) {
+    pub fn draw(&self, ui: &mut egui::Ui, rect: egui::Rect, img_size: Vec2, img: TextureId) {
         let render = self.render.clone();
 
         let cb = egui_glow::CallbackFn::new(move |_info, painter| {
-            
-            render.lock().paint(painter.gl(), rect.size(), img_size, painter.texture(img).expect("fuck you"));
+            render.lock().paint(
+                painter.gl(),
+                rect.size(),
+                img_size,
+                painter.texture(img).expect("fuck you"),
+            );
         });
 
         let callback = egui::PaintCallback {
             rect,
-            callback : Arc::new(cb),
+            callback: Arc::new(cb),
         };
         ui.painter().add(callback);
     }
 }
 
 #[allow(unsafe_code)] //MOM COME PICK ME UP, THEY'RE USING UNSAFE CODE
-struct ABGUnsafe {   //I say this despite having used C++ for years before rust
+struct ABGUnsafe {
+    //I say this despite having used C++ for years before rust
     program: glow::Program,
 }
 
@@ -46,7 +51,8 @@ impl ABGUnsafe {
 
         let glsl_version = egui_glow::ShaderVersion::get(gl);
 
-        unsafe { //here we go lmao
+        unsafe {
+            //here we go lmao
             let program = gl
                 .create_program()
                 .expect("Cannot create OpenGL shader program");
@@ -97,28 +103,36 @@ impl ABGUnsafe {
                 gl.delete_shader(shader);
             }
 
-            Some(Self {
-                program : program,
-            })
+            Some(Self { program: program })
         }
     }
 
-    fn paint(&self, gl : &glow::Context, dimensions : Vec2, img_dimensions: Vec2, img : glow::Texture) {
+    fn paint(
+        &self,
+        gl: &glow::Context,
+        dimensions: Vec2,
+        img_dimensions: Vec2,
+        img: glow::Texture,
+    ) {
         use glow::HasContext as _;
         unsafe {
             gl.use_program(Some(self.program));
             gl.uniform_2_f32(
-                gl.get_uniform_location(self.program, "u_dimensions").as_ref(),
-                dimensions.x, dimensions.y
+                gl.get_uniform_location(self.program, "u_dimensions")
+                    .as_ref(),
+                dimensions.x,
+                dimensions.y,
             );
             gl.uniform_2_f32(
-                gl.get_uniform_location(self.program, "u_img_dimensions").as_ref(),
-                img_dimensions.x, img_dimensions.y
+                gl.get_uniform_location(self.program, "u_img_dimensions")
+                    .as_ref(),
+                img_dimensions.x,
+                img_dimensions.y,
             );
             //gl.uniform_1_u32(self.hero_uniform.as_ref(), TEXTURE_2D);
-            
+
             gl.bind_texture(TEXTURE_2D, Some(img));
-            
+
             /*
             gl.bind_vertex_array(Some(self.vert_array));
             */
@@ -129,7 +143,7 @@ impl ABGUnsafe {
             gl.blend_func(glow::FUNC_ADD, glow::ONE_MINUS_SRC_ALPHA);
             */
             //gl.draw_arrays(glow::TRIANGLES, 6, 6);
-            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            gl.draw_arrays(glow::TRIANGLES, 0, 12);
         }
     }
 }
