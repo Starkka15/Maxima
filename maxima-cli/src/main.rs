@@ -23,6 +23,7 @@ use maxima::{
     core::{
         auth::{nucleus_connect_token, TokenResponse},
         clients::JUNO_PC_CLIENT_ID,
+        service_layer::{ServiceGetMyFriendsRequestBuilder, SERVICE_REQUEST_GETMYFRIENDS, ServiceFriends},
         LockedMaxima,
     },
     ooa,
@@ -68,6 +69,7 @@ enum Mode {
         #[arg(long)]
         content_id: String,
     },
+    ListFriends,
 }
 
 #[derive(Parser, Debug)]
@@ -222,6 +224,7 @@ async fn startup() -> Result<()> {
             create_auth_code(maxima_arc.clone(), &client_id).await
         }
         Mode::ReadLicenseFile { content_id } => read_license_file(&content_id).await,
+        Mode::ListFriends => list_friends(maxima_arc.clone()).await,
     }?;
 
     Ok(())
@@ -375,6 +378,25 @@ async fn read_license_file(content_id: &str) -> Result<()> {
 
     let license = ooa::decrypt_license(data.as_slice())?;
     info!("License: {:?}", license);
+
+    Ok(())
+}
+
+async fn list_friends(maxima_arc: LockedMaxima) -> Result<()> {
+    let maxima = maxima_arc.lock().await;
+
+    let response: ServiceFriends = maxima.service_layer().request(
+        SERVICE_REQUEST_GETMYFRIENDS,
+        ServiceGetMyFriendsRequestBuilder::default()
+            .limit(100)
+            .offset(0)
+            .is_mutual_friends_enabled(false)
+            .build()?,
+    ).await?;
+
+    for ele in response.friends().items() {
+        info!("{}", ele.player().display_name());
+    }
 
     Ok(())
 }

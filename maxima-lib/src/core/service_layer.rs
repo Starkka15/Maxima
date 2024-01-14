@@ -68,6 +68,7 @@ define_graphql_request!(GetBasicPlayer); // Input: ServiceGetBasicPlayerRequest,
 define_graphql_request!(getPreloadedOwnedGames); // Input: ServiceGetPreloadedOwnedGamesRequest, Output: ServiceUser (with owned_game_products field set)
 define_graphql_request!(GetUserPlayer); // Input: ServiceGetUserPlayerRequest, Output: ServiceUser
 define_graphql_request!(GameSystemRequirements); // Input: ServiceGameSystemRequirementsRequest, Output: ServiceGameSystemRequirements
+define_graphql_request!(GetMyFriends); // Input: ServiceGetMyFriendsRequest, Output: ServiceFriends
 
 #[derive(Clone)]
 pub struct ServiceLayerClient {
@@ -513,4 +514,29 @@ service_layer_type!(GameSystemRequirements, {
     id: String,
     game_type: ServiceGameProductType,
     system_requirements: Vec<ServiceSystemRequirements>,
+});
+
+service_layer_type!(GetMyFriendsRequest, {
+    offset: u32,
+    limit: u32,
+    is_mutual_friends_enabled: bool,
+});
+
+service_layer_type!(Friend, {
+    id: String,
+    pd: String,
+    player: ServicePlayer,
+});
+
+service_layer_type!(FriendsOffsetPage, {
+    total_count: u32,
+    has_next_page: bool,
+    has_previous_page: bool,
+    items: Vec<ServiceFriend>,
+});
+
+service_layer_type!(Friends, {
+    id: String,
+    pd: String,
+    friends: ServiceFriendsOffsetPage,
 });
