@@ -141,51 +141,32 @@ impl Connection {
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
 
-        let mut pid = None;
-
-        // First attempt to look up the PID through the TCP table
-        // Disabled for now
-        if false && !cfg!(unix) {
-            let mut i = 0;
-            while pid.is_none() && i < 10 {
-                let result = get_process_id(stream.peer_addr().unwrap().port());
-                if result.is_err() {
-                    pid = Some(0);
-                    warn!("PID fetch failed: {}", result.err().unwrap());
-                    break;
-                }
-
-                pid = result.unwrap();
-                std::thread::sleep(Duration::from_secs(1));
-                i += 1;
-            }
-        }
-
         let maxima: MutexGuard<'_, Maxima> = maxima_arc.lock().await;
         let playing = maxima.playing();
         if playing.is_none() {
-            stream.shutdown(std::net::Shutdown::Both);
+            stream.shutdown(std::net::Shutdown::Both)?;
             bail!("There is no active game context, LSX connection cannot be established");
         }
 
         let playing = playing.as_ref().unwrap();
+        let mut pid = None;
 
-        // If that didn't work, fall back to searching for processes with our MXLaunchId
-        if pid.is_none() {
-            warn!("Failed to find PID through TCP table, falling back to environment variables");
-            let sys = System::new_all();
-            for e in sys.processes() {
-                let (p_pid, process) = e;
-                for ele in process.environ() {
-                    let (key, value) = ele.split_once("=").unwrap();
-                    if key != "MXLaunchId" || value != playing.launch_id() {
-                        continue;
-                    }
-
-                    pid = Some(p_pid.as_u32());
-                    break;
+        let sys = System::new_all();
+        for e in sys.processes() {
+            let (p_pid, process) = e;
+            for ele in process.environ() {
+                let (key, value) = ele.split_once('=').unwrap_or((ele, ""));
+                if key != "MXLaunchId" || value != playing.launch_id() {
+                    continue;
                 }
+
+                pid = Some(p_pid.as_u32());
+                break;
             }
+        }
+
+        if pid.is_none() {
+            warn!("Failed to find PID through launch ID, things may not work!");
         }
 
         let state = Arc::new(RwLock::new(ConnectionState {
