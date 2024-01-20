@@ -1,13 +1,13 @@
 use anyhow::{bail, Result};
 use base64::{engine::general_purpose, Engine};
-use dll_syringe::{process::OwnedProcess, Syringe};
 use log::debug;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use is_elevated::is_elevated;
-
-use crate::util::registry::set_up_registry;
+use crate::{
+    unix::wine::run_wine_command,
+    util::{native::module_path, registry::set_up_registry},
+};
 
 #[derive(Default, Serialize)]
 pub struct InjectArgs {
