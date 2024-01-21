@@ -159,8 +159,8 @@ pub fn get_os_pid(context: &ActiveGameContext) -> Result<u32> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn get_wine_pid(launch_id: &str, os_pid: u32) -> Result<u32> {
-    Ok(os_pid)
+pub fn get_wine_pid(launch_id: &str, name: &str) -> Result<u32> {
+    Ok(0)
 }
 
 #[cfg(target_os = "linux")]
@@ -194,22 +194,24 @@ impl Connection {
         let context = playing.as_ref().unwrap();
 
         let mut pid = get_os_pid(context);
-        if let Ok(os_pid) = pid {
-            let sys = System::new_all();
-            if let Some(process) = sys.process(Pid::from_u32(os_pid)) {
-                let filename = PathBuf::from(
-                    process.cmd()[0]
-                        .to_owned()
-                        .replace("Z:", "")
-                        .replace('\\', "/"),
-                )
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned();
-
-                pid = get_wine_pid(&context.launch_id(), &filename);
+        if cfg!(unix) {
+            if let Ok(os_pid) = pid {
+                let sys = System::new_all();
+                if let Some(process) = sys.process(Pid::from_u32(os_pid)) {
+                    let filename = PathBuf::from(
+                        process.cmd()[0]
+                            .to_owned()
+                            .replace("Z:", "")
+                            .replace('\\', "/"),
+                    )
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+    
+                    pid = get_wine_pid(&context.launch_id(), &filename);
+                }
             }
         }
 
