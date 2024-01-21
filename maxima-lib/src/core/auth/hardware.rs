@@ -97,6 +97,8 @@ impl HardwareInfo {
     pub fn new() -> anyhow::Result<Self> {
         use std::{fs, path::Path, process::Command};
 
+        println!("Generating hardware info");
+
         let board_manufacturer = match fs::read_to_string("/sys/class/dmi/id/board_vendor") {
             Ok(vendor) => vendor.trim().to_owned(),
             Err(_) => String::from("Linux Foundation"),
