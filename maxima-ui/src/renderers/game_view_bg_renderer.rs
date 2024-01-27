@@ -30,6 +30,7 @@ impl GameViewBgRenderer {
         img: TextureId,
         frac: f32,
     ) {
+        puffin::profile_function!("game hero renderer");
         let render = self.render.clone();
 
         let cb = egui_glow::CallbackFn::new(move |_info, painter| {

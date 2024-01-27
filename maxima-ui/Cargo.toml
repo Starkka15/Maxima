@@ -10,16 +10,22 @@ winapi = { version = "0.3.9", features = [ "memoryapi", "handleapi", "synchapi",
 anyhow = "1.0.71"
 clap = { version = "4.3.8", features = ["derive"] }
 #cmp = "0.0.0"
-eframe = "0.22.0"
-egui = "0.22.0"
-egui_extras = {version = "0.22.0", features = [ "svg" ] }
+eframe = "0.23.0"
+egui = "0.23.0"
+egui_extras = {version = "0.23.0", features = [ "svg", "all_loaders" ] }
 image = { version = "0.24.6", features = [ "png", "jpeg" ] }
 reqwest = "0.11.18"
 serde = "1.0.171"
 serde_json = "1.0.100"
 tokio = { version = "1.28.2", features = ["full"] }
 log = "0.4.19"
-egui_demo_lib = "0.22.0"
+egui_demo_lib = "0.23.0"
+puffin_http = "0.15.0"
+puffin = "0.18.1"
+puffin_egui = "0.23.0"
+strum = "0.25.0"
+strum_macros = "0.25.3"
+sys-locale = "0.3.1"
 
 [build-dependencies]
 maxima-resources = { path = "../maxima-resources" }

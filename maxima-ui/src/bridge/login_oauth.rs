@@ -3,17 +3,16 @@ use egui::Context;
 use maxima::{
     core::{
         auth::{context::AuthContext, login, nucleus_connect_token},
-        Maxima,
+        LockedMaxima,
     },
     util::native::take_foreground_focus,
 };
-use std::sync::{mpsc::Sender, Arc};
-use tokio::sync::Mutex;
+use std::sync::mpsc::Sender;
 
 use crate::interact_thread::{InteractThreadLoginResponse, MaximaLibResponse};
 
 pub async fn login_oauth(
-    maxima_arc: Arc<Mutex<Maxima>>,
+    maxima_arc: LockedMaxima,
     channel: Sender<MaximaLibResponse>,
     ctx: &Context,
 ) -> Result<()> {
@@ -36,6 +35,6 @@ pub async fn login_oauth(
     channel.send(lmessage)?;
 
     take_foreground_focus().unwrap();
-    egui::Context::request_repaint(&ctx);
+    ctx.request_repaint();
     Ok(())
 }

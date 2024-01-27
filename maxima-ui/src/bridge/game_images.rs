@@ -4,15 +4,14 @@ use log::{debug, error};
 use maxima::{
     core::{
         service_layer::{ServiceGame, ServiceGameImagesRequestBuilder, SERVICE_REQUEST_GAMEIMAGES},
-        Maxima,
+        LockedMaxima,
     },
     util::native::maxima_dir,
 };
 use std::{
     fs,
-    sync::{mpsc::Sender, Arc},
+    sync::mpsc::Sender,
 };
-use tokio::sync::Mutex;
 
 use crate::{
     interact_thread::{InteractThreadGameUIImagesResponse, MaximaLibResponse},
@@ -20,7 +19,7 @@ use crate::{
     GameUIImages,
 };
 
-async fn get_preferred_hero_image(slug: &String, images: &Option<ServiceGame>) -> Option<String> {
+async fn get_preferred_hero_image(images: &Option<ServiceGame>) -> Option<String> {
     if images.is_none() {
         return None;
     }
@@ -62,7 +61,7 @@ async fn get_logo_image(images: &Option<ServiceGame>) -> Option<String> {
 }
 
 pub async fn game_images_request(
-    maxima_arc: Arc<Mutex<Maxima>>,
+    maxima_arc: LockedMaxima,
     slug: String,
     channel: Sender<MaximaLibResponse>,
     ctx: &Context,
@@ -95,7 +94,7 @@ pub async fn game_images_request(
         debug!("Using cached hero image for {:?}", slug);
         None
     } else {
-        get_preferred_hero_image(&slug, &images).await
+        get_preferred_hero_image(&images).await
     };
     let logo_url: Option<String> = if has_logo {
         debug!("Using cached logo for {:?}", slug);
@@ -107,7 +106,6 @@ pub async fn game_images_request(
     let ctx = ctx.clone();
     let is_logo = logo_url.is_some() || has_logo;
     tokio::task::spawn(async move {
-        // this looks weird but i was going to flip them anyway, heroes are always bigger, and putting the await inside of the optional logo makes sense
         let hero = UIImage::load(
             slug.clone(),
             GameImageType::Hero,

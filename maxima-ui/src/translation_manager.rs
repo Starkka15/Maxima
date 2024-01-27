@@ -4,6 +4,7 @@ use log::error;
 use serde::Deserialize;
 use serde_json;
 use std::fs;
+use sys_locale;
 
 #[derive(Deserialize)]
 pub struct LocalizedStrings {
@@ -121,18 +122,28 @@ pub struct LocalizedFriendsViewToolbarSearchFilterOptions {
 pub struct Lang {
     pub en_us: LocalizedStrings,
 }
+
 pub struct TranslationManager {
     pub localization: LocalizedStrings,
 }
 
 impl TranslationManager {
-    pub fn new(path: String) -> Option<Self> {
-        if let Ok(file) = fs::read_to_string(path) {
-            let s: LocalizedStrings = serde_json::from_str(&file).unwrap();
-            Some(Self { localization: s })
-        } else {
-            error!("Couldn't read locale file!");
-            None
-        }
+    pub fn new() -> Option<Self> {
+        let locale: Option<String> = sys_locale::get_locale();
+        let english = include_str!("../res/locale/en_us.json").to_owned();
+        let locale_json: String = match locale {
+            Some(code) => 
+            if code.starts_with("en-") {
+                english
+            } else {match code.as_str() {
+                    // add other languages here
+                    _ => english,
+                }
+            },
+            None => english,
+        };
+
+        let s: LocalizedStrings = serde_json::from_str(&locale_json).unwrap();
+        Some(Self { localization: s })
     }
 }

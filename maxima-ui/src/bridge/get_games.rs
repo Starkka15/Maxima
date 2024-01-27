@@ -1,9 +1,8 @@
-use anyhow::{Error, Ok, Result, bail};
+use anyhow::{Ok, Result, bail};
 use egui::Context;
-use log::{debug, info};
-use maxima::core::Maxima;
-use std::sync::{mpsc::Sender, Arc};
-use tokio::sync::Mutex;
+use log::debug;
+use maxima::core::LockedMaxima;
+use std::sync::mpsc::Sender;
 
 use crate::{
     interact_thread::{InteractThreadGameListResponse, MaximaLibResponse},
@@ -11,7 +10,7 @@ use crate::{
 };
 
 pub async fn get_games_request(
-    maxima_arc: Arc<Mutex<Maxima>>,
+    maxima_arc: LockedMaxima,
     channel: Sender<MaximaLibResponse>,
     ctx: &Context,
 ) -> Result<()> {

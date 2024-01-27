@@ -20,6 +20,7 @@ impl AppBgRenderer {
     }
 
     pub fn draw(&self, ui: &mut egui::Ui, rect: egui::Rect, img_size: Vec2, img: TextureId) {
+        puffin::profile_function!("app background renderer");
         let render = self.render.clone();
 
         let cb = egui_glow::CallbackFn::new(move |_info, painter| {
@@ -114,6 +115,7 @@ impl ABGUnsafe {
         img_dimensions: Vec2,
         img: glow::Texture,
     ) {
+        puffin::profile_function!();
         use glow::HasContext as _;
         unsafe {
             gl.use_program(Some(self.program));

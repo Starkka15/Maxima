@@ -1,7 +1,6 @@
 use anyhow::{Ok, Result};
 use egui::Context;
 use log::info;
-use tokio::sync::Mutex;
 
 use std::{
     panic,
@@ -11,14 +10,17 @@ use std::{
     },
 };
 
-use maxima::core::Maxima;
+use maxima::core::{LockedMaxima, Maxima};
 
 use crate::{
     bridge::{
         bitches::bitches_request, game_details::game_details_request,
-        game_images::game_images_request, get_games::get_games_request, login_creds::login_creds,
-        login_oauth::login_oauth, start_game::start_game_request,
+        game_images::game_images_request, get_friends::get_friends_request,
+        get_games::get_games_request, get_user_avatar::get_user_avatar_request,
+        login_creds::login_creds, login_oauth::login_oauth, start_game::start_game_request,
     },
+    ui_image::UIImage,
+    views::friends_view::UIFriend,
     GameDetails, GameInfo, GameUIImages,
 };
 
@@ -29,6 +31,15 @@ pub struct InteractThreadLoginResponse {
 
 pub struct InteractThreadGameListResponse {
     pub game: GameInfo,
+}
+
+pub struct InteractThreadFriendListResponse {
+    pub friend: UIFriend,
+}
+
+pub struct InteractThreadUserAvatarResponse {
+    pub id: String,
+    pub response: Result<Arc<UIImage>>,
 }
 
 pub struct InteractThreadGameDetailsResponse {
@@ -45,6 +56,8 @@ pub enum MaximaLibRequest {
     LoginRequestOauth,
     LoginRequestUserPass(String, String),
     GetGamesRequest,
+    GetFriendsRequest,
+    GetUserAvatarRequest(String, String),
     GetGameImagesRequest(String),
     GetGameDetailsRequest(String),
     StartGameRequest(String),
@@ -54,7 +67,10 @@ pub enum MaximaLibRequest {
 
 pub enum MaximaLibResponse {
     LoginResponse(InteractThreadLoginResponse),
+    LoginCacheEmpty,
     GameInfoResponse(InteractThreadGameListResponse),
+    FriendInfoResponse(InteractThreadFriendListResponse),
+    UserAvatarResponse(InteractThreadUserAvatarResponse),
     GameDetailsResponse(InteractThreadGameDetailsResponse),
     GameUIImagesResponse(InteractThreadGameUIImagesResponse),
     InteractionThreadDiedResponse,
@@ -76,7 +92,8 @@ impl MaximaThread {
             let result = MaximaThread::run(rx1, tx1, &context).await;
             if result.is_err() {
                 die_fallback_transmittter
-                    .send(MaximaLibResponse::InteractionThreadDiedResponse).unwrap();
+                    .send(MaximaLibResponse::InteractionThreadDiedResponse)
+                    .unwrap();
                 panic!("Interact thread failed! {}", result.err().unwrap());
             } else {
                 info!("Interact thread shut down")
@@ -91,7 +108,7 @@ impl MaximaThread {
         tx1: Sender<MaximaLibResponse>,
         ctx: &Context,
     ) -> Result<()> {
-        let maxima_arc: Arc<Mutex<Maxima>> = Maxima::new()?;
+        let maxima_arc: LockedMaxima = Maxima::new()?;
 
         {
             let maxima = maxima_arc.lock().await;
@@ -113,6 +130,9 @@ impl MaximaThread {
                 });
 
                 tx1.send(lmessage)?;
+                ctx.request_repaint();
+            } else {
+                tx1.send(MaximaLibResponse::LoginCacheEmpty)?;
             }
         }
 
@@ -137,11 +157,23 @@ impl MaximaThread {
                     let context = ctx.clone();
                     async move { get_games_request(maxima, channel, &context).await }.await?;
                 }
+                MaximaLibRequest::GetFriendsRequest => {
+                    let channel = tx1.clone();
+                    let maxima = maxima_arc.clone();
+                    let context = ctx.clone();
+                    async move { get_friends_request(maxima, channel, &context).await }.await?;
+                }
                 MaximaLibRequest::GetGameImagesRequest(slug) => {
                     let channel = tx1.clone();
                     let maxima = maxima_arc.clone();
                     let context = ctx.clone();
                     async move { game_images_request(maxima, slug, channel, &context).await }
+                        .await?;
+                }
+                MaximaLibRequest::GetUserAvatarRequest(id, url) => {
+                    let channel = tx1.clone();
+                    let context = ctx.clone();
+                    async move { get_user_avatar_request(channel, id, url, &context).await }
                         .await?;
                 }
                 MaximaLibRequest::GetGameDetailsRequest(slug) => {

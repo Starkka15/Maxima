@@ -1,7 +1,6 @@
 use anyhow::{Ok, Result};
 use egui::Context;
-use std::sync::{mpsc::Sender, Arc};
-use tokio::sync::Mutex;
+use std::sync::mpsc::Sender;
 
 use crate::{
     interact_thread::{InteractThreadGameDetailsResponse, MaximaLibResponse},
@@ -13,11 +12,11 @@ use maxima::core::{
         ServiceGameSystemRequirements, ServiceGameSystemRequirementsRequestBuilder,
         SERVICE_REQUEST_GAMESYSTEMREQUIREMENTS,
     },
-    Maxima,
+    LockedMaxima,
 };
 
 pub async fn game_details_request(
-    maxima_arc: Arc<Mutex<Maxima>>,
+    maxima_arc: LockedMaxima,
     slug: String,
     channel: Sender<MaximaLibResponse>,
     ctx: &Context,

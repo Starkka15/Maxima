@@ -4,15 +4,14 @@ use log::info;
 use maxima::core::{
     auth::{context::AuthContext, execute_auth_exchange, nucleus_connect_token},
     clients::JUNO_PC_CLIENT_ID,
-    Maxima,
+    LockedMaxima,
 };
-use std::sync::{mpsc::Sender, Arc};
-use tokio::sync::Mutex;
+use std::sync::mpsc::Sender;
 
 use crate::interact_thread::{InteractThreadLoginResponse, MaximaLibResponse};
 
 pub async fn login_creds(
-    maxima_arc: Arc<Mutex<Maxima>>,
+    maxima_arc: LockedMaxima,
     channel: Sender<MaximaLibResponse>,
     ctx: &Context,
     user: String,

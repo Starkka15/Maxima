@@ -1,11 +1,16 @@
 #![feature(slice_pattern)]
 use clap::{arg, command, Parser};
 
+use eframe::IconData;
+use egui::style::Spacing;
+use egui::ColorImage;
+use egui::Style;
 //lmao?
 //use winapi::um::winuser::{SetWindowLongA, GWL_STYLE, ShowWindow, SW_SHOW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, SetWindowTextA};
 use log::{error, info, warn};
-use ui_image::UIImage;
 use std::{ops::RangeInclusive, rc::Rc, sync::Arc};
+use ui_image::UIImage;
+use views::friends_view::UIFriend;
 
 use eframe::egui;
 use eframe::egui_glow;
@@ -42,12 +47,14 @@ pub mod bridge;
 mod fs;
 pub mod util;
 mod views;
+pub mod widgets;
 
-mod ui_image;
+mod frontend_processor;
 mod interact_thread;
 mod renderers;
 mod translation_manager;
-mod frontend_processor;
+mod enum_locale_map;
+mod ui_image;
 
 use maxima::util::registry::check_registry_validity;
 
@@ -60,18 +67,54 @@ struct Args {
     #[arg(short, long)]
     debug: bool,
     #[arg(short, long)]
+    profile: bool,
+    #[arg(short, long)]
     no_login: bool,
 }
 
 #[tokio::main]
 async fn main() {
     init_logger();
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    if !cfg!(debug_assertions) {
+        args.debug = false;
+    }
+
+    if args.profile {
+        puffin::set_scopes_on(true);
+
+        match puffin_http::Server::new("127.0.0.1:8585") {
+            Ok(puffin_server) => {
+                std::process::Command::new("~/.cargo/bin/puffin_viewer")
+                    .arg("--url")
+                    .arg("127.0.0.1:8585")
+                    .spawn()
+                    .ok();
+
+                // We can store the server if we want, but in this case we just want
+                // it to keep running. Dropping it closes the server, so let's not drop it!
+                #[allow(clippy::mem_forget)]
+                std::mem::forget(puffin_server);
+            }
+            Err(err) => {
+                eprintln!("Failed to start puffin server: {err}");
+            }
+        };
+    }
 
     let native_options = eframe::NativeOptions {
         transparent: true,
         #[cfg(target_os = "macos")]
         fullsize_content: true,
+        icon_data: {
+            let res = IconData::try_from_png_bytes(include_bytes!("../../maxima-resources/assets/logo.png"));
+            if let Ok(icon) = res {
+                Some(icon)
+            } else {
+                None
+            }
+        },
         initial_window_size: Some(vec2(1280.0, 720.0)),
         min_window_size: Some(vec2(940.0, 480.0)),
         ..Default::default()
@@ -105,6 +148,7 @@ enum PageType {
     Games,
     Store,
     Settings,
+    Downloads,
     Debug,
 }
 #[derive(Debug, PartialEq)]
@@ -193,6 +237,7 @@ pub struct DemoEguiApp {
     user_pfp_renderable: TextureId,   // actual renderable for the user's profile picture //TODO
     games: Vec<GameInfo>,             // games
     game_sel: usize,                  // selected game
+    friends: Vec<UIFriend>,           // friends
     //game_view_rows: bool,                               // if the game view is in rows mode
     page_view: PageType, // what page you're on (games, friends, etc)
     game_view_bg_renderer: Option<GameViewBgRenderer>, // Renderer for the blur effect in the game view
@@ -202,6 +247,7 @@ pub struct DemoEguiApp {
     critical_bg_thread_crashed: bool, // If a core thread has crashed and made the UI unstable
     backend: MaximaThread, // pepega
     logged_in: bool,     // temp book to track login status
+    login_cache_waiting: bool, // waiting for the bridge to check auth storage
     in_progress_login: bool, // if the login flow is in progress
     in_progress_login_type: InProgressLoginType, // what type of login we're using
     in_progress_username: String, // Username buffer for logging in with a username/password
@@ -216,44 +262,54 @@ const WIDGET_HOVER: Color32 = Color32::from_rgb(255, 188, 61);
 
 impl DemoEguiApp {
     fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Self {
-        let vis: Visuals = Visuals {
-            faint_bg_color: Color32::from_rgb(15, 20, 34),
-            extreme_bg_color: Color32::from_rgb(20, 20, 20),
-            window_fill: Color32::BLACK,
-            //override_text_color: Some(Color32::WHITE),
-            hyperlink_color: F9B233,
-            widgets: Widgets {
-                hovered: WidgetVisuals {
-                    weak_bg_fill: F9B233,
-                    bg_fill: F9B233,
-                    bg_stroke: Stroke::NONE,
-                    fg_stroke: Stroke::new(1.0, Color32::BLACK),
-                    rounding: Rounding::none(),
-                    expansion: 0.0,
-                },
-                inactive: WidgetVisuals {
-                    weak_bg_fill: Color32::BLACK,
-                    bg_fill: Color32::BLACK,
-                    bg_stroke: Stroke::new(2.0, Color32::WHITE),
-                    fg_stroke: Stroke::new(1.5, Color32::WHITE),
-                    rounding: Rounding::same(2.0),
-                    expansion: -2.0,
-                },
-                active: WidgetVisuals {
-                    weak_bg_fill: WIDGET_HOVER.linear_multiply(0.6),
-                    bg_fill: WIDGET_HOVER.linear_multiply(0.6),
-                    bg_stroke: Stroke::NONE,
-                    fg_stroke: Stroke::new(2.0, WIDGET_HOVER.linear_multiply(0.6)),
-                    rounding: Rounding::none(),
-                    expansion: 0.0,
-                },
-                open: WidgetVisuals {
-                    weak_bg_fill: WIDGET_HOVER.linear_multiply(0.0),
-                    bg_fill: WIDGET_HOVER.linear_multiply(0.0),
-                    bg_stroke: Stroke::NONE,
-                    fg_stroke: Stroke::new(2.0, WIDGET_HOVER.linear_multiply(0.0)),
-                    rounding: Rounding::none(),
-                    expansion: 0.0,
+        let style: Style = Style {
+            spacing: Spacing {
+                scroll_bar_width: 8.0,
+                scroll_handle_min_length: 12.0,
+                scroll_bar_inner_margin: 4.0,
+                scroll_bar_outer_margin: 0.0,
+                ..Default::default()
+            },
+            visuals: Visuals {
+                faint_bg_color: Color32::from_rgb(15, 20, 34),
+                extreme_bg_color: Color32::from_rgb(20, 20, 20),
+                window_fill: Color32::BLACK,
+                //override_text_color: Some(Color32::WHITE),
+                hyperlink_color: F9B233,
+                widgets: Widgets {
+                    hovered: WidgetVisuals {
+                        weak_bg_fill: F9B233,
+                        bg_fill: F9B233,
+                        bg_stroke: Stroke::NONE,
+                        fg_stroke: Stroke::new(1.0, Color32::BLACK),
+                        rounding: Rounding::none(),
+                        expansion: 0.0,
+                    },
+                    inactive: WidgetVisuals {
+                        weak_bg_fill: Color32::TRANSPARENT,
+                        bg_fill: Color32::BLACK,
+                        bg_stroke: Stroke::new(2.0, Color32::WHITE),
+                        fg_stroke: Stroke::new(1.5, Color32::WHITE),
+                        rounding: Rounding::same(2.0),
+                        expansion: -2.0,
+                    },
+                    active: WidgetVisuals {
+                        weak_bg_fill: WIDGET_HOVER.linear_multiply(0.6),
+                        bg_fill: WIDGET_HOVER.linear_multiply(0.6),
+                        bg_stroke: Stroke::NONE,
+                        fg_stroke: Stroke::new(2.0, WIDGET_HOVER.linear_multiply(0.6)),
+                        rounding: Rounding::none(),
+                        expansion: 0.0,
+                    },
+                    open: WidgetVisuals {
+                        weak_bg_fill: WIDGET_HOVER.linear_multiply(0.0),
+                        bg_fill: WIDGET_HOVER.linear_multiply(0.0),
+                        bg_stroke: Stroke::NONE,
+                        fg_stroke: Stroke::new(2.0, WIDGET_HOVER.linear_multiply(0.0)),
+                        rounding: Rounding::none(),
+                        expansion: 0.0,
+                    },
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -279,13 +335,14 @@ impl DemoEguiApp {
             .unwrap()
             .push("comic_sans".to_owned());
 
-        cc.egui_ctx.set_visuals(vis);
+        cc.egui_ctx.set_style(style);
         cc.egui_ctx.set_fonts(fonts);
 
         cc.egui_ctx.set_debug_on_hover(args.debug);
 
+        
         let _user_pfp =
-            Rc::new(ImageLoader::load_from_fs("./res/usericon_tmp.png").expect("fuck, i guess?"));
+            Rc::new(RetainedImage::from_image_bytes("Timothy Dean Sweeney", include_bytes!("../res/usericon_tmp.png")).expect("yeah"));
 
         Self {
             debug: args.debug,
@@ -299,22 +356,25 @@ impl DemoEguiApp {
                 page: FriendsViewBarPage::Online,
                 status_filter: FriendsViewBarStatusFilter::Name,
                 search_buffer: String::new(),
+                friend_sel : String::new(),
             },
             user_pfp_renderable: (&_user_pfp).texture_id(&cc.egui_ctx),
             _user_pfp,
             user_name: "User".to_owned(),
             games: Vec::new(),
             game_sel: 0,
+            friends: Vec::new(),
             //game_view_rows: false,
             page_view: PageType::Games,
             game_view_bg_renderer: GameViewBgRenderer::new(cc),
             game_view_frac: 0.0,
             app_bg_renderer: AppBgRenderer::new(cc),
-            locale: TranslationManager::new("./res/locale/en_us.json".to_owned())
+            locale: TranslationManager::new()
                 .expect("Could not load translation file"),
             critical_bg_thread_crashed: false,
             backend: MaximaThread::new(&cc.egui_ctx), //please don't fucking break
             logged_in: args.no_login, // largely deprecated but i'm going to keep it here
+            login_cache_waiting: true,
             in_progress_login: false,
             in_progress_login_type: InProgressLoginType::Oauth,
             in_progress_username: String::new(),
@@ -328,6 +388,7 @@ impl DemoEguiApp {
 // modified from https://github.com/emilk/egui/blob/master/examples/custom_window_frame/src/main.rs
 
 pub fn tab_bar_button(ui: &mut Ui, res: Response) {
+    puffin::profile_function!();
     let mut res2 = Rect::clone(&res.rect);
     res2.min.y = res2.max.y - 4.;
     ui.painter().vline(
@@ -352,10 +413,11 @@ fn custom_window_frame(
     _title: &str,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
+    puffin::profile_function!();
     use egui::*;
 
     let panel_frame = egui::Frame {
-        fill: ctx.style().visuals.window_fill(),
+        fill: Color32::RED,
         rounding: 0.0.into(),
         stroke: Stroke::NONE,
         outer_margin: if frame.info().window_info.maximized {
@@ -366,7 +428,8 @@ fn custom_window_frame(
         ..Default::default()
     };
 
-    CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
+    CentralPanel::default()
+    .frame(panel_frame).show(ctx, |ui| {
         let app_rect = ui.max_rect();
 
         let title_bar_height = 28.0; //height on a standard monitor on macOS monterey
@@ -377,14 +440,13 @@ fn custom_window_frame(
         };
         #[cfg(target_os = "macos")]
         //eventually offer this on other platforms, but mac is the only functional one
-        title_bar_ui(ui, frame, _title_bar_rect, title);
+        title_bar_ui(ui, frame, _title_bar_rect, _title);
 
         // Add the contents:
         #[cfg(target_os = "macos")]
-        let content_rect = {
-            let mut rect = app_rect;
-            rect.min.y = _title_bar_rect.max.y;
-            rect
+        let content_rect = Rect {
+            min: pos2(app_rect.min.x, _title_bar_rect.max.y) + APP_MARGIN,
+            max: app_rect.max - APP_MARGIN,
         };
         #[cfg(not(target_os = "macos"))]
         let content_rect = Rect {
@@ -398,7 +460,7 @@ fn custom_window_frame(
     });
 }
 
-/* for custom window title bar thing, mostly aesthetic reasons
+
 fn title_bar_ui(
     ui: &mut egui::Ui,
     frame: &mut eframe::Frame,
@@ -444,9 +506,9 @@ fn title_bar_ui(
             close_maximize_minimize(ui, frame);
         });
     });
-} */
-/* wrapper/help func to avoid nesting hell in custom window decorations
-/// Show some close/maximize/minimize buttons for the native window.
+} 
+
+/// wrapper/help func to avoid nesting hell in custom window decorations
 fn close_maximize_minimize(ui: &mut egui::Ui, frame: &mut eframe::Frame) {
     use egui::{Button, RichText};
 
@@ -499,24 +561,28 @@ fn close_maximize_minimize(ui: &mut egui::Ui, frame: &mut eframe::Frame) {
     if minimized_response.clicked() {
         frame.set_minimized(true);
     }
-} */
+}
 
 /// Wrapper/helper for the tab buttons in the top left of the app
 fn tab_button(ui: &mut Ui, edit_var: &mut PageType, page: PageType, label: String) {
+    puffin::profile_function!();
     ui.style_mut().visuals.widgets.inactive.rounding = Rounding::none();
     ui.style_mut().visuals.widgets.active.rounding = Rounding::none();
     ui.style_mut().visuals.widgets.hovered.rounding = Rounding::none();
+    ui.style_mut().visuals.widgets.inactive.expansion = -1.0;
+    ui.style_mut().visuals.widgets.active.expansion = -1.0;
+    ui.style_mut().visuals.widgets.hovered.expansion = -1.0;
 
     if edit_var == &page {
         ui.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::WHITE;
         ui.style_mut().visuals.widgets.inactive.fg_stroke = Stroke::new(2.0, Color32::BLACK);
-        ui.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::new(2.0, Color32::WHITE);
+        ui.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
         ui.style_mut().visuals.widgets.active.weak_bg_fill = Color32::WHITE;
         ui.style_mut().visuals.widgets.active.fg_stroke = Stroke::new(2.0, Color32::BLACK);
-        ui.style_mut().visuals.widgets.active.bg_stroke = Stroke::new(2.0, Color32::WHITE);
+        ui.style_mut().visuals.widgets.active.bg_stroke = Stroke::NONE;
         ui.style_mut().visuals.widgets.hovered.weak_bg_fill = Color32::WHITE;
         ui.style_mut().visuals.widgets.hovered.fg_stroke = Stroke::new(2.0, Color32::BLACK);
-        ui.style_mut().visuals.widgets.hovered.bg_stroke = Stroke::NONE; //this one behaves differently, idk why.
+        ui.style_mut().visuals.widgets.hovered.bg_stroke = Stroke::NONE;
     } else {
         ui.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
         ui.style_mut().visuals.widgets.inactive.fg_stroke = Stroke::new(2.0, Color32::WHITE);
@@ -530,7 +596,7 @@ fn tab_button(ui: &mut Ui, edit_var: &mut PageType, page: PageType, label: Strin
     }
     let text = egui::RichText::new(label.to_uppercase()).size(16.0);
 
-    let test = ui.add_sized([120.0, 30.0], egui::Button::new(text));
+    let test = ui.add_sized([120.0, 28.0], egui::Button::new(text));
     if test.clicked() {
         *edit_var = page.clone();
     }
@@ -538,6 +604,7 @@ fn tab_button(ui: &mut Ui, edit_var: &mut PageType, page: PageType, label: Strin
 
 impl eframe::App for DemoEguiApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        puffin::profile_function!();
         frontend_processor::frontend_processor(self, ctx);
 
         custom_window_frame(ctx, frame, "Maxima", |ui| {
@@ -561,276 +628,315 @@ impl eframe::App for DemoEguiApp {
                     render.draw(ui, fullrect, fullrect.size(), TextureId::Managed(1));
                 }
             }
-            if !self.logged_in {
-                if self.in_progress_login {
-                    match self.in_progress_login_type {
-                        InProgressLoginType::Oauth => {
-                            ui.vertical_centered(|ui| {
-                                ui.add_sized([400.0, 400.0], egui::Spinner::new().size(400.0));
-                                ui.heading("Logging in...");
-                            });
-                        }
-                        InProgressLoginType::UsernamePass => {
-                            ui.set_enabled(!self.credential_login_in_progress);
-                            ui.vertical_centered(|ui| {
-                                ui.add_sized(
-                                    [260., 30.],
-                                    egui::text_edit::TextEdit::hint_text(
-                                        egui::text_edit::TextEdit::singleline(
-                                            &mut self.in_progress_username,
+            if self.login_cache_waiting {
+                ui.heading("hey, hi, hold on a bit");
+            } else {
+                if !self.logged_in {
+                    if self.in_progress_login {
+                        match self.in_progress_login_type {
+                            InProgressLoginType::Oauth => {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_sized([400.0, 400.0], egui::Spinner::new().size(400.0));
+                                    ui.heading("Logging in...");
+                                });
+                            }
+                            InProgressLoginType::UsernamePass => {
+                                ui.set_enabled(!self.credential_login_in_progress);
+                                ui.vertical_centered(|ui| {
+                                    ui.add_sized(
+                                        [260., 30.],
+                                        egui::text_edit::TextEdit::hint_text(
+                                            egui::text_edit::TextEdit::singleline(
+                                                &mut self.in_progress_username,
+                                            ),
+                                            &self.locale.localization.login.username_box_hint,
                                         ),
-                                        &self.locale.localization.login.username_box_hint,
-                                    ),
-                                );
-                                ui.add_sized(
-                                    [260., 30.],
-                                    egui::text_edit::TextEdit::hint_text(
-                                        egui::text_edit::TextEdit::singleline(
-                                            &mut self.in_progress_password,
+                                    );
+                                    ui.add_sized(
+                                        [260., 30.],
+                                        egui::text_edit::TextEdit::hint_text(
+                                            egui::text_edit::TextEdit::singleline(
+                                                &mut self.in_progress_password,
+                                            )
+                                            .password(true),
+                                            &self.locale.localization.login.password_box_hint,
+                                        ),
+                                    );
+                                    ui.heading(
+                                        egui::RichText::new(&self.in_progress_credential_status)
+                                            .color(Color32::RED),
+                                    );
+                                    if ui
+                                        .add_sized(
+                                            [260., 30.],
+                                            egui::Button::new(
+                                                egui::RichText::new(
+                                                    &self.locale.localization.login.credential_confirm,
+                                                )
+                                                .size(25.0),
+                                            ),
                                         )
-                                        .password(true),
-                                        &self.locale.localization.login.password_box_hint,
+                                        .clicked()
+                                    {
+                                        self.backend
+                                            .tx
+                                            .send(
+                                                interact_thread::MaximaLibRequest::LoginRequestUserPass(
+                                                    self.in_progress_username.clone(),
+                                                    self.in_progress_password.clone(),
+                                                ),
+                                            )
+                                            .unwrap();
+                                        self.credential_login_in_progress = true;
+                                        self.in_progress_credential_status =
+                                            self.locale.localization.login.credential_waiting.clone();
+                                    }
+                                });
+                            }
+                        }
+                    } else {
+                        ui.allocate_exact_size(
+                            vec2(0.0, (ui.available_size_before_wrap().y / 2.0) - 120.0),
+                            egui::Sense::click(),
+                        );
+                        ui.vertical_centered_justified(|ui| {
+                            ui.heading("You're not logged in.");
+                            ui.horizontal(|ui| {
+                                ui.allocate_exact_size(
+                                    vec2(
+                                        (ui.available_width()
+                                            - (330.0 + ui.style().spacing.item_spacing.x))
+                                            / 2.0,
+                                        0.0,
                                     ),
+                                    egui::Sense::click(),
                                 );
-                                ui.heading(
-                                    egui::RichText::new(&self.in_progress_credential_status)
-                                        .color(Color32::RED),
-                                );
+
                                 if ui
                                     .add_sized(
-                                        [260., 30.],
+                                        [160.0, 60.0],
                                         egui::Button::new(
-                                            egui::RichText::new(
-                                                &self.locale.localization.login.credential_confirm,
-                                            )
-                                            .size(25.0),
+                                            &self.locale.localization.login.oauth_option,
                                         ),
                                     )
                                     .clicked()
                                 {
+                                    self.in_progress_login_type = InProgressLoginType::Oauth;
+                                    self.in_progress_login = true;
                                     self.backend
                                         .tx
-                                        .send(
-                                            interact_thread::MaximaLibRequest::LoginRequestUserPass(
-                                                self.in_progress_username.clone(),
-                                                self.in_progress_password.clone(),
-                                            ),
-                                        )
+                                        .send(interact_thread::MaximaLibRequest::LoginRequestOauth)
                                         .unwrap();
-                                    self.credential_login_in_progress = true;
-                                    self.in_progress_credential_status =
-                                        self.locale.localization.login.credential_waiting.clone();
                                 }
-                            });
-                        }
+                                if ui
+                                    .add_sized(
+                                        [160.0, 60.0],
+                                        egui::Button::new(
+                                            &self.locale.localization.login.credentials_option,
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.in_progress_login_type = InProgressLoginType::UsernamePass;
+                                    self.in_progress_login = true;
+                                }
+                            })
+                        });
                     }
                 } else {
-                    ui.allocate_exact_size(
-                        vec2(0.0, (ui.available_size_before_wrap().y / 2.0) - 120.0),
-                        egui::Sense::click(),
-                    );
-                    ui.vertical_centered_justified(|ui| {
-                        ui.heading("You're not logged in.");
-                        ui.horizontal(|ui| {
-                            ui.allocate_exact_size(
-                                vec2(
-                                    (ui.available_width()
-                                        - (330.0 + ui.style().spacing.item_spacing.x))
-                                        / 2.0,
-                                    0.0,
-                                ),
-                                egui::Sense::click(),
-                            );
-
-                            if ui
-                                .add_sized(
-                                    [160.0, 60.0],
-                                    egui::Button::new(&self.locale.localization.login.oauth_option),
-                                )
-                                .clicked()
-                            {
-                                self.in_progress_login_type = InProgressLoginType::Oauth;
-                                self.in_progress_login = true;
-                                self.backend
-                                    .tx
-                                    .send(interact_thread::MaximaLibRequest::LoginRequestOauth)
-                                    .unwrap();
-                            }
-                            if ui
-                                .add_sized(
-                                    [160.0, 60.0],
-                                    egui::Button::new(
-                                        &self.locale.localization.login.credentials_option,
-                                    ),
-                                )
-                                .clicked()
-                            {
-                                self.in_progress_login_type = InProgressLoginType::UsernamePass;
-                                self.in_progress_login = true;
-                            }
-                        })
-                    });
-                }
-            } else {
-                let main_width = ui.available_width() - (300.0 + ui.spacing().item_spacing.x);
-                let size_width = 300.0;
-                let outside_spacing = ui.spacing().item_spacing.x.clone();
-                if self.critical_bg_thread_crashed {
-                    let mut warning_margin = Margin::same(0.0 - APP_MARGIN.x);
-                    warning_margin.bottom = APP_MARGIN.y;
-                    egui::Frame::default()
-                        .fill(Color32::RED)
-                        .outer_margin(warning_margin)
-                        .show(ui, |ui| {
-                            ui.vertical_centered(|ui| {
-                                ui.heading(
-                                    egui::RichText::new(
-                                        &self.locale.localization.errors.critical_thread_crashed,
-                                    )
-                                    .color(Color32::BLACK)
-                                    .size(16.0),
-                                );
+                    let main_width = ui.available_width() - (300.0 + ui.spacing().item_spacing.x);
+                    let size_width = 300.0;
+                    let outside_spacing = ui.spacing().item_spacing.x.clone();
+                    if self.critical_bg_thread_crashed {
+                        let mut warning_margin = Margin::same(0.0 - APP_MARGIN.x);
+                        warning_margin.bottom = APP_MARGIN.y;
+                        egui::Frame::default()
+                            .fill(Color32::RED)
+                            .outer_margin(warning_margin)
+                            .show(ui, |ui| {
+                                ui.vertical_centered(|ui| {
+                                    ui.heading(
+                                        egui::RichText::new(
+                                            &self
+                                                .locale
+                                                .localization
+                                                .errors
+                                                .critical_thread_crashed,
+                                        )
+                                        .color(Color32::BLACK)
+                                        .size(16.0),
+                                    );
+                                });
                             });
-                        });
-                }
-                StripBuilder::new(ui)
-                    .size(Size::exact(main_width))
-                    .size(Size::exact(size_width))
-                    .horizontal(|mut strip| {
-                        strip.cell(|ui| {
-                            ui.spacing_mut().item_spacing.y = outside_spacing;
-                            let avail_height = ui.available_height() - (32.0 + outside_spacing);
-                            StripBuilder::new(ui)
-                                .size(Size::exact(32.0))
-                                .size(Size::exact(avail_height))
-                                .vertical(|mut strip| {
-                                    strip.cell(|header| {
-                                        //header.painter().rect_filled(header.available_rect_before_wrap(), Rounding::none(), Color32::from_white_alpha(20));
-                                        let navbar = egui::Frame::default()
-                                            .stroke(Stroke::new(2.0, Color32::WHITE))
-                                            //.fill(Color32::TRANSPARENT)
-                                            .outer_margin(Margin::same(1.0))
-                                            .rounding(Rounding::same(4.0));
-                                        navbar.show(header, |ui| {
-                                            ui.horizontal(|ui| {
-                                                ui.spacing_mut().item_spacing.x = 0.0;
-                                                ui.style_mut().visuals.widgets.inactive.rounding =
-                                                    Rounding::none();
-                                                // BEGIN TAB BUTTONS
-                                                tab_button(
-                                                    ui,
-                                                    &mut self.page_view,
-                                                    PageType::Games,
-                                                    self.locale.localization.menubar.games.clone(),
-                                                );
-                                                tab_button(
-                                                    ui,
-                                                    &mut self.page_view,
-                                                    PageType::Store,
-                                                    self.locale.localization.menubar.store.clone(),
-                                                );
-                                                tab_button(
-                                                    ui,
-                                                    &mut self.page_view,
-                                                    PageType::Settings,
-                                                    self.locale
-                                                        .localization
-                                                        .menubar
-                                                        .settings
-                                                        .clone(),
-                                                );
-                                                if self.debug {
+                    }
+                    StripBuilder::new(ui)
+                        .size(Size::exact(main_width))
+                        .size(Size::exact(size_width))
+                        .horizontal(|mut strip| {
+                            strip.cell(|ui| {
+                                ui.spacing_mut().item_spacing.y = outside_spacing;
+                                let avail_height = ui.available_height() - (32.0 + outside_spacing);
+                                StripBuilder::new(ui)
+                                    .size(Size::exact(32.0))
+                                    .size(Size::exact(avail_height))
+                                    .vertical(|mut strip| {
+                                        strip.cell(|header| {
+                                            //header.painter().rect_filled(header.available_rect_before_wrap(), Rounding::none(), Color32::from_white_alpha(20));
+                                            let navbar = egui::Frame::default()
+                                                .stroke(Stroke::new(2.0, Color32::WHITE))
+                                                //.fill(Color32::TRANSPARENT)
+                                                .inner_margin(Margin::same(0.0))
+                                                .outer_margin(Margin::same(1.0))
+                                                .rounding(Rounding::same(4.0));
+                                            navbar.show(header, |ui| {
+                                                puffin::profile_scope!("tab bar");
+                                                ui.horizontal(|ui| {
+                                                    ui.spacing_mut().item_spacing.x = 0.0;
+                                                    ui.style_mut()
+                                                        .visuals
+                                                        .widgets
+                                                        .inactive
+                                                        .rounding = Rounding::none();
+                                                    // BEGIN TAB BUTTONS
                                                     tab_button(
                                                         ui,
                                                         &mut self.page_view,
-                                                        PageType::Debug,
-                                                        "Debug".to_owned(),
+                                                        PageType::Games,
+                                                        self.locale
+                                                            .localization
+                                                            .menubar
+                                                            .games
+                                                            .clone(),
                                                     );
-                                                }
-                                                //END TAB BUTTONS
+                                                    tab_button(
+                                                        ui,
+                                                        &mut self.page_view,
+                                                        PageType::Store,
+                                                        self.locale
+                                                            .localization
+                                                            .menubar
+                                                            .store
+                                                            .clone(),
+                                                    );
+                                                    tab_button(
+                                                        ui,
+                                                        &mut self.page_view,
+                                                        PageType::Settings,
+                                                        self.locale
+                                                            .localization
+                                                            .menubar
+                                                            .settings
+                                                            .clone(),
+                                                    );
+                                                    tab_button(
+                                                        ui,
+                                                        &mut self.page_view,
+                                                        PageType::Downloads,
+                                                        "Downloads".to_string(),
+                                                    );
+                                                    #[cfg(debug_assertions)]
+                                                    if self.debug {
+                                                        tab_button(
+                                                            ui,
+                                                            &mut self.page_view,
+                                                            PageType::Debug,
+                                                            "Debug".to_owned(),
+                                                        );
+                                                    }
+                                                    //END TAB BUTTONS
+                                                });
                                             });
                                         });
+                                        strip.cell(|body| {
+                                            puffin::profile_scope!("main view");
+                                            //body.painter().rect_filled(body.available_rect_before_wrap(), Rounding::none(), Color32::DARK_GREEN);
+                                            match self.page_view {
+                                                PageType::Games => games_view(self, body),
+                                                PageType::Settings => settings_view(self, body),
+                                                PageType::Debug => debug_view(self, body),
+                                                _ => undefined_view(self, body),
+                                            }
+                                        })
                                     });
-                                    strip.cell(|body| {
-                                        //body.painter().rect_filled(body.available_rect_before_wrap(), Rounding::none(), Color32::DARK_GREEN);
-                                        match self.page_view {
-                                            PageType::Games => games_view(self, body),
-                                            PageType::Settings => settings_view(self, body),
-                                            PageType::Debug => debug_view(self, body),
-                                            _ => undefined_view(self, body),
-                                        }
-                                    })
-                                });
-                        });
-                        strip.cell(|ui| {
-                            ui.spacing_mut().item_spacing.y = outside_spacing;
-                            let avail_height = ui.available_height() - (40.0);
-                            StripBuilder::new(ui)
-                                .size(Size::exact(32.0))
-                                .size(Size::exact(avail_height))
-                                .vertical(|mut strip| {
-                                    strip.cell(|header| {
-                                        //header.painter().rect_filled(header.available_rect_before_wrap(), Rounding::none(), Color32::from_white_alpha(20));
-                                        let navbar = egui::Frame::default()
-                                            .stroke(Stroke::new(2.0, Color32::WHITE))
-                                            //.fill(Color32::BLACK)
-                                            .outer_margin(Margin::same(1.0))
-                                            .inner_margin(Margin::same(-2.0))
-                                            .rounding(Rounding::same(4.0));
-                                        navbar.show(header, |ui| {
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |rtl| {
-                                                    rtl.visuals_mut().widgets.inactive.bg_stroke =
-                                                        Stroke::new(2.0, Color32::GREEN);
-                                                    rtl.menu_image_button(
-                                                        self.user_pfp_renderable,
-                                                        vec2(30.0, 30.0),
-                                                        |ui| {
-                                                            if ui
-                                                                .button(
-                                                                    &self
-                                                                        .locale
-                                                                        .localization
-                                                                        .profile_menu
-                                                                        .view_profile,
-                                                                )
-                                                                .clicked()
-                                                            {
-                                                                ui.close_menu();
-                                                            }
-                                                            if ui
-                                                                .button(
-                                                                    &self
-                                                                        .locale
-                                                                        .localization
-                                                                        .profile_menu
-                                                                        .view_wishlist,
-                                                                )
-                                                                .clicked()
-                                                            {
-                                                                ui.close_menu();
-                                                            }
-                                                        },
-                                                    );
-                                                    rtl.label(
-                                                        egui::RichText::new(self.user_name.clone())
+                            });
+                            strip.cell(|ui| {
+                                puffin::profile_scope!("right panel");
+                                ui.spacing_mut().item_spacing.y = outside_spacing;
+                                let avail_height = ui.available_height() - (40.0);
+                                StripBuilder::new(ui)
+                                    .size(Size::exact(32.0))
+                                    .size(Size::exact(avail_height))
+                                    .vertical(|mut strip| {
+                                        strip.cell(|header| {
+                                            puffin::profile_scope!("you");
+                                            //header.painter().rect_filled(header.available_rect_before_wrap(), Rounding::none(), Color32::from_white_alpha(20));
+                                            let navbar = egui::Frame::default()
+                                                .stroke(Stroke::new(2.0, Color32::WHITE))
+                                                //.fill(Color32::BLACK)
+                                                .outer_margin(Margin::same(1.0))
+                                                .inner_margin(Margin::same(-2.0))
+                                                .rounding(Rounding::same(4.0));
+                                            navbar.show(header, |ui| {
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |rtl| {
+                                                        rtl.visuals_mut()
+                                                            .widgets
+                                                            .inactive
+                                                            .bg_stroke =
+                                                            Stroke::new(2.0, Color32::GREEN);
+                                                        rtl.menu_image_button(
+                                                            (self.user_pfp_renderable, vec2(30.0, 30.0)),
+                                                            |ui| {
+                                                                if ui
+                                                                    .button(
+                                                                        &self
+                                                                            .locale
+                                                                            .localization
+                                                                            .profile_menu
+                                                                            .view_profile,
+                                                                    )
+                                                                    .clicked()
+                                                                {
+                                                                    ui.close_menu();
+                                                                }
+                                                                if ui
+                                                                    .button(
+                                                                        &self
+                                                                            .locale
+                                                                            .localization
+                                                                            .profile_menu
+                                                                            .view_wishlist,
+                                                                    )
+                                                                    .clicked()
+                                                                {
+                                                                    ui.close_menu();
+                                                                }
+                                                            },
+                                                        );
+                                                        rtl.label(
+                                                            egui::RichText::new(
+                                                                self.user_name.clone(),
+                                                            )
                                                             .size(15.0)
                                                             .color(Color32::WHITE),
-                                                    );
-                                                },
-                                            );
+                                                        );
+                                                    },
+                                                );
+                                            });
                                         });
+                                        strip.cell(|body| {
+                                            friends_view(self, body);
+                                        })
                                     });
-                                    strip.cell(|body| {
-                                        //body.painter().rect_filled(body.available_rect_before_wrap(), Rounding::none(), Color32::DARK_BLUE);
-                                        friends_view(self, body);
-                                    })
-                                });
+                            });
                         });
-                    });
+                }
             }
         });
+        puffin::GlobalProfiler::lock().new_frame();
     }
 
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
