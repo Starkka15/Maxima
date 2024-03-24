@@ -107,7 +107,7 @@ impl RtmConnectionManager {
 
         let connector = TlsConnector::from(Arc::new(config));
 
-        let domain = rustls::ServerName::try_from("rtm.tnt-ea.com")?;
+        let domain = rustls::ServerName::try_from(RTM_DOMAIN)?;
         let mut tls_stream = connector.connect(domain, stream).await?;
 
         let mut pending_responses: HashMap<String, oneshot::Sender<Communication>> = HashMap::new();
