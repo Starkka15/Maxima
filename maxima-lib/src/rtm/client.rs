@@ -68,6 +68,9 @@ struct CustomRichPresenceData {
 pub enum BasicPresence {
     Unknown,
     Offline,
+    /// Doesn't work
+    Dnd,
+    Away,
     Online,
 }
 
@@ -82,6 +85,8 @@ impl RichPresence {
     pub fn from(presence: &PresenceV1) -> Result<Self> {
         let basic = match presence.basic_presence_type() {
             BasicPresenceType::Offline => BasicPresence::Offline,
+            BasicPresenceType::Dnd => BasicPresence::Dnd,
+            BasicPresenceType::Away => BasicPresence::Away,
             BasicPresenceType::Online => BasicPresence::Online,
             _ => BasicPresence::Unknown,
         };
@@ -249,6 +254,8 @@ impl RtmClient {
         let basic_presence_type = match basic_presence {
             BasicPresence::Unknown => BasicPresenceType::UnknownPresence,
             BasicPresence::Offline => BasicPresenceType::Offline,
+            BasicPresence::Dnd => BasicPresenceType::Dnd,
+            BasicPresence::Away => BasicPresenceType::Away,
             BasicPresence::Online => BasicPresenceType::Online,
         };
 

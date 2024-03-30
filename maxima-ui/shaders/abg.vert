@@ -31,7 +31,7 @@ const vec2 uvs[12] = vec2[12](
 );
 out vec3 og_pos;
 out vec2 tex_coords;
-uniform vec2 u_dimensions;
+uniform vec3 u_dimensions;
 uniform vec2 u_img_dimensions;
 void main() {
     vec2 vpos = vec2(verts[gl_VertexID].x, verts[gl_VertexID].y);

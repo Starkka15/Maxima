@@ -1,7 +1,7 @@
 use egui::{Ui, Color32, vec2, Margin, ScrollArea, Rect, Pos2, Mesh, Shape, Rounding, RichText, Stroke};
 use egui_extras::{StripBuilder, Size};
-use log::debug;
-use crate::{DemoEguiApp, GameInfo, GameUIImagesWrapper, interact_thread, GameUIImages, GameDetails, GameDetailsWrapper, widgets::enum_dropdown::enum_dropdown};
+use log::{debug, info};
+use crate::{DemoEguiApp, GameInfo, GameUIImagesWrapper, bridge_thread, GameUIImages, GameDetails, GameDetailsWrapper, widgets::enum_dropdown::enum_dropdown};
 
 use strum_macros::EnumIter;
 
@@ -57,7 +57,7 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
   let game_images: Option<&GameUIImages> = match &game.images {
     GameUIImagesWrapper::Unloaded => {
       debug!("Loading images for {:?}", game.name);
-      app.backend.tx.send(interact_thread::MaximaLibRequest::GetGameImagesRequest(game.slug.clone())).unwrap();
+      app.backend.tx.send(bridge_thread::MaximaLibRequest::GetGameImagesRequest(game.slug.clone())).unwrap();
       game.images = GameUIImagesWrapper::Loading;
       None
     },
@@ -71,7 +71,7 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
   let game_details: Option<&GameDetails> = match &game.details {
     GameDetailsWrapper::Unloaded => {
       debug!("Loading details for {:?}", game.name);
-      app.backend.tx.send(interact_thread::MaximaLibRequest::GetGameDetailsRequest(game.slug.clone())).unwrap();
+      app.backend.tx.send(bridge_thread::MaximaLibRequest::GetGameDetailsRequest(game.slug.clone())).unwrap();
       game.details = GameDetailsWrapper::Loading;
       None
     },
@@ -153,7 +153,7 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
                 bar_rounding.ne = 0.0;
                 let play_bar_frame = egui::Frame::default()
                 //.fill(Color32::from_black_alpha(120))
-                .rounding(Rounding::none());
+                .rounding(Rounding::ZERO);
                 //.inner_margin(Margin::same(4.0));
                 //.outer_margin(Margin::same(4.0));
                 play_bar_frame.show(ui, |ui| {
@@ -212,14 +212,14 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
                         buttons.style_mut().spacing.item_spacing.x = 8.0;
 
                         //disabling the platform lockout for now, looks better for UI showcases
-                        let play_str = /*if cfg!(target_os = "osx") { "Play on " } else*/ { "  ".to_string() + &app.locale.localization.games_view.main.play + "  " };
+                        let play_str = /*if cfg!(target_os = "osx") { "Play on " } else*/ { "  ".to_string() + &app.locale.localization.games_view.main.play.to_uppercase() + "  " };
                         if buttons.add(egui::Button::new(egui::RichText::new(play_str)
-                          .size(26.0)
+                          .size(20.0)
                           .color(Color32::WHITE))
                           .rounding(Rounding::same(2.0))
-                          .min_size(vec2(50.0,50.0))
+                          .min_size(vec2(50.0,40.0))
                         ).clicked() {
-                          let _ = app.backend.tx.send(crate::interact_thread::MaximaLibRequest::StartGameRequest(game.offer.clone(), app.hardcode_game_paths));
+                          let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.offer.clone(), app.hardcode_game_paths));
                         }
                         
                         /* buttons.set_enabled(false);
@@ -232,22 +232,22 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
                           let _ = app.backend.tx.send(crate::interact_thread::MaximaLibRequest::BitchesRequest);
                         } */
                         
-                        if buttons.add(egui::Button::new(egui::RichText::new("  ⛭ Mods  ")
-                          .size(26.0)
+                        if buttons.add(egui::Button::new(egui::RichText::new("  ⛭ MODS  ")
+                          .size(20.0)
                           .color(Color32::WHITE))
                           .rounding(Rounding::same(2.0))
-                          .min_size(vec2(50.0,50.0))
+                          .min_size(vec2(50.0,40.0))
                         ).clicked() {
-                          let _ = app.backend.tx.send(crate::interact_thread::MaximaLibRequest::BitchesRequest);
+                          let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::BitchesRequest);
                         }
 
-                        if buttons.add(egui::Button::new(egui::RichText::new("  Setttings ⏷  ")
-                          .size(26.0)
+                        if buttons.add(egui::Button::new(egui::RichText::new("  SETTINGS ⏷  ")
+                          .size(20.0)
                           .color(Color32::WHITE))
                           .rounding(Rounding::same(2.0))
-                          .min_size(vec2(50.0,50.0))
+                          .min_size(vec2(50.0,40.0))
                         ).clicked() {
-                          let _ = app.backend.tx.send(crate::interact_thread::MaximaLibRequest::BitchesRequest);
+                          let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::BitchesRequest);
                         }
                       });
                     });
@@ -306,12 +306,6 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
                   puffin::profile_scope!("description");
                   
                   ui.style_mut().spacing.item_spacing = vec2(5.0,5.0);
-
-                  ui.strong("Frac");
-                  ui.label(format!("{:?}",app.game_view_frac));
-
-                  ui.allocate_space(vec2(0.0,16.0));
-
                   
                   let req_width = (ui.available_size_before_wrap().x - 5.0) / 2.0;
                   ui.horizontal(|sysreq| {
@@ -404,7 +398,7 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
 
 fn game_list_button_context_menu(app : &DemoEguiApp, game : &GameInfo, ui : &mut Ui) {
   if ui.button("▶ Play").clicked() {
-    let _ = app.backend.tx.send(crate::interact_thread::MaximaLibRequest::StartGameRequest(game.offer.clone(), app.hardcode_game_paths));
+    let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.offer.clone(), app.hardcode_game_paths));
     ui.close_menu();
   }
   ui.separator();

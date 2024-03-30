@@ -9,7 +9,7 @@ use maxima::{
 };
 use std::sync::mpsc::Sender;
 
-use crate::interact_thread::{InteractThreadLoginResponse, MaximaLibResponse};
+use crate::bridge_thread::{InteractThreadLoginResponse, MaximaLibResponse};
 
 pub async fn login_oauth(
     maxima_arc: LockedMaxima,

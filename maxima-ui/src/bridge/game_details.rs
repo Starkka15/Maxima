@@ -3,7 +3,7 @@ use egui::Context;
 use std::sync::mpsc::Sender;
 
 use crate::{
-    interact_thread::{InteractThreadGameDetailsResponse, MaximaLibResponse},
+    bridge_thread::{InteractThreadGameDetailsResponse, MaximaLibResponse},
     util::markdown::html_to_easymark,
     GameDetails,
 };

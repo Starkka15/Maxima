@@ -1,5 +1,5 @@
 use log::{debug, error, info};
-use maxima::core::{launch, LockedMaxima};
+use maxima::{core::{launch, LockedMaxima}, rtm::client::BasicPresence};
 
 pub async fn start_game_request(maxima_arc: LockedMaxima, offer_id: String, hardcode_paths: bool) {
     let maxima = maxima_arc.lock().await;
@@ -49,4 +49,6 @@ pub async fn start_game_request(maxima_arc: LockedMaxima, offer_id: String, hard
     if result.is_err() {
         error!("Failed to start game! Reason: {}", result.err().unwrap());
     }
+    
+
 }

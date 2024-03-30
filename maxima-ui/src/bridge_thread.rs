@@ -76,20 +76,21 @@ pub enum MaximaLibResponse {
     InteractionThreadDiedResponse,
 }
 
-pub struct MaximaThread {
+pub struct BridgeThread {
     pub rx: Receiver<MaximaLibResponse>,
     pub tx: Sender<MaximaLibRequest>,
 }
 
-impl MaximaThread {
+impl BridgeThread {
     pub fn new(ctx: &Context) -> Self {
         let (tx0, rx1) = std::sync::mpsc::channel();
         let (tx1, rx0) = std::sync::mpsc::channel();
         let context = ctx.clone();
+        
         tokio::task::spawn(async move {
             let die_fallback_transmittter = tx1.clone();
             //panic::set_hook(Box::new( |_| {}));
-            let result = MaximaThread::run(rx1, tx1, &context).await;
+            let result = BridgeThread::run(rx1, tx1, &context).await;
             if result.is_err() {
                 die_fallback_transmittter
                     .send(MaximaLibResponse::InteractionThreadDiedResponse)
@@ -137,8 +138,12 @@ impl MaximaThread {
         }
 
         'outer: loop {
-            let request = rx1.recv()?;
-            match request {
+            let request = rx1.try_recv();
+            if request.is_err() {
+                continue;
+            }
+
+            match request? {
                 MaximaLibRequest::LoginRequestOauth => {
                     let channel = tx1.clone();
                     let maxima = maxima_arc.clone();

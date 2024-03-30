@@ -8,7 +8,7 @@ use maxima::core::{
 };
 use std::sync::mpsc::Sender;
 
-use crate::interact_thread::{InteractThreadLoginResponse, MaximaLibResponse};
+use crate::bridge_thread::{InteractThreadLoginResponse, MaximaLibResponse};
 
 pub async fn login_creds(
     maxima_arc: LockedMaxima,

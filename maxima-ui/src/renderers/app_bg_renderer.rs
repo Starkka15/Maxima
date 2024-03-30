@@ -3,7 +3,7 @@ use eframe::glow::{BLEND, TEXTURE_2D};
 use egui::mutex::Mutex;
 use egui::{TextureId, Vec2};
 use egui_glow::glow;
-use log::error;
+use log::{error, info};
 use std::sync::Arc;
 
 /// FUCK
@@ -19,7 +19,7 @@ impl AppBgRenderer {
         })
     }
 
-    pub fn draw(&self, ui: &mut egui::Ui, rect: egui::Rect, img_size: Vec2, img: TextureId) {
+    pub fn draw(&self, ui: &mut egui::Ui, rect: egui::Rect, img_size: Vec2, img: TextureId, game: f32) {
         puffin::profile_function!("app background renderer");
         let render = self.render.clone();
 
@@ -29,6 +29,7 @@ impl AppBgRenderer {
                 rect.size(),
                 img_size,
                 painter.texture(img).expect("fuck you"),
+                game,
             );
         });
 
@@ -44,6 +45,8 @@ impl AppBgRenderer {
 struct ABGUnsafe {
     //I say this despite having used C++ for years before rust
     program: glow::Program,
+    app_dimensions: glow::NativeUniformLocation,
+    img_dimensions: glow::NativeUniformLocation,
 }
 
 impl ABGUnsafe {
@@ -65,7 +68,7 @@ impl ABGUnsafe {
 
             let vsource = include_str!("../../shaders/abg.vert");
             let fsource = include_str!("../../shaders/abg.frag");
-
+            
             let shader_src = [
                 (glow::VERTEX_SHADER, vsource),
                 (glow::FRAGMENT_SHADER, fsource),
@@ -99,12 +102,19 @@ impl ABGUnsafe {
                 gl.get_program_info_log(program)
             );
 
+            let app_dimensions = gl.get_uniform_location(program, "u_dimensions");
+            let img_dimensions = gl.get_uniform_location(program, "u_img_dimensions");
+
             for shader in shaders {
                 gl.detach_shader(program, shader);
                 gl.delete_shader(shader);
             }
 
-            Some(Self { program: program })
+            Some(Self {
+                program,
+                app_dimensions: app_dimensions.expect("app dimensions uniform not found!"),
+                img_dimensions: img_dimensions.expect("image dimensions uniform not found!"),
+            })
         }
     }
 
@@ -114,24 +124,14 @@ impl ABGUnsafe {
         dimensions: Vec2,
         img_dimensions: Vec2,
         img: glow::Texture,
+        game_fade: f32
     ) {
         puffin::profile_function!();
         use glow::HasContext as _;
         unsafe {
             gl.use_program(Some(self.program));
-            gl.uniform_2_f32(
-                gl.get_uniform_location(self.program, "u_dimensions")
-                    .as_ref(),
-                dimensions.x,
-                dimensions.y,
-            );
-            gl.uniform_2_f32(
-                gl.get_uniform_location(self.program, "u_img_dimensions")
-                    .as_ref(),
-                img_dimensions.x,
-                img_dimensions.y,
-            );
-            //gl.uniform_1_u32(self.hero_uniform.as_ref(), TEXTURE_2D);
+            gl.uniform_3_f32(Some(&self.app_dimensions), dimensions.x, dimensions.y, game_fade);
+            gl.uniform_2_f32(Some(&self.img_dimensions), img_dimensions.x, img_dimensions.y,);
 
             gl.bind_texture(TEXTURE_2D, Some(img));
 

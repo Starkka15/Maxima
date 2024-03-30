@@ -3,7 +3,7 @@ in vec3 og_pos;
 in vec2 tex_coords;
 out vec4 out_color;
 uniform sampler2D u_hero;
-uniform vec2 u_dimensions;
+uniform vec3 u_dimensions;
 
 
 
@@ -16,7 +16,7 @@ void bg() {
     float Quality = 13.0; // BLUR QUALITY (Default 4.0 - More is better but slower)
     float Size = 32.0;
 
-    vec2 Radius = Size/u_dimensions;
+    vec2 Radius = Size/u_dimensions.xy;
     
     // Normalized pixel coordinates (from 0 to 1)
     vec2 uv = tex_coords;
@@ -57,7 +57,9 @@ void vignette() {
 void main() {
     if (og_pos.z == 0.0) {
         bg();
+        out_color.xyz *= (u_dimensions.z);
     } else {
         vignette();
+        
     }
 }

@@ -14,7 +14,7 @@ use std::{
 };
 
 use crate::{
-    interact_thread::{InteractThreadGameUIImagesResponse, MaximaLibResponse},
+    bridge_thread::{InteractThreadGameUIImagesResponse, MaximaLibResponse},
     ui_image::{GameImageType, UIImage},
     GameUIImages,
 };

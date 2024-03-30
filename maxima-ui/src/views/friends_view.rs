@@ -1,8 +1,10 @@
-use std::sync::Arc;
+use std::{cmp, sync::Arc};
 
-use egui::{Ui, Color32, Margin, vec2, Rounding, Stroke, Sense, Id};
+use egui::{text::{LayoutJob, TextWrapping}, vec2, Color32, Id, Margin, Rounding, Sense, Stroke, TextFormat, Ui};
+use egui_extras::StripBuilder;
+use maxima::rtm::{client::BasicPresence};
 
-use crate::{DemoEguiApp, interact_thread, ui_image::UIImage, widgets::enum_dropdown::enum_dropdown};
+use crate::{DemoEguiApp, bridge_thread, ui_image::UIImage, widgets::enum_dropdown::enum_dropdown};
 
 use strum_macros::EnumIter;
 
@@ -46,7 +48,7 @@ pub enum UIFriendImageWrapper {
 pub struct UIFriend {
   pub name : String,
   pub id : String,
-  pub online : bool,
+  pub online : BasicPresence,
   pub game : Option<String>,
   pub game_presence : Option<String>,
   pub avatar: UIFriendImageWrapper,
@@ -60,57 +62,31 @@ impl UIFriend {
 
 const F9B233: Color32 = Color32::from_rgb(249, 178, 51);
 const DARK_GREY: Color32 = Color32::from_rgb(64, 64, 64);
-
+const PFP_SIZE: f32 = 42.0;
+const PFP_IMG_SIZE: f32 = PFP_SIZE - 4.0;
 
 pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
   puffin::profile_function!();
   let context = ui.ctx().clone();
-  let _friends_raw : Vec<UIFriend> = Vec::from(
-    [
-      UIFriend {
-        name : "AMoistEggroll".to_owned(),
-        id: "".to_owned(),
-        online : false,
-        game: None,
-        game_presence: None,
-        avatar: UIFriendImageWrapper::DoNotLoad,
-      },
-      UIFriend {
-        name : "BattleDash".to_owned(),
-        id: "".to_owned(),
-        online : true,
-        game: Some("Battlefield 2042".to_owned()),
-        game_presence: None,
-        avatar: UIFriendImageWrapper::DoNotLoad,
-      },
-      UIFriend {
-        name : "GEN_Burnout".to_owned(),
-        id: "".to_owned(),
-        online : true,
-        game: None,
-        game_presence: None,
-        avatar: UIFriendImageWrapper::DoNotLoad,
-      },
-      UIFriend {
-        name : "KursedKrabbo".to_owned(),
-        id: "".to_owned(),
-        online : true,
-        game: Some("Titanfall 2".to_owned()),
-        game_presence: Some("Pilots vs Pilots on Glitch".to_owned()),
-        avatar: UIFriendImageWrapper::DoNotLoad,
-      }
-    ]
-  );
+  // this is a fucking mistake.
+  let sidebar_rect = ui.available_rect_before_wrap();
+  let mistake = ui.allocate_rect(sidebar_rect, Sense::hover());
+  //ui.painter().rect_filled(mistake.rect, Rounding::ZERO, Color32::from_black_alpha(255));
+  let hovering_friends = context.animate_bool_with_time(egui::Id::new("FriendsListWidthAnimator"), mistake.hovered(), ui.style().animation_time*2.0);
+  let hover_diff = 300.0 - PFP_SIZE;
+  app.friends_width = PFP_SIZE + (hovering_friends * hover_diff);
+  ui.allocate_space(vec2(0.0, -mistake.rect.height()));
 
   let top_bar = egui::Frame::default()
   //.fill(Color32::from_gray(255))
-  .outer_margin(Margin::same(-4.0))
-  .inner_margin(Margin::same(5.0));
+  //.outer_margin(Margin::same(-4.0))
+  //.inner_margin(Margin::same(5.0))
+  ;
   
   top_bar.show(ui, |ui| {
     ui.style_mut().spacing.item_spacing = vec2(5.0,5.0);
     ui.vertical(|ui| {
-
+      
       ui.vertical(|ui| { //separating this out for styling reasons
         puffin::profile_scope!("filters");
         ui.visuals_mut().extreme_bg_color = Color32::TRANSPARENT;
@@ -147,10 +123,10 @@ pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
           enum_dropdown(ui, "FriendsListFilterTypeComboBox".to_owned(), &mut app.friends_view_bar.status_filter, combo_width, &app.locale);
         });
       });
-
+      
       
 
-      let friends : Vec<&mut UIFriend> = app.friends.iter_mut().filter(|obj| 
+      let mut friends : Vec<&mut UIFriend> = app.friends.iter_mut().filter(|obj| 
         match app.friends_view_bar.status_filter {
             FriendsViewBarStatusFilter::Name => obj.name.to_ascii_lowercase().contains(&app.friends_view_bar.search_buffer),
             FriendsViewBarStatusFilter::Game => if let Some(game) = &obj.game {
@@ -161,12 +137,23 @@ pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
         }
         &&
         match app.friends_view_bar.page {
-            FriendsViewBarPage::Online => obj.online,
             FriendsViewBarPage::All => true,
+            FriendsViewBarPage::Online => {
+              match obj.online {
+                BasicPresence::Unknown => false,
+                BasicPresence::Offline => false,
+                BasicPresence::Dnd => true,
+                BasicPresence::Away => true,
+                BasicPresence::Online => true,
+              }
+            },
             FriendsViewBarPage::Pending => false,
             FriendsViewBarPage::Blocked => false,
         }
       ).collect();
+      friends.sort_by(|a,b| {a.name.cmp(&b.name)});
+      friends.sort_by(|a,b| {(b.online.clone() as u8).cmp(&(a.online.clone() as u8))});
+      
       
       // scrollbar
       ui.style_mut().visuals.widgets.inactive.bg_fill = Color32::WHITE;
@@ -174,125 +161,122 @@ pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
       ui.style_mut().visuals.widgets.active.rounding = Rounding::same(4.0);
       ui.style_mut().visuals.widgets.hovered.rounding = Rounding::same(4.0);
 
-      egui::ScrollArea::new([false,true])
+      egui::ScrollArea::new([false,mistake.hovered()])
       .id_source("FriendsListFriendListScrollArea") //hmm yes, the friends list is made of friends list
       .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
       .show(ui, |ui| {
         puffin::profile_scope!("friends");
         let mut marge = Margin::same(0.0);
         marge.bottom = 4.5;
-        let item_width = ui.available_rect_before_wrap().width() - (ui.spacing().scroll_bar_width);
-        for friend in friends {
-          puffin::profile_scope!("friend");
-          let buttons = app.friends_view_bar.friend_sel.eq(&friend.id);
-          let how_buttons = context.animate_bool(Id::new("friendlistbuttons_".to_owned()+&friend.id), buttons);
-          ui.allocate_ui(vec2(item_width, 42.0 + ( 25.0 * how_buttons )), |ui| {
-            //ui.painter().rect_filled(ui.available_rect_before_wrap(), Rounding::none(), Color32::LIGHT_RED);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            if buttons || how_buttons > 0.0 {
-              let button_width = ( ui.available_width() - ui.spacing().item_spacing.x * 2.0) / 3.0;
-              ui.allocate_space(vec2(0.0,22.0 + ( 25.0 * how_buttons )));
-              ui.horizontal(|ui| {
-                ui.add(egui::Button::new("KILL").min_size(vec2(button_width,20.0)));
-                ui.add(egui::Button::new("INVITE").min_size(vec2(button_width,20.0)));
-                ui.add(egui::Button::new("CHAT").min_size(vec2(button_width,20.0)));
-              });
-              //let button_kill = ui.allocate_response(vec2(30.0, 20.0), Sense::click());
-              //ui.painter().rect_stroke(button_kill.rect, Rounding::same(2.0), Stroke::new(2.0, Color32::WHITE));
-              ui.allocate_space(vec2(0.0,- ( 42.0 + ( 25.0 * how_buttons ) )));
-            }
-            ui.horizontal(|container| {
+        let scrollbar_width = ui.spacing().scroll_bar_width;
+        let item_width = app.friends_width - (if mistake.hovered() { scrollbar_width + 3.0 } else { 0.0 });
+        ui.label(format!("{} friends", friends.len()));
+        StripBuilder::new(ui)
+        .clip(true)
+        .sizes(egui_extras::Size::initial(PFP_SIZE), friends.len()) 
+        .vertical(|mut friends_ui| {
+          for friend in friends {
+            puffin::profile_scope!("friend");
+            let buttons = app.friends_view_bar.friend_sel.eq(&friend.id) && mistake.hovered();
+            let how_buttons = context.animate_bool(Id::new("friendlistbuttons_".to_owned()+&friend.id), buttons);
+            let avatar: Option<&Arc<UIImage>> = match &friend.avatar {
+              UIFriendImageWrapper::DoNotLoad => {
+                None
+              },
+              UIFriendImageWrapper::Unloaded(url) => {
+                let _ = app.backend.tx.send(bridge_thread::MaximaLibRequest::GetUserAvatarRequest(friend.id.clone(), url.to_string()));
+                friend.set_avatar_loading_flag();
+                None
+              },
+              UIFriendImageWrapper::Loading => {
+                None
+              },
+              UIFriendImageWrapper::Available(img) => {
+                Some(img)
+              },
+            };
+            let game_hack: String;
+            let friend_status = 
+            match friend.online {
               
-              
-              
-              let avatar: Option<&Arc<UIImage>> = match &friend.avatar {
-                  UIFriendImageWrapper::DoNotLoad => {
-                    None
-                  },
-                  UIFriendImageWrapper::Unloaded(url) => {
-                    let _ = app.backend.tx.send(interact_thread::MaximaLibRequest::GetUserAvatarRequest(friend.id.clone(), url.to_string()));
-                    friend.set_avatar_loading_flag();
-                    None
-                  },
-                  UIFriendImageWrapper::Loading => {
-                    None
-                  },
-                  UIFriendImageWrapper::Available(img) => {
-                    Some(img)
-                  },
-              };
-              
-              container.spacing_mut().item_spacing.x = 0.0;
-
-              egui::Frame::default()
-              //.stroke(Stroke { width: 2.0, color: Color32::WHITE })
-              .inner_margin(Margin::same(1.0))
-              .outer_margin(Margin::same(0.0))
-              .show(container, |container| {
-                container.spacing_mut().item_spacing.y = 2.0;
-                let click_sensor = container.allocate_exact_size(vec2(item_width,42.0), Sense::click());
-
-                let how_hover = context.animate_bool(Id::new("friendlistrect_".to_owned()+&friend.id), click_sensor.1.hovered() || buttons);
-                let rect_bg = Color32::from_white_alpha((how_hover*u8::MAX as f32) as u8);
-                let text = Color32::from_gray(((1.0-how_hover)*u8::MAX as f32) as u8);
-                container.painter().rect_filled(click_sensor.0, Rounding::same(4.0), rect_bg);
-                container.visuals_mut().override_text_color = Some(text);
-                container.allocate_space(vec2((-item_width) + 2.0,-42.0));
-                if let Some(pfp) = avatar {
-                  container.image((pfp.renderable, vec2(38.0,38.0)));
-                } else {
-                  container.image((app.user_pfp_renderable, vec2(38.0,38.0)));
-                }
-                
-                container.allocate_space(vec2(12.0,0.0));
-                container.vertical(|text| {
-                  text.label(egui::RichText::new(&friend.name).size(15.0));
-                  let game_hack: String;
-                  text.label(egui::RichText::new(
-                    if friend.online {
-                      if let Some(game) = &friend.game  {
-                        if app.locale.localization.friends_view.prepend {
-                          if let Some(presence) = &friend.game_presence {
-                            game_hack = format!("{} {}: {}", &game, &app.locale.localization.friends_view.status_playing, &presence);
-                          } else {
-                            game_hack = format!("{} {}", &game, &app.locale.localization.friends_view.status_playing);
-                          }
-                        } else {
-                          if let Some(presence) = &friend.game_presence {
-                            game_hack = format!("{} {}: {}", &app.locale.localization.friends_view.status_playing, &game, &presence);
-                          } else {
-                            game_hack = format!("{} {}", &app.locale.localization.friends_view.status_playing, &game);
-                          }
-                        }
-                        &game_hack
-                        
-                      } else {
-                        &app.locale.localization.friends_view.status_online
-                      }
+              BasicPresence::Unknown => "Unknown".to_string(),
+              BasicPresence::Offline => "Offline".to_string(),
+              BasicPresence::Dnd => "Do not Disturb".to_string(),
+              BasicPresence::Away => "Away".to_string(),
+              BasicPresence::Online => {
+                if let Some(game) = &friend.game  {
+                  if app.locale.localization.friends_view.prepend {
+                    if let Some(presence) = &friend.game_presence {
+                      game_hack = format!("{} {}: {}", &game, &app.locale.localization.friends_view.status_playing, &presence);
                     } else {
-                      &app.locale.localization.friends_view.status_offline
+                      game_hack = format!("{} {}", &game, &app.locale.localization.friends_view.status_playing);
                     }
-                  ).size(10.0));
-                });
-                let mut outline_rect_fucking_jank_ass_bitch_dont_ship_it_idiot_lmao = click_sensor.0;
-                outline_rect_fucking_jank_ass_bitch_dont_ship_it_idiot_lmao.max = outline_rect_fucking_jank_ass_bitch_dont_ship_it_idiot_lmao.min + vec2(41.0, 41.0);
-                outline_rect_fucking_jank_ass_bitch_dont_ship_it_idiot_lmao.min += vec2(1.0, 1.0);
-                container.painter().rect_stroke(outline_rect_fucking_jank_ass_bitch_dont_ship_it_idiot_lmao, Rounding::same(4.0), Stroke::new(2.0, if friend.online { Color32::GREEN } else { Color32::GRAY }));
-                if click_sensor.1.clicked() {
-                  if app.friends_view_bar.friend_sel.eq(&friend.id){
-                    app.friends_view_bar.friend_sel = ("").to_string();
                   } else {
-                    app.friends_view_bar.friend_sel = friend.id.clone();
+                    if let Some(presence) = &friend.game_presence {
+                      game_hack = format!("{} {}: {}", &app.locale.localization.friends_view.status_playing, &game, &presence);
+                    } else {
+                      game_hack = format!("{} {}", &app.locale.localization.friends_view.status_playing, &game);
+                    }
                   }
-                }
+                  &game_hack
+                  
+                } else {
+                  &app.locale.localization.friends_view.status_online
+                }.to_string()
+              },
+            };
+
+
+
+            friends_ui.cell(|friendo| {
+              friendo.spacing_mut().item_spacing = vec2(0.0,0.0);
+              let sensor = friendo.allocate_rect(friendo.available_rect_before_wrap(), Sense::click());
+              let how_hover = context.animate_bool(Id::new("friendlistrect_".to_owned()+&friend.id), sensor.hovered() || buttons);
+              let rect_bg_col = Color32::from_white_alpha((how_hover*u8::MAX as f32) as u8);
+              let text_col = Color32::from_gray(((1.0-how_hover)*u8::MAX as f32) as u8);
+              friendo.allocate_space(-sensor.rect.size());
+              friendo.painter().rect_filled(sensor.rect, Rounding::same(4.0), rect_bg_col);
+              friendo.horizontal(|friendo| {
+                friendo.allocate_space(vec2(2.0,0.0));
+                friendo.vertical(|friendo| {
+                  friendo.allocate_space(vec2(0.0,2.0));
+                  if let Some(pfp) = avatar {
+                    friendo.image((pfp.renderable, vec2(PFP_IMG_SIZE,PFP_IMG_SIZE)));
+                  } else {
+                    friendo.image((app.user_pfp_renderable, vec2(PFP_IMG_SIZE,PFP_IMG_SIZE)));
+                  }
+                  let mut outline_rect = sensor.rect.clone();
+                  outline_rect.min += vec2(1.0,1.0);
+                  outline_rect.set_height(PFP_IMG_SIZE + 2.0);
+                  outline_rect.set_width(PFP_IMG_SIZE + 2.0);
+                  friendo.painter().rect_stroke(outline_rect, Rounding::same(4.0), Stroke::new(2.0, 
+                    match friend.online {
+                        BasicPresence::Unknown => Color32::DARK_RED,
+                        BasicPresence::Offline => Color32::GRAY,
+                        BasicPresence::Dnd => Color32::RED,
+                        BasicPresence::Away => Color32::GOLD,
+                        BasicPresence::Online => Color32::GREEN,
+                    }));
+                });
+                //if friend.online {  } else {  }
+                friendo.allocate_space(vec2(6.0,0.0));
+                friendo.vertical(|muchotexto| {
+                  muchotexto.allocate_space(vec2(0.0,2.0));
+                  let friend_name = egui::Label::new(egui::RichText::new(&friend.name).size(15.0).color(text_col)).wrap(false);
+                  muchotexto.add(friend_name);
+                  muchotexto.allocate_space(vec2(0.0,3.0));
+                  muchotexto.label(egui::RichText::new(friend_status).color(text_col).size(10.0));
+                });
+
               });
+
 
             });
-            ui.allocate_space(ui.available_size_before_wrap());
-          });
-        }
-        ui.allocate_space(vec2(item_width-2.0,ui.available_size_before_wrap().y));
-      })
+          }
+        });
+        
+        //ui.allocate_space(vec2(item_width-2.0,ui.available_size_before_wrap().y));
+      });
     });
   });
   ui.allocate_space(vec2(0.0,8.0));

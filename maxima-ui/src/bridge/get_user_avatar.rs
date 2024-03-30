@@ -3,7 +3,7 @@ use egui::Context;
 use std::sync::mpsc::Sender;
 
 use crate::{
-    interact_thread::{MaximaLibResponse, InteractThreadUserAvatarResponse},
+    bridge_thread::{MaximaLibResponse, InteractThreadUserAvatarResponse},
     ui_image::UIImage
 };
 

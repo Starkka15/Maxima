@@ -5,7 +5,7 @@ use maxima::core::LockedMaxima;
 use std::sync::mpsc::Sender;
 
 use crate::{
-    interact_thread::{InteractThreadGameListResponse, MaximaLibResponse},
+    bridge_thread::{InteractThreadGameListResponse, MaximaLibResponse},
     GameDetailsWrapper, GameInfo, GameUIImagesWrapper,
 };
 
