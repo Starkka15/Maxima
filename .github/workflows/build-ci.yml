@@ -40,11 +40,14 @@ jobs:
         override: true
         components: rustfmt, clippy
 
+    - name: Install Protoc
+      uses: arduino/setup-protoc@v3
+
     - name: Install Dependencies
       id: install-depends
       if: runner.os == 'Linux'
       run: |
-        sudo apt-get install -y musl-tools protobuf-compiler
+        sudo apt-get install -y musl-tools
         rustup target add x86_64-unknown-linux-musl
 
     - uses: Swatinem/rust-cache@v2
