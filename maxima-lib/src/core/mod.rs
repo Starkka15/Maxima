@@ -34,6 +34,7 @@ use std::{
 };
 
 use anyhow::{bail, Result};
+use derive_builder::Builder;
 use derive_getters::Getters;
 use log::error;
 use strum_macros::IntoStaticStr;
@@ -51,17 +52,17 @@ use crate::{
 use self::{
     auth::storage::{AuthStorage, LockedAuthStorage},
     cache::DynamicCache,
-    ecommerce::CommerceOffer,
     launch::ActiveGameContext,
     library::GameLibrary,
     locale::Locale,
     service_layer::{
-        ServiceFriends, ServiceGameProductType, ServiceGetBasicPlayerRequestBuilder,
-        ServiceGetMyFriendsRequestBuilder, ServiceGetPreloadedOwnedGamesRequestBuilder,
-        ServiceGetUserPlayerRequest, ServiceImage, ServiceLayerClient, ServicePlatform,
-        ServicePlayer, ServiceStorefront, ServiceUser, SERVICE_REQUEST_GETBASICPLAYER,
-        SERVICE_REQUEST_GETMYFRIENDS, SERVICE_REQUEST_GETPRELOADEDOWNEDGAMES,
-        SERVICE_REQUEST_GETUSERPLAYER,
+        ServiceAvatarList, ServiceAvatarListBuilder, ServiceFriends, ServiceGameProductType,
+        ServiceGetBasicPlayerRequestBuilder, ServiceGetMyFriendsRequestBuilder,
+        ServiceGetPreloadedOwnedGamesRequestBuilder, ServiceGetUserPlayerRequest, ServiceImage,
+        ServiceImageBuilder, ServiceLayerClient, ServicePlatform, ServicePlayer,
+        ServicePlayerBuilder, ServiceStorefront, ServiceUser, ServiceUserBuilder,
+        SERVICE_REQUEST_GETBASICPLAYER, SERVICE_REQUEST_GETMYFRIENDS,
+        SERVICE_REQUEST_GETPRELOADEDOWNEDGAMES, SERVICE_REQUEST_GETUSERPLAYER,
     },
 };
 
@@ -97,13 +98,22 @@ pub struct Maxima {
     request_cache: DynamicCache<String>,
 
     #[getter(skip)]
+    dummy_local_user: Option<ServiceUser>,
+
+    #[getter(skip)]
     pending_events: Vec<MaximaEvent>,
+}
+
+#[derive(Builder)]
+pub struct MaximaOptions {
+    load_auth_storage: bool,
+    dummy_local_user: bool,
 }
 
 pub type LockedMaxima = Arc<Mutex<Maxima>>;
 
 impl Maxima {
-    pub fn new() -> Result<LockedMaxima> {
+    pub fn new_with_options(options: MaximaOptions) -> Result<LockedMaxima> {
         let lsx_port = if let Ok(lsx_port) = env::var("MAXIMA_LSX_PORT") {
             lsx_port.parse::<u16>().unwrap()
         } else {
@@ -116,7 +126,49 @@ impl Maxima {
             Duration::from_secs(5 * 60),
         );
 
-        let auth_storage = AuthStorage::load()?;
+        let auth_storage = if options.load_auth_storage {
+            AuthStorage::load()?
+        } else {
+            AuthStorage::new()
+        };
+
+        let dummy_local_user = if options.dummy_local_user {
+            let avatar_image = ServiceImageBuilder::default()
+                .height(Some(256))
+                .width(Some(256))
+                .path("".to_owned())
+                .build()?;
+
+            let name = "DummyUser".to_owned();
+
+            let avatar_list = ServiceAvatarListBuilder::default()
+                .large(avatar_image.clone())
+                .medium(avatar_image.clone())
+                .small(avatar_image)
+                .build()?;
+
+            let player = ServicePlayerBuilder::default()
+                .id("0".to_owned())
+                .pd("0".to_owned())
+                .psd("0".to_owned())
+                .display_name(name.to_owned())
+                .unique_name(name.to_owned())
+                .nickname(name)
+                .avatar(avatar_list)
+                .relationship("self".to_owned())
+                .build()?;
+
+            Some(
+                ServiceUserBuilder::default()
+                    .id("0".to_owned())
+                    .pd(Some("0".to_owned()))
+                    .player(Some(player))
+                    .owned_game_products(None)
+                    .build()?,
+            )
+        } else {
+            None
+        };
 
         Ok(Arc::new(Mutex::new(Self {
             locale: Locale::EnUs,
@@ -129,8 +181,13 @@ impl Maxima {
             lsx_connections: 0,
             rtm: RtmClient::new(auth_storage),
             request_cache,
+            dummy_local_user,
             pending_events: Vec::new(),
         })))
+    }
+
+    pub fn new() -> Result<LockedMaxima> {
+        Maxima::new_with_options(MaximaOptionsBuilder::default().build()?)
     }
 
     pub async fn start_lsx(&self, maxima: LockedMaxima) -> Result<()> {
@@ -157,6 +214,10 @@ impl Maxima {
     }
 
     pub async fn local_user(&self) -> Result<ServiceUser> {
+        if let Some(user) = self.dummy_local_user.clone() {
+            return Ok(user);
+        }
+
         let cache_key = "user_player";
         if let Some(cached) = self.request_cache.get(cache_key) {
             return Ok(cached);
@@ -239,15 +300,11 @@ impl Maxima {
         Ok(data)
     }
 
-    pub async fn current_offer(&self) -> Option<CommerceOffer> {
-        if self.playing.is_none() {
-            return None;
+    pub async fn player_by_id(&self, id: &str) -> Result<ServicePlayer> {
+        if let Some(user) = &self.dummy_local_user {
+            return Ok(user.player().as_ref().unwrap().clone());
         }
 
-        Some(self.playing.as_ref().unwrap().offer().to_owned())
-    }
-
-    pub async fn player_by_id(&self, id: &str) -> Result<ServicePlayer> {
         let cache_key = "basic_player_".to_owned() + id;
         if let Some(cached) = self.request_cache.get(&cache_key) {
             return Ok(cached);
@@ -300,6 +357,10 @@ impl Maxima {
         let path = self.cached_avatar_path(id, width, height)?;
         if !path.exists() {
             self.player_by_id(id).await?;
+        }
+
+        if let Some(_) = &self.dummy_local_user {
+            return Ok(path);
         }
 
         if !path.exists() {

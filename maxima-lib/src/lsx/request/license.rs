@@ -2,12 +2,10 @@ use anyhow::{bail, Result};
 use log::info;
 
 use crate::{
-    lsx::{
+    core::launch::LaunchMode, lsx::{
         connection::LockedConnectionState,
         types::{LSXRequestLicense, LSXRequestLicenseResponse, LSXResponseType},
-    },
-    make_lsx_handler_response,
-    ooa::request_license,
+    }, make_lsx_handler_response, ooa::{request_license, LicenseAuth}
 };
 
 pub async fn handle_license_request(
@@ -19,18 +17,26 @@ pub async fn handle_license_request(
     let arc = state.write().await.maxima_arc();
     let mut maxima = arc.lock().await;
 
-    let offer = maxima.current_offer().await.unwrap();
-    let access_token = maxima.access_token().await?;
+    let playing = maxima.playing().as_ref().unwrap();
+    let content_id = playing.content_id().to_owned();
+    let mode = playing.mode();
+
+    let auth = match mode {
+        LaunchMode::Offline(_) => {
+            return make_lsx_handler_response!(Response, RequestLicenseResponse, { attr_License: todo!() });
+        },
+        LaunchMode::Online(_) => {
+            LicenseAuth::AccessToken(maxima.access_token().await?)
+        },
+        LaunchMode::OnlineOffline(_, persona, password) => {
+            LicenseAuth::Direct(persona.to_owned(), password.to_owned())
+        },
+    };
 
     let license = request_license(
-        offer
-            .publishing
-            .publishing_attributes
-            .content_id
-            .unwrap()
-            .as_str(),
+        &content_id,
         "ca5f9ae34d7bcd895e037a17769de60338e6e84",
-        access_token.as_str(),
+        &auth,
         Some(request.attr_RequestTicket.as_str()),
         Some(request.attr_TicketEngine.as_str()),
     )

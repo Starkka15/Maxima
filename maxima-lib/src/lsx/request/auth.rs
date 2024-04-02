@@ -1,5 +1,5 @@
 use anyhow::Result;
-use log::info;
+use log::{error, info};
 
 use crate::{
     core::auth::{context::AuthContext, nucleus_auth_exchange},
@@ -22,9 +22,17 @@ pub async fn handle_auth_code_request(
     let access_token = state.write().await.access_token().await?;
     context.set_access_token(&access_token);
 
-    let auth_code = nucleus_auth_exchange(&context, &client_id, "code")
-        .await
-        .unwrap();
+    let auth_res = nucleus_auth_exchange(&context, &client_id, "code").await;
+    let auth_code = if let Err(err) = auth_res {
+        error!(
+            "Failed to retrieve LSX auth code for '{}': {:?}",
+            client_id, err
+        );
+
+        String::from("invalid")
+    } else {
+        auth_res.unwrap()
+    };
 
     make_lsx_handler_response!(Response, AuthCode, { attr_value: auth_code })
 }

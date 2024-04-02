@@ -8,14 +8,23 @@ use anyhow::{bail, Result};
 
 use base64::{engine::general_purpose, Engine};
 use openssl::symm::{decrypt, encrypt, Cipher};
+use regex::Regex;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use lazy_static::lazy_static;
 
 use crate::core::endpoints::API_PROXY_NOVAFUSION_LICENSES;
 
 pub const OOA_CRYPTO_KEY: [u8; 16] = [
     65, 50, 114, 45, 208, 130, 239, 176, 220, 100, 87, 197, 118, 104, 202, 9,
 ];
+
+lazy_static! {
+    static ref EMAIL_PATTERN: Regex = Regex::new(
+        r"^([a-z0-9_+]([a-z0-9_+.]*[a-z0-9_+])?)@([a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,6})"
+    )
+    .unwrap();
+}
 
 const LICENSE_PATH: &str = "ProgramData/Electronic Arts/EA Services/License";
 
@@ -58,8 +67,14 @@ pub fn detect_ooa_state(game_path: PathBuf) -> OOAState {
     OOAState::SignatureDecoded
 }
 
+pub enum LicenseAuth {
+    AccessToken(String),
+    /// Persona/Email, Password
+    Direct(String, String),
+}
+
 pub async fn request_and_save_license(
-    access_token: &str,
+    auth: &LicenseAuth,
     content_id: &str,
     mut game_path: PathBuf,
 ) -> Result<()> {
@@ -75,7 +90,7 @@ pub async fn request_and_save_license(
     let license = request_license(
         content_id,
         "ca5f9ae34d7bcd895e037a17769de60338e6e84",
-        access_token,
+        auth,
         None,
         None,
     )
@@ -88,14 +103,28 @@ pub async fn request_and_save_license(
 pub async fn request_license(
     content_id: &str,
     machine_hash: &str,
-    access_token: &str,
+    auth: &LicenseAuth,
     request_token: Option<&str>,
     request_type: Option<&str>,
 ) -> Result<License> {
     let mut query = Vec::new();
     query.push(("contentId", content_id));
     query.push(("machineHash", machine_hash));
-    query.push(("ea_eadmtoken", access_token));
+
+    match auth {
+        LicenseAuth::AccessToken(access_token) => {
+            query.push(("ea_eadmtoken", access_token));
+        }
+        LicenseAuth::Direct(persona, password) => {
+            if EMAIL_PATTERN.is_match(persona) {
+                query.push(("ea_email", persona));
+            } else {
+                query.push(("ea_persona", persona));
+            }
+
+            query.push(("ea_password", password));
+        },
+    }
 
     if request_token.is_some() {
         query.push(("requestToken", request_token.unwrap()));
@@ -110,7 +139,7 @@ pub async fn request_license(
         .send()
         .await?;
     if res.status() != StatusCode::OK {
-        bail!("License request failed");
+        bail!("License request failed: {}", res.text().await?);
     }
 
     let signature = res.headers().get("x-signature").unwrap().to_owned();

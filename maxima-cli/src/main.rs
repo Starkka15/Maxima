@@ -23,11 +23,12 @@ use maxima::{
     core::{
         auth::{nucleus_token_exchange, TokenResponse},
         clients::JUNO_PC_CLIENT_ID,
+        launch::LaunchMode,
         service_layer::{
             ServiceFriends, ServiceGetBasicPlayerRequestBuilder, ServicePlayer,
             SERVICE_REQUEST_GETBASICPLAYER,
         },
-        LockedMaxima,
+        LockedMaxima, MaximaOptionsBuilder,
     },
     ooa,
     rtm::client::BasicPresence,
@@ -62,6 +63,12 @@ enum Mode {
 
         #[arg(short, long)]
         offer_id: String,
+
+        /// When set, offer_id must be a content ID, and the only authenticated
+        /// requests are made to the license server. A dummy name will be used
+        /// in place of your real username, and any online LSX requests will fail
+        #[arg(long)]
+        login: Option<String>,
     },
     ListGames,
     AccountInfo,
@@ -192,9 +199,28 @@ async fn startup() -> Result<()> {
     // Take back the focus since the browser and bootstrap will take it
     take_foreground_focus()?;
 
-    let maxima_arc = Maxima::new()?;
+    let skip_login = {
+        if let Some(Mode::Launch {
+            game_path: _,
+            game_args: _,
+            offer_id: _,
+            ref login,
+        }) = args.mode
+        {
+            login.is_some()
+        } else {
+            false
+        }
+    };
 
-    {
+    let options = MaximaOptionsBuilder::default()
+        .load_auth_storage(!skip_login)
+        .dummy_local_user(skip_login)
+        .build()?;
+
+    let maxima_arc = Maxima::new_with_options(options)?;
+
+    if !skip_login {
         let maxima = maxima_arc.lock().await;
 
         {
@@ -226,7 +252,8 @@ async fn startup() -> Result<()> {
             game_path,
             game_args,
             offer_id,
-        } => start_game(&offer_id, game_path, game_args, maxima_arc.clone()).await,
+            login,
+        } => start_game(&offer_id, game_path, game_args, login, maxima_arc.clone()).await,
         Mode::ListGames => list_games(maxima_arc.clone()).await,
         Mode::AccountInfo => print_account_info(maxima_arc.clone()).await,
         Mode::CreateAuthCode { client_id } => {
@@ -288,6 +315,7 @@ async fn interactive_start_game(maxima_arc: LockedMaxima) -> Result<()> {
         game.origin_offer_id().as_str(),
         None,
         Vec::new(),
+        None,
         maxima_arc.clone(),
     )
     .await?;
@@ -537,15 +565,38 @@ async fn start_game(
     offer_id: &str,
     game_path_override: Option<String>,
     game_args: Vec<String>,
+    login: Option<String>,
     maxima_arc: LockedMaxima,
 ) -> Result<()> {
     {
         let mut maxima = maxima_arc.lock().await;
         maxima.start_lsx(maxima_arc.clone()).await?;
-        maxima.rtm().login().await?;
+
+        if login.is_none() {
+            maxima.rtm().login().await?;
+        }
     }
 
-    launch::start_game(offer_id, game_path_override, game_args, maxima_arc.clone()).await?;
+    if login.is_none() {
+        launch::start_game(
+            maxima_arc.clone(),
+            LaunchMode::Online(offer_id.to_owned()),
+            game_path_override,
+            game_args,
+        )
+        .await?;
+    } else if let Some(captures) = MANUAL_LOGIN_PATTERN.captures(&login.unwrap()) {
+        let persona = &captures[1];
+        let password = &captures[2];
+
+        launch::start_game(
+            maxima_arc.clone(),
+            LaunchMode::OnlineOffline(offer_id.to_owned(), persona.to_owned(), password.to_owned()),
+            game_path_override,
+            game_args,
+        )
+        .await?;
+    }
 
     loop {
         let mut maxima = maxima_arc.lock().await;

@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::Result;
+use log::{info, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -96,6 +97,8 @@ impl AuthAccount {
     }
 
     async fn refresh(&mut self) -> Result<()> {
+        info!("Attempting token refresh...");
+
         let token_res = nucleus_connect_token_refresh(&self.refresh_token).await?;
         self.parse_token_response(&token_res).await?;
         Ok(())
@@ -151,6 +154,14 @@ impl AuthStorage {
         };
 
         Arc::new(Mutex::new(storage))
+    }
+
+    pub fn new() -> LockedAuthStorage {
+        Arc::new(Mutex::new(Self {
+            accounts: HashMap::new(),
+            selected: None,
+            can_save: false,
+        }))
     }
 
     pub(crate) fn load() -> Result<LockedAuthStorage> {

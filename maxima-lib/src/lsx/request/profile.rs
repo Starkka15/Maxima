@@ -81,11 +81,15 @@ pub async fn handle_set_presence_request(
     let arc = state.write().await.maxima_arc();
     let mut maxima = arc.lock().await;
 
-    let offer_id = maxima
-        .playing()
+    let playing = maxima.playing().as_ref().unwrap();
+    if playing.mode().is_online_offline() {
+        return make_lsx_handler_response!(Response, ErrorSuccess, { attr_Code: 0, attr_Description: String::new() });
+    }
+
+    let offer_id = playing
+        .offer()
         .as_ref()
         .unwrap()
-        .offer()
         .offer_id
         .to_owned();
 

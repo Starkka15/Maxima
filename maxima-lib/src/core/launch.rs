@@ -1,18 +1,18 @@
 use base64::{engine::general_purpose, Engine};
 use derive_getters::Getters;
 use log::info;
-use uuid::Uuid;
-use std::{env, path::PathBuf, sync::Arc, vec::Vec};
+use std::{env, fmt::Display, path::PathBuf, sync::Arc, vec::Vec};
 use tokio::{
     process::{Child, Command},
     sync::Mutex,
 };
+use uuid::Uuid;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::{
     core::ecommerce::request_offer_data,
-    ooa::request_and_save_license,
+    ooa::{request_and_save_license, LicenseAuth},
     util::{
         registry::{bootstrap_path, read_game_path},
         simple_crypto,
@@ -33,22 +33,53 @@ pub struct LibraryInjection {
     pub stage: StartupStage,
 }
 
+pub enum LaunchMode {
+    /// Completely offline, relies on cached license files and user IDs
+    Offline(String), // Offer ID
+    /// Online, makes requests about the user and licensing
+    Online(String), // Offer ID
+    /// Online, but only for license requests; everything else uses dummy offer and user IDs
+    /// Content ID, Game executable path, and username/password must be specified
+    OnlineOffline(String, String, String), // Content ID, Persona, Password
+}
+
+impl LaunchMode {
+    // What an awful name
+    pub fn is_online_offline(&self) -> bool {
+        match self {
+            LaunchMode::OnlineOffline(_, _, _) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Getters)]
 pub struct ActiveGameContext {
     launch_id: String,
     game_path: String,
-    offer: CommerceOffer,
+    content_id: String,
+    offer: Option<CommerceOffer>,
+    mode: LaunchMode,
     injections: Vec<LibraryInjection>,
     process: Child,
     started: bool,
 }
 
 impl ActiveGameContext {
-    pub fn new(launch_id: &str, game_path: &str, offer: CommerceOffer, process: Child) -> Self {
+    pub fn new(
+        launch_id: &str,
+        game_path: &str,
+        content_id: &str,
+        offer: Option<CommerceOffer>,
+        mode: LaunchMode,
+        process: Child,
+    ) -> Self {
         Self {
             launch_id: launch_id.to_owned(),
             game_path: game_path.to_owned(),
+            content_id: content_id.to_owned(),
             offer,
+            mode,
             injections: Vec::new(),
             process,
             started: false,
@@ -66,39 +97,76 @@ pub struct BootstrapLaunchArgs {
     pub args: Vec<String>,
 }
 
+impl Display for LaunchMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LaunchMode::Offline(offer_id) => write!(f, "{}", offer_id),
+            LaunchMode::Online(offer_id) => write!(f, "{}", offer_id),
+            LaunchMode::OnlineOffline(content_id, _, _) => write!(f, "{}", content_id),
+        }
+    }
+}
+
 pub async fn start_game(
-    offer_id: &str,
+    maxima_arc: Arc<Mutex<Maxima>>,
+    mode: LaunchMode,
     game_path_override: Option<String>,
     mut game_args: Vec<String>,
-    maxima_arc: Arc<Mutex<Maxima>>,
 ) -> Result<()> {
     linux_setup().await?;
 
     let mut maxima = maxima_arc.lock().await;
-    info!("Retrieving data about '{}'...", offer_id);
+    info!("Initiating game launch with {}...", mode);
 
-    let access_token = &maxima.access_token().await?;
+    if let LaunchMode::OnlineOffline(ref content_id, _, _) = mode {
+        if game_path_override.is_none() {
+            bail!("Game path must be specified when launching in OnlineOffline mode");
+        }
 
-    let offer = request_offer_data(access_token, offer_id, maxima.locale.full_str()).await?;
+        if content_id.starts_with("Origin.OFR") {
+            bail!("Content ID was specified as an offer ID when launching in OnlineOffline mode");
+        }
+    }
 
-    let content_id = offer
-        .publishing
-        .publishing_attributes
-        .content_id
-        .as_ref()
-        .unwrap()
-        .to_owned();
+    let (content_id, online_offline, offer, access_token) =
+        if let LaunchMode::Online(ref offer_id) = mode {
+            let access_token = &maxima.access_token().await?;
+            let offer =
+                request_offer_data(access_token, offer_id, maxima.locale.full_str()).await?;
 
-    info!(
-        "Requesting pre-game license for {}...",
-        offer.localizable_attributes.display_name
-    );
+            let content_id = offer
+                .publishing
+                .publishing_attributes
+                .content_id
+                .as_ref()
+                .unwrap()
+                .to_owned();
+
+            info!(
+                "Requesting pre-game license for {}...",
+                offer.localizable_attributes.display_name
+            );
+
+            (content_id, false, Some(offer), access_token.to_owned())
+        } else if let LaunchMode::OnlineOffline(ref content_id, _, _) = mode {
+            (content_id.to_owned(), true, None, String::new())
+        } else {
+            bail!("Offline mode is not yet supported");
+        };
 
     // Need to move this into Maxima and have a "current game" system
     let path = if game_path_override.is_some() {
         PathBuf::from(game_path_override.as_ref().unwrap())
-    } else {
-        let software = offer.publishing.software_list.as_ref().unwrap().software[0]
+    } else if online_offline {
+        // https://youtu.be/TGfQu0bQTKc?t=506
+        let software = offer
+            .as_ref()
+            .unwrap()
+            .publishing
+            .software_list
+            .as_ref()
+            .unwrap()
+            .software[0]
             .fulfillment_attributes
             .installation_directory
             .as_ref()
@@ -108,13 +176,25 @@ pub async fn start_game(
         read_game_path(&software)
             .expect("Failed to find game path")
             .join("starwarsbattlefrontii.exe")
+    } else {
+        bail!("Game path not found");
     };
 
     let dir = path.parent().unwrap().to_str().unwrap();
     let path = path.to_str().unwrap();
     info!("Game path: {}", path);
 
-    request_and_save_license(&maxima.access_token().await?, &content_id, path.into()).await?;
+    match mode {
+        LaunchMode::Offline(_) => {}
+        LaunchMode::Online(_) => {
+            let auth = LicenseAuth::AccessToken(maxima.access_token().await?);
+            request_and_save_license(&auth, &content_id, path.into()).await?;
+        }
+        LaunchMode::OnlineOffline(_, ref persona, ref password) => {
+            let auth = LicenseAuth::Direct(persona.to_owned(), password.to_owned());
+            request_and_save_license(&auth, &content_id, path.into()).await?;
+        }
+    }
 
     // Append args from env
     if let Ok(args) = env::var("MAXIMA_LAUNCH_ARGS") {
@@ -133,25 +213,18 @@ pub async fn start_game(
     child.arg(b64);
 
     let user = maxima.local_user().await?;
-
-    // Vars saved here for historical and debugging purposes:
-    // EALaunchOOAUserEmail
-    // EALaunchOOAUserPass
-    // EAOnErrorExitRetCode
-
     let launch_id = Uuid::new_v4().to_string();
 
     child
         .current_dir(PathBuf::from(path).parent().unwrap())
         .env("MXLaunchId", launch_id.to_owned())
         .env("EAAuthCode", "unavailable")
-        .env("EAConnectionId", offer_id.to_owned())
         .env("EAEgsProxyIpcPort", "0")
         .env("EAEntitlementSource", "EA")
         .env("EAExternalSource", "EA")
         .env("EAFreeTrialGame", "false")
         .env("EAGameLocale", maxima.locale.full_str())
-        .env("EAGenericAuthToken", access_token)
+        .env("EAGenericAuthToken", access_token.to_owned())
         .env("EALaunchCode", "4AULYZZ2KJSN2RMHEVUH")
         .env(
             "EALaunchEAID",
@@ -159,8 +232,6 @@ pub async fn start_game(
         )
         .env("EALaunchEnv", "production")
         .env("EALaunchOfflineMode", "false")
-        .env("EALaunchUserAuthToken", access_token)
-        .env("EALicenseToken", offer_id.to_owned())
         .env("EALsxPort", maxima.lsx_port.to_string())
         .env(
             "EARtPLaunchCode",
@@ -168,12 +239,36 @@ pub async fn start_game(
         )
         .env("EASecureLaunchTokenTemp", user.id())
         .env("EASteamProxyIpcPort", "0")
-        .env("OriginSessionKey", "5a81a155-7bf8-444c-a229-c22133447d88")
+        .env("OriginSessionKey", launch_id.to_owned())
         .env("ContentId", content_id.to_owned());
+
+    match mode {
+        LaunchMode::Offline(_) => todo!(),
+        LaunchMode::Online(ref offer_id) => {
+            child
+                .env("EAConnectionId", offer_id.to_owned())
+                .env("EALicenseToken", offer_id.to_owned())
+                .env("EALaunchUserAuthToken", access_token);
+        }
+        LaunchMode::OnlineOffline(_, ref persona, ref password) => {
+            child
+                .env("EALaunchOOAUserEmail", persona)
+                .env("EALaunchOOAUserPass", password)
+                // Given this is probably running headlessly, don't show a UI on error
+                .env("EAOnErrorExitRetCode", "1");
+        }
+    };
 
     let child = child.spawn().expect("Failed to start child");
 
-    maxima.playing = Some(ActiveGameContext::new(&launch_id, dir, offer.clone(), child));
+    maxima.playing = Some(ActiveGameContext::new(
+        &launch_id,
+        dir,
+        &content_id,
+        offer,
+        mode,
+        child,
+    ));
 
     Ok(())
 }
