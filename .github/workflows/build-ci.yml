@@ -60,10 +60,6 @@ jobs:
       if: runner.os == 'Windows'
       run: |
         cargo build --release
-      env:
-        VCPKGRS_DYNAMIC: "0"
-        OPENSSL_DIR: ${{ github.workspace }}\vcpkg\installed\x64-windows-static-md
-        OPENSSL_STATIC: "1"
 
     - name: Build Maxima
       if: runner.os == 'Linux'
