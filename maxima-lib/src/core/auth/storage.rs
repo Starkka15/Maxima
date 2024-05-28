@@ -103,6 +103,10 @@ impl AuthAccount {
         self.parse_token_response(&token_res).await?;
         Ok(())
     }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -176,7 +180,9 @@ impl AuthStorage {
             return Ok(Arc::new(Mutex::new(Self::default())));
         }
 
-        Ok(Arc::new(Mutex::new(result.unwrap())))
+        let mut storage: AuthStorage = result.unwrap();
+        storage.can_save = true;
+        Ok(Arc::new(Mutex::new(storage)))
     }
 
     pub(crate) fn save(&self) -> Result<()> {
@@ -213,8 +219,13 @@ impl AuthStorage {
 
     /// Add an account from a token response and set it as the currently selected one
     pub async fn add_account(&mut self, response: &TokenResponse) -> Result<()> {
-        let account = AuthAccount::from_token_response(response).await?;
+        let mut account = AuthAccount::from_token_response(response).await?;
         let user_id = account.user_id.to_owned();
+
+        if self.accounts.contains_key(&user_id) {
+            info!("Marking account dirty");
+            account.mark_dirty();
+        }
 
         self.accounts.insert(user_id.to_owned(), account);
         self.selected = Some(user_id);
