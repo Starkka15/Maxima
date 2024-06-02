@@ -247,8 +247,12 @@ impl ZipFile {
         let client = Client::new();
 
         let response = client.head(url).send().await?;
-        let content_length = response.headers().get("content-length").unwrap();
-        let content_length = content_length.to_str()?.parse::<i64>().unwrap_or(0);
+        let content_length = response.headers().get("content-length")?;
+        if content_length.is_none() {
+            bail!("No content length found in response");
+        }
+
+        let content_length = content_length.unwrap().to_str()?.parse::<i64>().unwrap_or(0);
 
         let mut data: Vec<u8> = Vec::with_capacity(MAX_BACKSCAN_OFFSET);
         let mut offset = content_length - 8 * 1024;
