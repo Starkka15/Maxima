@@ -365,7 +365,7 @@ async fn native_setup() -> Result<()> {
 
 #[cfg(not(windows))]
 async fn native_setup() -> Result<()> {
-    use service::util::registry::set_up_registry;
+    use maxima::util::registry::set_up_registry;
 
     if let Err(err) = check_registry_validity() {
         warn!("{}, fixing...", err);
