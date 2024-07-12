@@ -367,9 +367,18 @@ pub unsafe extern "C" fn maxima_auth_exchange(runtime: *mut *mut Runtime, mx: *m
 
 /// Create a Maxima object.
 #[no_mangle]
-pub extern "C" fn maxima_mx_create() -> *const c_void {
-    let maxima_arc = Maxima::new().expect("Failed to initialize Maxima");
-    Arc::into_raw(maxima_arc) as *const c_void
+pub extern "C" fn maxima_mx_create(runtime: *mut *mut Runtime) -> *const c_void {
+    unsafe {
+        let rt = Box::from_raw(*runtime);
+
+        let result = rt.block_on(async {
+            let maxima_arc = Maxima::new().await.expect("Failed to initialize Maxima");
+            Arc::into_raw(maxima_arc) as *const c_void
+        });
+
+        *runtime = Box::into_raw(rt);
+        result
+    }
 }
 
 /// Set the stored token retrieved from [maxima_login].
