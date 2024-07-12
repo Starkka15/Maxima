@@ -78,6 +78,10 @@ impl OwnedOffer {
         let manifest: DiPManifest = quick_xml::de::from_str(&file).unwrap();
         Some(manifest)
     }
+
+    pub fn offer_id(&self) -> &String {
+        self.offer.offer_id()
+    }
 }
 
 #[derive(Clone, Getters)]

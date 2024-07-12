@@ -335,7 +335,7 @@ async fn interactive_start_game(maxima_arc: LockedMaxima) -> Result<()> {
 
         let name = Select::new("What game would you like to play?", owned_games_strs).prompt()?;
         let game: &OwnedTitle = owned_games.iter().find(|g| g.name() == name).unwrap();
-        game.base_offer().offer().offer_id().to_owned()
+        game.base_offer().offer_id().to_owned()
     };
 
     start_game(
@@ -673,7 +673,7 @@ async fn list_games(maxima_arc: LockedMaxima) -> Result<()> {
             info!(
                 "  {:<width$} - {:<width2$}",
                 game.offer().display_name(),
-                game.offer().offer_id(),
+                game.offer_id(),
                 width = 55,
                 width2 = 25
             );
