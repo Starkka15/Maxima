@@ -3,16 +3,19 @@ extern crate winapi;
 
 use anyhow::{bail, Result};
 use widestring::U16CString;
-use winapi::{shared::{minwindef::HKEY, winerror::ERROR_SUCCESS}, um::{winnt::{KEY_QUERY_VALUE, KEY_WOW64_64KEY}, winreg::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW}}};
-use winreg::enums::{RegType::{REG_NONE, REG_SZ}, KEY_READ};
+
 use std::{path::PathBuf, ptr};
 
 #[cfg(windows)]
 use winapi::{
-    shared::winerror::ERROR_CANCELLED,
+    shared::{minwindef::HKEY, winerror::ERROR_CANCELLED},
     um::{
         errhandlingapi::GetLastError,
         shellapi::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NO_CONSOLE},
+    },
+    um::{
+        winnt::KEY_QUERY_VALUE,
+        winreg::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW},
     },
 };
 
@@ -69,14 +72,29 @@ fn read_reg_key(path: &str) -> Option<String> {
         let mut handle = ptr::null_mut();
 
         unsafe {
-            if RegOpenKeyExW(hkey, U16CString::from_str(sub_key).unwrap().as_ptr(), 0, KEY_QUERY_VALUE, &mut handle) != 0 {
+            if RegOpenKeyExW(
+                hkey,
+                U16CString::from_str(sub_key).unwrap().as_ptr(),
+                0,
+                KEY_QUERY_VALUE,
+                &mut handle,
+            ) != 0
+            {
                 return None;
             }
 
             let dw_type = ptr::null_mut();
             let mut dw_size = 0;
 
-            if RegQueryValueExW(handle, U16CString::from_str(value_name).unwrap().as_ptr(), ptr::null_mut(), dw_type, ptr::null_mut(), &mut dw_size) != 0 {
+            if RegQueryValueExW(
+                handle,
+                U16CString::from_str(value_name).unwrap().as_ptr(),
+                ptr::null_mut(),
+                dw_type,
+                ptr::null_mut(),
+                &mut dw_size,
+            ) != 0
+            {
                 RegCloseKey(handle);
                 return None;
             }
@@ -87,7 +105,15 @@ fn read_reg_key(path: &str) -> Option<String> {
             }
 
             let mut buf: Vec<u16> = vec![0; (dw_size as usize / 2) - 1];
-            if RegQueryValueExW(handle, U16CString::from_str(value_name).unwrap().as_ptr(), ptr::null_mut(), dw_type, buf.as_mut_ptr() as *mut u8, &mut dw_size) != 0 {
+            if RegQueryValueExW(
+                handle,
+                U16CString::from_str(value_name).unwrap().as_ptr(),
+                ptr::null_mut(),
+                dw_type,
+                buf.as_mut_ptr() as *mut u8,
+                &mut dw_size,
+            ) != 0
+            {
                 RegCloseKey(handle);
                 return None;
             }
@@ -101,14 +127,16 @@ fn read_reg_key(path: &str) -> Option<String> {
 }
 
 pub fn parse_registry_path(key: &str) -> PathBuf {
-    let mut parts = key.split(|c| c == '[' || c == ']').filter(|s| !s.is_empty());
+    let mut parts = key
+        .split(|c| c == '[' || c == ']')
+        .filter(|s| !s.is_empty());
 
     if let (Some(first), Some(second)) = (parts.next(), parts.next()) {
         let path = read_reg_key(first);
         if path.is_none() {
-            return PathBuf::from(key.to_owned())
+            return PathBuf::from(key.to_owned());
         }
-        
+
         let path = path.unwrap().replace("\\", "/");
         let second = second.replace("\\", "/");
         let second = second.strip_prefix("/").unwrap_or(&second);
@@ -303,7 +331,7 @@ fn set_mime_type(mime_type: &str, desktop_file_path: &str) -> Result<()> {
 #[cfg(unix)]
 pub fn check_registry_validity() -> Result<()> {
     if std::env::var("MAXIMA_DISABLE_QRC").is_ok() {
-        return Ok(())
+        return Ok(());
     }
 
     if !verify_protocol_handler("qrc")? {
