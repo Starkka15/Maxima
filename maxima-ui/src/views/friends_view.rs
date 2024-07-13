@@ -240,15 +240,17 @@ pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
 
 
             //TODO: rewrite with custom painting
-            ui.label("guh!");
-            /* friends_ui.cell(|friendo| {
+             ui.vertical(|friendo| {
               friendo.spacing_mut().item_spacing = vec2(0.0,0.0);
+              let TEMP = friendo.available_rect_before_wrap().clone();
+              /*
               let sensor = friendo.allocate_rect(friendo.available_rect_before_wrap(), Sense::click());
               let how_hover = context.animate_bool(Id::new("friendlistrect_".to_owned()+&friend.id), sensor.hovered() || buttons);
               let rect_bg_col = Color32::from_white_alpha((how_hover*u8::MAX as f32) as u8);
               let text_col = Color32::from_gray(((1.0-how_hover)*u8::MAX as f32) as u8);
               friendo.allocate_space(-sensor.rect.size().max(vec2(0.0, 0.0)));
               friendo.painter().rect_filled(sensor.rect, Rounding::same(4.0), rect_bg_col);
+              */
               friendo.horizontal(|friendo| {
                 friendo.allocate_space(vec2(2.0,0.0));
                 friendo.vertical(|friendo| {
@@ -258,7 +260,7 @@ pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
                   } else {
                     friendo.image((app.user_pfp_renderable, vec2(PFP_IMG_SIZE,PFP_IMG_SIZE)));
                   }
-                  let mut outline_rect = sensor.rect.clone();
+                  let mut outline_rect = TEMP.clone();
                   outline_rect.min += vec2(1.0,1.0);
                   outline_rect.set_height(PFP_IMG_SIZE + 2.0);
                   outline_rect.set_width(PFP_IMG_SIZE + 2.0);
@@ -271,7 +273,7 @@ pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
                         BasicPresence::Online => Color32::GREEN,
                     }));
                 });
-                //if friend.online {  } else {  }
+                /*
                 friendo.allocate_space(vec2(6.0 + (30.0 - (hovering_friends * 30.0)),0.0));
                 friendo.vertical(|muchotexto| {
                   muchotexto.allocate_space(vec2(0.0,2.0));
@@ -279,12 +281,13 @@ pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
                   muchotexto.add(friend_name);
                   muchotexto.allocate_space(vec2(0.0,3.0));
                   muchotexto.label(egui::RichText::new(friend_status).color(text_col).size(10.0));
-                });
-
+                  });
+                */
+                  
               });
 
 
-            });*/
+            });
           }
       });
     });

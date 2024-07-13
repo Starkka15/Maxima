@@ -10,7 +10,7 @@ use std::{
     },
 };
 
-use maxima::core::{LockedMaxima, Maxima, MaximaOptions, MaximaOptionsBuilder};
+use maxima::core::{launch::ActiveGameContext, LockedMaxima, Maxima, MaximaOptions, MaximaOptionsBuilder};
 
 use crate::{
     bridge::{
@@ -142,7 +142,12 @@ impl BridgeThread {
             }
         }
 
+        let playing_cache: Option<ActiveGameContext> = None;
         'outer: loop {
+            {
+                let mut maxima = maxima_arc.lock().await;
+                maxima.update_playing_status();
+            }
             let request = rx1.try_recv();
             if request.is_err() {
                 continue;

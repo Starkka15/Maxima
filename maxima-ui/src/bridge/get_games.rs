@@ -15,25 +15,27 @@ pub async fn get_games_request(
     ctx: &Context,
 ) -> Result<()> {
     debug!("recieved request to load games");
-    let maxima = maxima_arc.lock().await;
+    let mut maxima = maxima_arc.lock().await;
     let logged_in = maxima.auth_storage().lock().await.current().is_some();
     if !logged_in {
         bail!("Ignoring request to load games, not logged in.");
     }
 
-    let owned_games = maxima.owned_games(1).await.unwrap();
-    let owned_game_products = owned_games.owned_game_products();
-    if owned_game_products.is_none() {
+    let owned_games = maxima.mut_library().games().await;
+    
+    if owned_games.len() <= 0 {
         return Ok(());
     }
 
-    for game in owned_game_products.as_ref().unwrap().items() {
+    for game in owned_games {
         let game_info = GameInfo {
-            slug: game.product().game_slug().clone(),
-            offer: game.origin_offer_id().clone(),
-            name: game.product().name().clone(),
+            slug: game.base_offer().slug().to_string(),
+            offer: game.base_offer().offer().offer_id().to_string(),
+            name: game.name(),
             images: GameUIImagesWrapper::Unloaded,
             details: GameDetailsWrapper::Unloaded,
+            dlc: game.extra_offers().clone(),
+            installed: game.base_offer().installed().await,
         };
         let res = MaximaLibResponse::GameInfoResponse(InteractThreadGameListResponse {
             game: game_info,

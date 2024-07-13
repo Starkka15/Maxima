@@ -52,8 +52,7 @@ fn skeleton_text_block1(ui: &mut egui::Ui, width: f32, width1: f32, height: f32)
 pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
   puffin::profile_function!();
   if app.games.len() < 1 { return }
-  if app.game_sel > app.games.len() { return }
-  let game = &mut app.games[app.game_sel];
+  let game: &mut GameInfo = if let Some(game) = app.games.get_mut(&app.game_sel) { game } else { return };
   let game_images: Option<&GameUIImages> = match &game.images {
     GameUIImagesWrapper::Unloaded => {
       debug!("Loading images for {:?}", game.name);
@@ -207,6 +206,7 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
               });
               
               let buttons_frame = egui::Frame::default()
+              .outer_margin(Margin::symmetric(0.0, 8.0))
               .fill(Color32::TRANSPARENT);
               buttons_frame.show(ui, |buttons| {
                 puffin::profile_scope!("action buttons");
@@ -214,15 +214,40 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
                   buttons.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
                   buttons.style_mut().spacing.item_spacing.x = 8.0;
 
-                  //disabling the platform lockout for now, looks better for UI showcases
-                  let play_str = /*if cfg!(target_os = "osx") { "Play on " } else*/ { "  ".to_string() + &app.locale.localization.games_view.main.play.to_uppercase() + "  " };
-                  if buttons.add(egui::Button::new(egui::RichText::new(play_str)
-                    .size(20.0)
-                    .color(Color32::WHITE))
-                    .rounding(Rounding::same(2.0))
-                    .min_size(vec2(50.0,40.0))
-                  ).clicked() {
-                    let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.offer.clone(), app.hardcode_game_paths));
+                  if if let Some(slug) = &app.playing_game { slug.eq(&game.slug) } else { false } {
+                    let play_str = { "  ".to_string() + &app.locale.localization.games_view.main.stop.to_uppercase() + "  " };
+                      if buttons.add(egui::Button::new(egui::RichText::new(play_str)
+                        .size(20.0)
+                        .color(Color32::WHITE))
+                        .rounding(Rounding::same(2.0))
+                        .min_size(vec2(50.0,40.0))
+                      ).clicked() {
+                        app.playing_game = Some(game.slug.clone());
+                        let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.offer.clone(), app.hardcode_game_paths));
+                      }
+                  } else {
+                    if game.installed {
+                      let play_str = { "  ".to_string() + &app.locale.localization.games_view.main.play.to_uppercase() + "  " };
+                      if buttons.add(egui::Button::new(egui::RichText::new(play_str)
+                        .size(20.0)
+                        .color(Color32::WHITE))
+                        .rounding(Rounding::same(2.0))
+                        .min_size(vec2(50.0,40.0))
+                      ).clicked() {
+                        app.playing_game = Some(game.slug.clone());
+                        let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.offer.clone(), app.hardcode_game_paths));
+                      }
+                    } else {
+                      let play_str = { "  ".to_string() + &app.locale.localization.games_view.main.install.to_uppercase() + "  " };
+                      if buttons.add(egui::Button::new(egui::RichText::new(play_str)
+                        .size(20.0)
+                        .color(Color32::WHITE))
+                        .rounding(Rounding::same(2.0))
+                        .min_size(vec2(50.0,40.0))
+                      ).clicked() {
+                        //TODO
+                      }
+                    }
                   }
                   
                   /* buttons.set_enabled(false);
@@ -234,15 +259,6 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
                   ).clicked() {
                     let _ = app.backend.tx.send(crate::interact_thread::MaximaLibRequest::BitchesRequest);
                   } */
-                  
-                  if buttons.add(egui::Button::new(egui::RichText::new("  ⛭ MODS  ")
-                    .size(20.0)
-                    .color(Color32::WHITE))
-                    .rounding(Rounding::same(2.0))
-                    .min_size(vec2(50.0,40.0))
-                  ).clicked() {
-                    let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::BitchesRequest);
-                  }
 
                   if buttons.add(egui::Button::new(egui::RichText::new("  SETTINGS ⏷  ")
                     .size(20.0)
@@ -442,21 +458,32 @@ fn show_game_list_buttons(app : &mut DemoEguiApp, ui : &mut Ui) {
         
         style.spacing.item_spacing = vec2(0.0,0.0);
         
-        let filtered_games : Vec<&GameInfo> = app.games.iter().filter(|obj| 
-          obj.name.to_lowercase().contains(&app.game_view_bar.search_buffer.to_lowercase())
-        ).collect();
+        let james: std::collections::hash_map::Iter<String, GameInfo> = app.games.iter();
+        let filtered_games = app.games.iter().filter(|obj| 
+          obj.1.name.to_lowercase().contains(&app.game_view_bar.search_buffer.to_lowercase())
+        );
         
-        for game_idx in 0..filtered_games.len() {
+        for (slug, game) in filtered_games {
           puffin::profile_scope!("game list game");
           let style = games_list.style_mut();
-          if app.game_sel == game_idx {
+
+          
+
+          if app.game_sel.eq(slug) {
             style.visuals.widgets.inactive.weak_bg_fill = F9B233.gamma_multiply(0.8);
             style.visuals.widgets.inactive.fg_stroke = Stroke::new(2.0, Color32::BLACK);
           } else {
             style.visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-            style.visuals.widgets.inactive.fg_stroke = Stroke::new(2.0, Color32::WHITE);
+            style.visuals.widgets.inactive.fg_stroke = {
+              if game.installed {
+                Stroke::new(1.0, Color32::WHITE)
+              } else {
+                Stroke::new(1.0, Color32::GRAY)
+              }
+            };
           }
-          let game = filtered_games[game_idx];
+
+          
           /*if let Ok(icon) = game.icon(&mut app.game_image_handler) {
             if games_list.add_sized(vec2(250.0, icon_size.y),
               egui::Button::image_and_text(icon, icon_size, RichText::new(&game.name).color(Color32::WHITE).strong())
@@ -466,14 +493,10 @@ fn show_game_list_buttons(app : &mut DemoEguiApp, ui : &mut Ui) {
                 app.game_sel = game_idx;
             }
           } else {*/
-            if let Some(gaming) = games_list.add_sized(vec2(250.0, icon_size.y+4.0), egui::Button::image_and_text((egui::TextureId::Managed(0), vec2(0.0, 0.0)), &game.name)
-                //.fill(if app.game_sel == game_idx {  ACCENT_COLOR } else { Color32::TRANSPARENT })
-                .rounding(Rounding::same(0.0)))
-                .context_menu(|ui| { game_list_button_context_menu(app, game, ui) }) {
-                  if gaming.response.clicked() {
-
-                    app.game_sel = game_idx;
-                  }
+           let list_response = games_list.add_sized(vec2(250.0, icon_size.y+4.0), egui::Button::image_and_text((egui::TextureId::Managed(0), vec2(0.0, 0.0)), &game.name).rounding(Rounding::same(0.0)));
+           list_response.context_menu(|ui| { game_list_button_context_menu(app, game, ui) });
+            if list_response.clicked() {
+                app.game_sel = slug.clone();
               }
           //}
         }

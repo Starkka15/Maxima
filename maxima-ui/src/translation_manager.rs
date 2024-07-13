@@ -80,6 +80,8 @@ pub struct LocalizedGamesViewToolbarPlatformOptions {
 #[derive(Deserialize)]
 pub struct LocalizedGamesViewMain {
     pub play: String,
+    pub stop: String,
+    pub install: String,
     pub uninstall: String,
     pub settings: String,
     pub playtime: String,

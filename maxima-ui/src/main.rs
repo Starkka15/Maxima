@@ -5,7 +5,9 @@ use egui::{pos2, ViewportBuilder};
 use egui::style::{ScrollStyle, Spacing};
 use egui::Style;
 use log::{error, info, warn};
+use maxima::core::library::OwnedOffer;
 use views::undefinied_view::coming_soon_view;
+use std::collections::HashMap;
 use std::default::Default;
 use std::{ops::RangeInclusive, rc::Rc, sync::Arc};
 use ui_image::UIImage;
@@ -220,6 +222,8 @@ pub struct GameInfo {
     images: GameUIImagesWrapper,
     /// Game info
     details: GameDetailsWrapper,
+    dlc: Vec<OwnedOffer>,
+    installed: bool,
 }
 
 impl GameInfo {
@@ -234,34 +238,63 @@ impl GameInfo {
 }
 
 pub struct DemoEguiApp {
-    debug: bool,                      // general toggle for showing debug info
-    game_view_bar: GameViewBar,       // stuff for the bar on the top of the Games view
-    friends_view_bar: FriendsViewBar, // stuff for the bar on the top of the Friends view
-    user_name: String,                // Logged in user's display name
-    _user_pfp: Rc<RetainedImage>,     // temp icon for the user's profile picture
-    user_pfp_renderable: TextureId,   // actual renderable for the user's profile picture //TODO
-    games: Vec<GameInfo>,             // games
-    game_sel: usize,                  // selected game
-    friends: Vec<UIFriend>,           // friends
-    friends_width: f32,               // width of the friends sidebar
-    force_friends: bool,              // force visibility of friends sidebar
+    /// general toggle for showing debug info
+    debug: bool,
+    /// stuff for the bar on the top of the Games view
+    game_view_bar: GameViewBar,
+    /// stuff for the bar on the top of the Friends view
+    friends_view_bar: FriendsViewBar,
+    /// Logged in user's display name
+    user_name: String,
+    /// temp icon for the user's profile picture
+    _user_pfp: Rc<RetainedImage>, 
+    /// actual renderable for the user's profile picture //TODO
+    user_pfp_renderable: TextureId,
+    /// games
+    games: HashMap<String, GameInfo>,
+    /// selected game
+    game_sel: String,
+    /// friends
+    friends: Vec<UIFriend>, 
+    /// width of the friends sidebar
+    friends_width: f32,
+    /// force visibility of friends sidebar
+    force_friends: bool,
     //game_view_rows: bool,                               // if the game view is in rows mode
-    page_view: PageType, // what page you're on (games, friends, etc)
-    game_view_bg_renderer: Option<GameViewBgRenderer>, // Renderer for the blur effect in the game view
-    app_bg_renderer: Option<AppBgRenderer>, // Renderer for the app's background
-    locale: TranslationManager, // Translations
-    critical_bg_thread_crashed: bool, // If a core thread has crashed and made the UI unstable
-    backend: BridgeThread, // pepega
-    events: EventThread,   // pepega
-    logged_in: bool,     // temp book to track login status
-    login_cache_waiting: bool, // waiting for the bridge to check auth storage
-    in_progress_login: bool, // if the login flow is in progress
-    in_progress_login_type: InProgressLoginType, // what type of login we're using
-    in_progress_username: String, // Username buffer for logging in with a username/password
-    in_progress_password: String, // Password buffer for logging in with a username/password
-    in_progress_credential_status: String, // Errors info etc for logging in with a username/password
-    credential_login_in_progress: bool, // Currently waiting on the maxima thread to log us in with credentials
-    hardcode_game_paths: bool, // Hardcodes game exe paths to stuff on my computer
+    /// what page you're on (games, friends, etc)
+    page_view: PageType,
+    /// Renderer for the blur effect in the game view
+    game_view_bg_renderer: Option<GameViewBgRenderer>,
+    /// Renderer for the app's background
+    app_bg_renderer: Option<AppBgRenderer>,
+    /// Translations
+    locale: TranslationManager, 
+    /// If a core thread has crashed and made the UI unstable
+    critical_bg_thread_crashed: bool, 
+    /// pepega
+    backend: BridgeThread, 
+    /// pepega
+    events: EventThread, 
+    /// temp book to track login status
+    logged_in: bool, 
+    /// waiting for the bridge to check auth storage
+    login_cache_waiting: bool, 
+    /// if the login flow is in progress
+    in_progress_login: bool,
+    /// what type of login we're using
+    in_progress_login_type: InProgressLoginType,
+    /// Username buffer for logging in with a username/password
+    in_progress_username: String,
+    /// Password buffer for logging in with a username/password
+    in_progress_password: String,
+    /// Errors info etc for logging in with a username/password
+    in_progress_credential_status: String,
+    /// Currently waiting on the maxima thread to log us in with credentials
+    credential_login_in_progress: bool, 
+    /// Hardcodes game exe paths to stuff on my computer
+    hardcode_game_paths: bool,
+    /// Slug of the game currently running, may not be fully accurate but it's good enough to let the user know the button was clicked
+    playing_game: Option<String>
 }
 
 const F9B233: Color32 = Color32::from_rgb(249, 178, 51);
@@ -374,8 +407,8 @@ impl DemoEguiApp {
             user_pfp_renderable: (&_user_pfp).texture_id(&cc.egui_ctx),
             _user_pfp,
             user_name: "User".to_owned(),
-            games: Vec::new(),
-            game_sel: 0,
+            games: HashMap::new(),
+            game_sel: String::new(),
             friends: Vec::new(),
             friends_width: 300.0,
             force_friends: false,
@@ -396,7 +429,8 @@ impl DemoEguiApp {
             in_progress_password: String::new(),
             in_progress_credential_status: String::new(),
             credential_login_in_progress: false,
-            hardcode_game_paths: !args.remove_hardcoded_game_paths
+            hardcode_game_paths: !args.remove_hardcoded_game_paths,
+            playing_game: None,
         }
     }
 }
@@ -513,12 +547,17 @@ impl eframe::App for DemoEguiApp {
                 let mut fullrect = ui.available_rect_before_wrap().clone();
                 fullrect.min -= APP_MARGIN;
                 fullrect.max += APP_MARGIN;
-                let has_game_img = self.logged_in && self.games.len() > self.game_sel;
+                let has_game_img = self.logged_in && self.games.len() > 0;
                 let gaming = self.page_view == PageType::Games && has_game_img;
                 let how_game: f32 = ctx.animate_bool(egui::Id::new("MainAppBackgroundGamePageFadeBool"), gaming);
                 if has_game_img
                 {
-                    match &self.games[self.game_sel].images {
+                    if self.game_sel.is_empty() && self.games.len() > 0 {
+                        if let Some(key) = self.games.keys().next() {
+                            self.game_sel = key.clone()
+                        }
+                    }
+                    match &self.games[&self.game_sel].images {
                         GameUIImagesWrapper::Unloaded | GameUIImagesWrapper::Loading => {
                             render.draw(ui, fullrect, fullrect.size(), TextureId::Managed(1), how_game);
                         }

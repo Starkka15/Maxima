@@ -40,6 +40,8 @@
         },
         "main" : {
             "play" : "▶ Play",
+            "stop" : "⏹ Stop",
+            "install": "⮋ Install",
             "uninstall" : "⛼ Uninstall",
             "settings" : "⛭ Settings",
             "playtime" : "Time Played",

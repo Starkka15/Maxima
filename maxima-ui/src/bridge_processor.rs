@@ -39,7 +39,7 @@ pub fn frontend_processor(app: &mut DemoEguiApp, ctx: &egui::Context) {
                 app.login_cache_waiting = false;
             }
             bridge_thread::MaximaLibResponse::GameInfoResponse(res) => {
-                app.games.push(res.game);
+                app.games.insert(res.game.slug.clone(), res.game);
                 ctx.request_repaint(); // Run this loop once more, just to see if any games got lost
             }
             bridge_thread::MaximaLibResponse::GameDetailsResponse(res) => {
@@ -49,8 +49,8 @@ pub fn frontend_processor(app: &mut DemoEguiApp, ctx: &egui::Context) {
 
                 let response = res.response.unwrap();
 
-                for game in &mut app.games {
-                    if game.slug != res.slug {
+                for (slug, game) in &mut app.games {
+                    if !slug.eq(&res.slug) {
                         continue;
                     }
 
@@ -78,8 +78,8 @@ pub fn frontend_processor(app: &mut DemoEguiApp, ctx: &egui::Context) {
 
                 let response = res.response.unwrap();
 
-                for game in &mut app.games {
-                    if game.slug != res.slug {
+                for (slug, game) in &mut app.games {
+                    if !slug.eq(&res.slug) {
                         continue;
                     }
 
