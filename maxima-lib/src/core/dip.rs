@@ -130,7 +130,7 @@ impl DiPManifest {
         }
 
         let path = install_path.join(&self.touchup.path());
-        run_wine_command("wine", path, Some(args), Some(PathBuf::from("/home/battledash/games/battlefront/__Installer")), true)?;
+        run_wine_command("wine", path, Some(args), None, true)?;
 
         invalidate_mx_wine_registry().await;
         Ok(())

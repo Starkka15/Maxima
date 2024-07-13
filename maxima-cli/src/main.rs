@@ -686,6 +686,7 @@ async fn locate_game(maxima_arc: LockedMaxima, path: &str) -> Result<()> {
     let path = PathBuf::from(path);
     let manifest = DiPManifest::read(&path.join(DIP_RELATIVE_PATH)).await?;
     manifest.run_touchup(path).await?;
+    info!("Installed!");
     Ok(())
 }
 
