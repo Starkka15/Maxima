@@ -103,7 +103,7 @@ impl DiPManifest {
     pub async fn read(path: &PathBuf) -> Result<Self> {
         let file = tokio::fs::read_to_string(path)
             .await
-            .context("Test")
+            .context("Failed to read DiP manifest file")
             .unwrap();
         Ok(quick_xml::de::from_str(&file)?)
     }

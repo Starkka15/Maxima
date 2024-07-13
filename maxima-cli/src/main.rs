@@ -668,12 +668,14 @@ async fn list_games(maxima_arc: LockedMaxima) -> Result<()> {
 
     for title in titles {
         info!(
-            "{:<width$} - {:<width2$} - Installed: {}",
+            "{:<width$} - {:<width2$} - {:<width3$} - Installed: {}",
             title.base_offer().slug(),
             title.name(),
+            title.base_offer().offer_id(),
             title.base_offer().installed().await,
             width = 35,
-            width2 = 35
+            width2 = 35,
+            width3 = 25,
         );
 
         for game in title.extra_offers() {
