@@ -1,8 +1,8 @@
 use egui::Ui;
 
-use crate::DemoEguiApp;
+use crate::MaximaEguiApp;
 
-pub fn undefined_view(app: &mut DemoEguiApp, ui: &mut Ui) {
+pub fn undefined_view(app: &mut MaximaEguiApp, ui: &mut Ui) {
     ui.with_layout(
         egui::Layout::centered_and_justified(egui::Direction::RightToLeft),
         |ui| {
@@ -11,7 +11,7 @@ pub fn undefined_view(app: &mut DemoEguiApp, ui: &mut Ui) {
     );
 }
 
-pub fn coming_soon_view(app: &mut DemoEguiApp, ui: &mut Ui) {
+pub fn coming_soon_view(app: &mut MaximaEguiApp, ui: &mut Ui) {
     ui.with_layout(
         egui::Layout::centered_and_justified(egui::Direction::RightToLeft),
         |ui| {

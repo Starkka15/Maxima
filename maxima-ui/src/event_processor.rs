@@ -1,6 +1,6 @@
-use crate::{event_thread, DemoEguiApp};
+use crate::{event_thread, MaximaEguiApp};
 
-pub fn frontend_processor(app: &mut DemoEguiApp, ctx: &egui::Context) {
+pub fn frontend_processor(app: &mut MaximaEguiApp, ctx: &egui::Context) {
     puffin::profile_function!();
 
     while let Ok(result) = app.events.rx.try_recv() {

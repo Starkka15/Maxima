@@ -1,11 +1,11 @@
 use log::{debug, error, info, warn};
 
 use crate::{
-    bridge_thread, event_thread, views::friends_view::UIFriendImageWrapper, DemoEguiApp,
+    bridge_thread, event_thread, views::friends_view::UIFriendImageWrapper, MaximaEguiApp,
     GameDetails, GameDetailsWrapper, GameUIImages, GameUIImagesWrapper,
 };
 
-pub fn frontend_processor(app: &mut DemoEguiApp, ctx: &egui::Context) {
+pub fn frontend_processor(app: &mut MaximaEguiApp, ctx: &egui::Context) {
     puffin::profile_function!();
 
     while let Ok(result) = app.backend.rx.try_recv() {
@@ -113,6 +113,9 @@ pub fn frontend_processor(app: &mut DemoEguiApp, ctx: &egui::Context) {
                 error!("interact thread died");
                 app.critical_bg_thread_crashed = true;
             }
+            bridge_thread::MaximaLibResponse::ActiveGameChanged(slug) => {
+                app.playing_game = slug;
+            },
         }
     }
 }

@@ -1,9 +1,9 @@
 use egui::Ui;
 use egui_extras::{Column, TableBuilder};
 
-use crate::DemoEguiApp;
+use crate::MaximaEguiApp;
 
-pub fn debug_view(_app: &mut DemoEguiApp, ui: &mut Ui) {
+pub fn debug_view(_app: &mut MaximaEguiApp, ui: &mut Ui) {
     use egui_extras::{Size, StripBuilder};
     StripBuilder::new(ui)
         .size(Size::exact(30.0))

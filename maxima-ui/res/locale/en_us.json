@@ -36,7 +36,8 @@
                 "windows" : "Windows",
                 "mac" : "Mac"
             },
-            "search_bar_hint" : "Search"
+            "search_bar_hint" : "Search",
+            "running_suffix" : "Running"
         },
         "main" : {
             "play" : "▶ Play",

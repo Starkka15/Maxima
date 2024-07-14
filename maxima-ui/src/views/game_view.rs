@@ -1,7 +1,7 @@
 use egui::{pos2, vec2, Color32, Margin, Mesh, Pos2, Rect, RichText, Rounding, ScrollArea, Shape, Stroke, Ui};
 use egui_extras::Size;
 use log::{debug, info};
-use crate::{DemoEguiApp, GameInfo, GameUIImagesWrapper, bridge_thread, GameUIImages, GameDetails, GameDetailsWrapper, widgets::enum_dropdown::enum_dropdown};
+use crate::{bridge_thread, widgets::enum_dropdown::enum_dropdown, GameDetails, GameDetailsWrapper, GameInfo, GameUIImages, GameUIImagesWrapper, MaximaEguiApp, PopupModal};
 
 use strum_macros::EnumIter;
 
@@ -49,7 +49,7 @@ fn skeleton_text_block1(ui: &mut egui::Ui, width: f32, width1: f32, height: f32)
   ui.allocate_space(vec2(width + width1 + ui.spacing().item_spacing.x,height));
 }
 
-pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
+pub fn game_view_details_panel(app : &mut MaximaEguiApp, ui: &mut Ui) {
   puffin::profile_function!();
   if app.games.len() < 1 { return }
   let game: &mut GameInfo = if let Some(game) = app.games.get_mut(&app.game_sel) { game } else { return };
@@ -133,7 +133,8 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
           if hero_vis_frac < 1.0 && game_images.is_some(){
             // TODO: find a better solution
             let mut mesh = Mesh::default();
-            let hero_tint = Color32::from_black_alpha(20);
+            
+            let hero_tint = if ui.is_enabled() { Color32::from_black_alpha(20) } else { Color32::from_black_alpha(174) };
             mesh.colored_vertex(hero_rect.left_bottom() - vec2(0.0, hero_rect.height() * hero_vis_frac), hero_tint);
             mesh.colored_vertex(hero_rect.right_bottom() - vec2(0.0, hero_rect.height() * hero_vis_frac), hero_tint);
             mesh.colored_vertex(hero_rect.right_top(), hero_tint);
@@ -222,13 +223,12 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
                         .rounding(Rounding::same(2.0))
                         .min_size(vec2(50.0,40.0))
                       ).clicked() {
-                        app.playing_game = Some(game.slug.clone());
-                        let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.offer.clone(), app.hardcode_game_paths));
+                        //TODO
                       }
                   } else {
                     if game.installed {
                       let play_str = { "  ".to_string() + &app.locale.localization.games_view.main.play.to_uppercase() + "  " };
-                      if buttons.add(egui::Button::new(egui::RichText::new(play_str)
+                      if buttons.add_enabled(app.playing_game.is_none(),egui::Button::new(egui::RichText::new(play_str)
                         .size(20.0)
                         .color(Color32::WHITE))
                         .rounding(Rounding::same(2.0))
@@ -238,8 +238,8 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
                         let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.offer.clone(), app.hardcode_game_paths));
                       }
                     } else {
-                      let play_str = { "  ".to_string() + &app.locale.localization.games_view.main.install.to_uppercase() + "  " };
-                      if buttons.add(egui::Button::new(egui::RichText::new(play_str)
+                      let install_str = { "  ".to_string() + &app.locale.localization.games_view.main.install.to_uppercase() + "  " };
+                      if buttons.add(egui::Button::new(egui::RichText::new(install_str)
                         .size(20.0)
                         .color(Color32::WHITE))
                         .rounding(Rounding::same(2.0))
@@ -259,14 +259,14 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
                   ).clicked() {
                     let _ = app.backend.tx.send(crate::interact_thread::MaximaLibRequest::BitchesRequest);
                   } */
-
-                  if buttons.add(egui::Button::new(egui::RichText::new("  SETTINGS ⏷  ")
+                  let settings_str = { "  ".to_string() + &app.locale.localization.games_view.main.settings.to_uppercase() + "  " };
+                  if buttons.add(egui::Button::new(egui::RichText::new(settings_str)
                     .size(20.0)
                     .color(Color32::WHITE))
                     .rounding(Rounding::same(2.0))
                     .min_size(vec2(50.0,40.0))
                   ).clicked() {
-                    let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::BitchesRequest);
+                    app.modal = Some(PopupModal::GameSettings(game.slug.clone()));
                   }
                 });
               });
@@ -364,11 +364,13 @@ pub fn game_view_details_panel(app : &mut DemoEguiApp, ui: &mut Ui) {
     }); // ID
 }
 
-fn game_list_button_context_menu(app : &DemoEguiApp, game : &GameInfo, ui : &mut Ui) {
-  if ui.button("▶ Play").clicked() {
-    let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.offer.clone(), app.hardcode_game_paths));
-    ui.close_menu();
-  }
+fn game_list_button_context_menu(app : &MaximaEguiApp, game : &GameInfo, ui : &mut Ui) {
+  ui.add_enabled_ui(app.playing_game.is_none(), |play_button| {
+    if play_button.button("▶ Play").clicked() {
+      let _ = app.backend.tx.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.offer.clone(), app.hardcode_game_paths));
+      play_button.close_menu();
+    }
+  });
   ui.separator();
   if ui.button("UNINSTALL").clicked() {
     game.uninstall();
@@ -379,7 +381,7 @@ fn game_list_button_context_menu(app : &DemoEguiApp, game : &GameInfo, ui : &mut
 const F9B233: Color32 = Color32::from_rgb(249, 178, 51);
 const DARK_GREY: Color32 = Color32::from_rgb(53, 53, 53);
 
-fn show_game_list_buttons(app : &mut DemoEguiApp, ui : &mut Ui) {
+fn show_game_list_buttons(app : &mut MaximaEguiApp, ui : &mut Ui) {
   puffin::profile_function!();
   let icon_size = vec2(10. * app.game_view_bar.game_size,10. * app.game_view_bar.game_size);
     ui.style_mut().visuals.widgets.inactive.bg_fill = Color32::WHITE; //scroll bar
@@ -458,20 +460,18 @@ fn show_game_list_buttons(app : &mut DemoEguiApp, ui : &mut Ui) {
         
         style.spacing.item_spacing = vec2(0.0,0.0);
         
-        let james: std::collections::hash_map::Iter<String, GameInfo> = app.games.iter();
+        let /*ps3 has no*/games = app.games.iter();
         
-        let mut filtered_games: Vec<(&String, &GameInfo)> = james.filter(|obj| 
+        let mut games: Vec<(&String, &GameInfo)> = games.filter(|obj| 
           obj.1.name.to_lowercase().contains(&app.game_view_bar.search_buffer.to_lowercase())
         ).collect();
-        filtered_games.sort_by(|(_, a_game),(_, b_game)| {
+        games.sort_by(|(_, a_game),(_, b_game)| {
           a_game.name.cmp(&b_game.name)
         });
         
-        for (slug, game) in filtered_games {
+        for (slug, game) in games {
           puffin::profile_scope!("game list game");
           let style = games_list.style_mut();
-
-          
 
           if app.game_sel.eq(slug) {
             style.visuals.widgets.inactive.weak_bg_fill = F9B233.gamma_multiply(0.8);
@@ -487,22 +487,13 @@ fn show_game_list_buttons(app : &mut DemoEguiApp, ui : &mut Ui) {
             };
           }
 
-          
-          /*if let Ok(icon) = game.icon(&mut app.game_image_handler) {
-            if games_list.add_sized(vec2(250.0, icon_size.y),
-              egui::Button::image_and_text(icon, icon_size, RichText::new(&game.name).color(Color32::WHITE).strong())
-              .rounding(Rounding::same(0.0)))
-              .context_menu(|ui| { game_list_button_context_menu(game, ui) })
-              .clicked() {
-                app.game_sel = game_idx;
-            }
-          } else {*/
-           let list_response = games_list.add_sized(vec2(250.0, icon_size.y+4.0), egui::Button::image_and_text((egui::TextureId::Managed(0), vec2(0.0, 0.0)), &game.name).rounding(Rounding::same(0.0)));
-           list_response.context_menu(|ui| { game_list_button_context_menu(app, game, ui) });
-            if list_response.clicked() {
-                app.game_sel = slug.clone();
-              }
-          //}
+          let x = if let Some(running_slug) = &app.playing_game { running_slug.eq(slug) } else { false };
+          let name = if x { &format!("{} - {}", &game.name, &app.locale.localization.games_view.toolbar.running_suffix) } else { &game.name };
+          let list_response = games_list.add_sized(vec2(250.0, icon_size.y+4.0), egui::Button::image_and_text((egui::TextureId::Managed(0), vec2(0.0, 0.0)), name).rounding(Rounding::same(0.0)));
+          list_response.context_menu(|ui| { game_list_button_context_menu(app, game, ui) });
+          if list_response.clicked() {
+            app.game_sel = slug.clone();
+          }
         }
         games_list.allocate_space(games_list.available_size_before_wrap());
       });
@@ -512,7 +503,7 @@ fn show_game_list_buttons(app : &mut DemoEguiApp, ui : &mut Ui) {
 
 }
 
-pub fn games_view(app : &mut DemoEguiApp, ui: &mut Ui) {
+pub fn games_view(app : &mut MaximaEguiApp, ui: &mut Ui) {
   puffin::profile_function!();
   if app.games.len() < 1 {
     ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::RightToLeft), |ui| {

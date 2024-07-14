@@ -63,7 +63,7 @@ struct CustomRichPresenceData {
     version: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BasicPresence {
     Unknown,
     Offline,

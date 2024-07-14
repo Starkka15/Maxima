@@ -61,6 +61,7 @@ pub struct LocalizedGamesViewToolbar {
     pub platform_filter: String,
     pub platform_options: LocalizedGamesViewToolbarPlatformOptions,
     pub search_bar_hint: String,
+    pub running_suffix: String,
 }
 
 #[derive(Deserialize)]

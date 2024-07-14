@@ -3,7 +3,7 @@ use std::{cmp, sync::Arc};
 use egui::{pos2, text::{LayoutJob, TextWrapping}, vec2, Align2, Color32, FontId, Id, Margin, Rect, Rounding, Sense, Stroke, TextFormat, Ui};
 use maxima::rtm::{client::BasicPresence};
 
-use crate::{DemoEguiApp, bridge_thread, ui_image::UIImage, widgets::enum_dropdown::enum_dropdown};
+use crate::{bridge_thread, ui_image::UIImage, widgets::enum_dropdown::enum_dropdown, MaximaEguiApp, FRIEND_INGAME_COLOR};
 
 use strum_macros::EnumIter;
 
@@ -66,7 +66,7 @@ const PFP_IMG_SIZE: f32 = PFP_SIZE - 4.0;
 
 const FRIEND_HIGHLIGHT_ROUNDING: Rounding = Rounding { nw: 6.0, ne: 4.0, sw: 6.0, se: 4.0 }; // the status border is flawed somehow, this "fixes" it slightly more than if i didn't
 
-pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
+pub fn friends_view(app : &mut MaximaEguiApp, ui: &mut Ui) {
   puffin::profile_function!();
   ui.style_mut().spacing.item_spacing = vec2(5.0,0.0);
   let context = ui.ctx().clone();
@@ -77,7 +77,7 @@ pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
   hittest_rect.min.x += 8.0; // fix overlapping the scrollbar of the left view
   
   let friend_rect_hovered = if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
-    hittest_rect.contains(pos)
+    hittest_rect.contains(pos) && ui.is_enabled()
   } else {
     false
   } || app.force_friends;
@@ -168,8 +168,9 @@ pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
             FriendsViewBarPage::Blocked => false,
         }
       ).collect();
-      friends.sort_by(|a,b| {a.name.cmp(&b.name)});
-      friends.sort_by(|a,b| {(b.online.clone() as u8).cmp(&(a.online.clone() as u8))});
+      friends.sort_by(|a,b| {a.name.cmp(&b.name)});                                     // Alphabetically sort
+      friends.sort_by(|a,b| {b.online.cmp(&a.online)}); // Put online ones first
+      friends.sort_by(|a, b| {b.game.is_some().cmp(&a.game.is_some())});                // Put online and in-game ones first
       
       
       // scrollbar
@@ -216,12 +217,12 @@ pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
           let game_hack: String;
           let (friend_status, friend_color) = 
           match friend.online {
-            BasicPresence::Unknown => ("Unknown".to_string(), Color32::DARK_RED),
-            BasicPresence::Offline => ("Offline".to_string(), Color32::GRAY),
-            BasicPresence::Dnd => ("Do not Disturb".to_string(), Color32::RED),
-            BasicPresence::Away => ("Away".to_string(), Color32::GOLD),
+            BasicPresence::Unknown => (&"Unknown".to_string() as &String, Color32::DARK_RED),
+            BasicPresence::Offline => (&"Offline".to_string(), Color32::GRAY),
+            BasicPresence::Dnd => (&"Do not Disturb".to_string(), Color32::RED),
+            BasicPresence::Away => (&"Away".to_string(), Color32::GOLD),
             BasicPresence::Online => {
-              (
+              
               if let Some(game) = &friend.game  {
                 if app.locale.localization.friends_view.prepend {
                   if let Some(presence) = &friend.game_presence {
@@ -236,11 +237,11 @@ pub fn friends_view(app : &mut DemoEguiApp, ui: &mut Ui) {
                     game_hack = format!("{} {}", &app.locale.localization.friends_view.status_playing, &game);
                   }
                 }
-                &game_hack
+                (&game_hack, FRIEND_INGAME_COLOR)
                 
               } else {
-                &app.locale.localization.friends_view.status_online
-              }.to_string(), Color32::GREEN)
+                (&app.locale.localization.friends_view.status_online, Color32::GREEN)
+              }
             },
           };
 

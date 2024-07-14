@@ -1,7 +1,7 @@
 #![feature(slice_pattern)]
 use clap::{arg, command, Parser};
 
-use egui::{pos2, ViewportBuilder};
+use egui::{pos2, Layout, ViewportBuilder};
 use egui::style::{ScrollStyle, Spacing};
 use egui::Style;
 use log::{error, info, warn};
@@ -12,7 +12,6 @@ use std::default::Default;
 use std::{ops::RangeInclusive, rc::Rc, sync::Arc};
 use ui_image::UIImage;
 use views::friends_view::UIFriend;
-
 
 use eframe::egui_glow;
 use egui::{
@@ -64,6 +63,7 @@ use maxima::util::registry::check_registry_validity;
 
 const ACCENT_COLOR: Color32 = Color32::from_rgb(8, 171, 244);
 const APP_MARGIN: Vec2 = vec2(12.0, 12.0); //TODO: user setting
+const FRIEND_INGAME_COLOR: Color32 = Color32::from_rgb(39, 106, 252);// temp
 
 #[derive(Parser, Debug, Copy, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -129,7 +129,7 @@ async fn main() {
         "Maxima",
         native_options,
         Box::new(move |cc| {
-            let app = DemoEguiApp::new(cc, args);
+            let app = MaximaEguiApp::new(cc, args);
             // Run initialization code that needs access to the UI here, but DO NOT run any long-runtime functions here,
             // as it's before the UI is shown
             if args.no_login {
@@ -157,6 +157,12 @@ enum PageType {
     Downloads,
     Debug,
 }
+
+#[derive(Debug, PartialEq, Clone)]
+enum PopupModal { // ATM Machine
+    GameSettings(String) // Slug as arg
+}
+
 #[derive(Debug, PartialEq)]
 enum InProgressLoginType {
     Oauth,
@@ -237,7 +243,7 @@ impl GameInfo {
     }
 }
 
-pub struct DemoEguiApp {
+pub struct MaximaEguiApp {
     /// general toggle for showing debug info
     debug: bool,
     /// stuff for the bar on the top of the Games view
@@ -263,6 +269,8 @@ pub struct DemoEguiApp {
     //game_view_rows: bool,                               // if the game view is in rows mode
     /// what page you're on (games, friends, etc)
     page_view: PageType,
+    /// Modal
+    modal: Option<PopupModal>,
     /// Renderer for the blur effect in the game view
     game_view_bg_renderer: Option<GameViewBgRenderer>,
     /// Renderer for the app's background
@@ -301,7 +309,7 @@ const F9B233: Color32 = Color32::from_rgb(249, 178, 51);
 
 const WIDGET_HOVER: Color32 = Color32::from_rgb(255, 188, 61);
 
-impl DemoEguiApp {
+impl MaximaEguiApp {
     fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Self {
         let style: Style = Style {
             spacing: Spacing {
@@ -417,6 +425,7 @@ impl DemoEguiApp {
             force_friends: false,
             //game_view_rows: false,
             page_view: PageType::Games,
+            modal: None,
             game_view_bg_renderer: GameViewBgRenderer::new(cc),
             app_bg_renderer: AppBgRenderer::new(cc),
             locale: TranslationManager::new()
@@ -539,7 +548,7 @@ fn tab_button(ui: &mut Ui, edit_var: &mut PageType, page: PageType, label: Strin
     }
 }
 
-impl eframe::App for DemoEguiApp {
+impl eframe::App for MaximaEguiApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         puffin::profile_function!();
         bridge_processor::frontend_processor(self, ctx);
@@ -575,6 +584,7 @@ impl eframe::App for DemoEguiApp {
             if self.login_cache_waiting {
                 ui.heading("hey, hi, hold on a bit");
             } else {
+                let app_rect = ui.available_rect_before_wrap().clone();
                 if !self.logged_in {
                     if self.in_progress_login {
                         match self.in_progress_login_type {
@@ -688,8 +698,6 @@ impl eframe::App for DemoEguiApp {
                         });
                     }
                 } else {
-                    let main_width = ui.available_width() - (300.0 + ui.spacing().item_spacing.x);
-                    let size_width = 300.0;
                     let outside_spacing = ui.spacing().item_spacing.x.clone();
                     if self.critical_bg_thread_crashed {
                         let mut warning_margin = Margin::same(0.0 - APP_MARGIN.x);
@@ -713,8 +721,9 @@ impl eframe::App for DemoEguiApp {
                                 });
                             });
                     }
-                    ui.spacing_mut().item_spacing.y = outside_spacing;
-                    StripBuilder::new(ui)
+                    ui.add_enabled_ui(self.modal.is_none(), |non_modal| {
+                        non_modal.spacing_mut().item_spacing.y = outside_spacing;
+                        StripBuilder::new(non_modal)
                         .size(Size::exact(38.0))
                         .size(Size::remainder())
                         .vertical(|mut strip| {
@@ -802,7 +811,13 @@ impl eframe::App for DemoEguiApp {
                                                     .widgets
                                                     .inactive
                                                     .bg_stroke =
-                                                    Stroke::new(2.0, Color32::GREEN);
+                                                    Stroke::new(2.0, {
+                                                        if self.playing_game.is_some() {
+                                                            FRIEND_INGAME_COLOR
+                                                        } else {
+                                                            Color32::GREEN
+                                                        }
+                                                    });
                                                 rtl.menu_image_button(
                                                     (self.user_pfp_renderable, vec2(36.0, 36.0)),
                                                     |ui| {
@@ -872,51 +887,52 @@ impl eframe::App for DemoEguiApp {
                                 });
                             });
                         });
+                    });
+                    let mut clear = false;
+                    if let Some(modal) = &self.modal {
+                        ui.allocate_ui_at_rect(app_rect, |contents| {
 
-                    /*StripBuilder::new(ui)
-                        .size(Size::initial(main_width))
-                        .size(Size::remainder())
-                        .horizontal(|mut strip| {
-                            strip.cell(|ui| {
-                                
-                                let avail_height = ui.available_height() - (32.0 + outside_spacing);
-                                StripBuilder::new(ui)
-                                    .size(Size::exact(32.0))
-                                    .size(Size::exact(avail_height))
-                                    .vertical(|mut strip| {
-                                        
-                                        strip.cell(|body| {
-                                           
-                                        })
-                                    });
-                            });
-                            strip.cell(|ui| {
-                                puffin::profile_scope!("right panel");
-                                ui.spacing_mut().item_spacing.y = outside_spacing;
-                                let avail_height = ui.available_height() - (40.0);
-                                StripBuilder::new(ui)
-                                    .size(Size::exact(32.0))
-                                    .size(Size::exact(avail_height))
-                                    .vertical(|mut strip| {
-                                        strip.cell(|header| {
-                                            
-                                            //header.painter().rect_filled(header.available_rect_before_wrap(), Rounding::ZERO, Color32::from_white_alpha(20));
-                                            let navbar = egui::Frame::default()
-                                                .stroke(Stroke::new(2.0, Color32::WHITE))
-                                                //.fill(Color32::BLACK)
-                                                .outer_margin(Margin::same(1.0))
-                                                .inner_margin(Margin::same(-2.0))
-                                                .rounding(Rounding::same(4.0));
-                                            navbar.show(header, |ui| {
-                                                
+                        
+                            egui::Frame::default()
+                            .fill(Color32::from_black_alpha(200))
+                            .outer_margin(Margin::same(24.0))
+                            .inner_margin(Margin::same(12.0))
+                            .stroke(Stroke::new(4.0, Color32::WHITE))
+                            .show(contents, |ui| {
+                                match modal {
+                                    PopupModal::GameSettings(slug) => {
+                                        let game = if let Some(game) = self.games.get(slug) { game } else { return; };
+                                        ui.horizontal(|header| {
+                                            header.heading(format!("Game settings for {}", &game.name));
+                                            header.with_layout(Layout::right_to_left(egui::Align::Center), |close_button| {
+                                                if close_button.button("Close").clicked() {
+                                                    clear = true
+                                                }
                                             });
                                         });
-                                        strip.cell(|body| {
-                                            //
-                                        })
-                                    });
+                                        ui.separator();
+                                        if game.installed {
+
+                                            ui.checkbox(&mut false, "Cloud Saves");
+                                            ui.horizontal(|ui| {
+                                                ui.label("Launch Arguments");
+                                                ui.text_edit_singleline(&mut "");
+                                            });
+                                            ui.separator();
+                                            ui.button("Uninstall");
+                                        } else {
+                                            ui.label("Game is not installed");
+                                        }
+                                        
+                                        ui.allocate_space(ui.available_size_before_wrap());
+                                    },
+                                }
                             });
-                        });*/
+                        });
+                    }
+                    if clear {
+                        self.modal = None;
+                    }
                 }
             }
         });

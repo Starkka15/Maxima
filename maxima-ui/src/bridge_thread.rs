@@ -7,7 +7,7 @@ use std::{
     sync::{
         mpsc::{Receiver, Sender},
         Arc,
-    },
+    }, time::{Duration, SystemTime},
 };
 
 use maxima::core::{launch::ActiveGameContext, LockedMaxima, Maxima, MaximaOptions, MaximaOptionsBuilder};
@@ -74,6 +74,10 @@ pub enum MaximaLibResponse {
     GameDetailsResponse(InteractThreadGameDetailsResponse),
     GameUIImagesResponse(InteractThreadGameUIImagesResponse),
     InteractionThreadDiedResponse,
+
+    // Alerts, rather than responses:
+
+    ActiveGameChanged(Option<String>)
 }
 
 pub struct BridgeThread {
@@ -142,11 +146,32 @@ impl BridgeThread {
             }
         }
 
-        let playing_cache: Option<ActiveGameContext> = None;
+        let mut future  = SystemTime::now();
+        future = future.checked_add(Duration::from_millis(100)).unwrap();
+        let mut playing_cache: Option<String> = None;
         'outer: loop {
-            {
+            let now = SystemTime::now();
+            if now >= future {
+                // this sucks but it's non-blocking so oh well what are you going to do about it! it's on a non-ui thread anyway, i'm wasteful with it
+                future = now.checked_add(Duration::from_millis(100)).unwrap();
+                
                 let mut maxima = maxima_arc.lock().await;
                 maxima.update_playing_status();
+                let now_playing = maxima.playing();
+
+                if let Some(ctx) = now_playing {
+                    if let Some(offer) = ctx.offer() {
+                        if playing_cache.is_none() {
+                            playing_cache = Some(offer.slug().clone());
+                            tx1.send(MaximaLibResponse::ActiveGameChanged(Some(offer.slug().clone()))).unwrap();
+                        }
+                    }
+                } else {
+                    if playing_cache.is_some() {
+                        playing_cache = None;
+                        tx1.send(MaximaLibResponse::ActiveGameChanged(None)).unwrap();
+                    };
+                }
             }
             let request = rx1.try_recv();
             if request.is_err() {
