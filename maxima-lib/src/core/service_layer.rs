@@ -572,6 +572,7 @@ service_layer_type!(LegacyOffer, {
     game_launcher_url: Option<String>,
     #[serde(rename = "gameLauncherURLClientID")]
     game_launcher_url_client_id: Option<String>,
+    multiplayer_id: String,
     execute_path_override: Option<String>,
     installation_directory: Option<String>,
     install_check_override: Option<String>,

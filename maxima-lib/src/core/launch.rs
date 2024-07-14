@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose, Engine};
 use derive_getters::Getters;
-use log::info;
+use log::{error, info};
 use std::{env, fmt::Display, path::PathBuf, sync::Arc};
 use tokio::{
     process::{Child, Command},
@@ -11,8 +11,7 @@ use uuid::Uuid;
 use anyhow::{bail, Result};
 
 use crate::{
-    ooa::{request_and_save_license, LicenseAuth},
-    util::{registry::bootstrap_path, simple_crypto},
+    core::cloudsync::CloudSyncLockMode, ooa::{request_and_save_license, LicenseAuth}, util::{registry::bootstrap_path, simple_crypto}
 };
 
 use serde::{Deserialize, Serialize};
@@ -174,6 +173,18 @@ pub async fn start_game(
         LaunchMode::Online(_) => {
             let auth = LicenseAuth::AccessToken(maxima.access_token().await?);
             request_and_save_license(&auth, &content_id, path.to_owned().into()).await?;
+
+            info!("Syncing with cloud save...");
+            let lock = maxima.cloud_sync().obtain_lock(offer.as_ref().unwrap(), CloudSyncLockMode::Read).await?;
+
+            let result = lock.sync_files().await;
+            if let Err(err) = result {
+                error!("Failed to sync cloud save: {}", err);
+            } else {
+                info!("Cloud save synced");
+            }
+
+            lock.release().await?;
         }
         LaunchMode::OnlineOffline(_, ref persona, ref password) => {
             let auth = LicenseAuth::Direct(persona.to_owned(), password.to_owned());

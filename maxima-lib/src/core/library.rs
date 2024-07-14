@@ -222,6 +222,14 @@ impl GameLibrary {
             .map(|x| &x.base_offer)
     }
 
+    pub async fn game_by_base_slug(&mut self, slug: &str) -> Option<&OwnedOffer> {
+        self.update_if_needed().await;
+        self.library
+            .iter()
+            .find(|x| x.base_offer.product.product().game_slug() == slug)
+            .map(|x| &x.base_offer)
+    }
+
     async fn update_if_needed(&mut self) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -233,7 +241,7 @@ impl GameLibrary {
         }
     }
 
-    pub async fn request_owned_games(&mut self) {
+    async fn request_owned_games(&mut self) {
         self.request_page_concurrent(Locale::EnUs, 1).await.unwrap();
     }
 

@@ -205,6 +205,18 @@ impl AuthStorage {
         }
     }
 
+    pub async fn user_id(&mut self) -> Result<Option<String>> {
+        let current = self.current();
+        if current.is_none() {
+            return Ok(None);
+        }
+
+        let user_id = current.unwrap().user_id().to_owned();
+        self.save_if_dirty()?;
+
+        Ok(Some(user_id))
+    }
+
     pub async fn access_token(&mut self) -> Result<Option<String>> {
         let current = self.current();
         if current.is_none() {

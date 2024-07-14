@@ -36,6 +36,7 @@ use std::{
 };
 
 use anyhow::{bail, Result};
+use cloudsync::CloudSyncClient;
 use derive_builder::Builder;
 use derive_getters::Getters;
 use log::error;
@@ -96,6 +97,8 @@ pub struct Maxima {
     lsx_port: u16,
     lsx_event_callback: Option<MaximaLSXEventCallback>,
     lsx_connections: u16,
+
+    cloud_sync: CloudSyncClient,
 
     #[getter(skip)]
     rtm: RtmClient,
@@ -185,6 +188,7 @@ impl Maxima {
             lsx_port,
             lsx_event_callback: None,
             lsx_connections: 0,
+            cloud_sync: CloudSyncClient::new(auth_storage.clone()),
             rtm: RtmClient::new(auth_storage),
             request_cache,
             dummy_local_user,

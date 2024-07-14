@@ -416,7 +416,6 @@ async fn interactive_install_game(maxima_arc: LockedMaxima) -> Result<()> {
         .await;
 
     let end_time = Instant::now();
-
     let elapsed_time = end_time - start_time;
 
     info!(
