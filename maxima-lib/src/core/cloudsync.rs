@@ -1,16 +1,19 @@
 use std::{
     collections::HashMap,
     env,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{bail, Context, Result};
 use derive_getters::Getters;
 use futures::StreamExt;
-use log::debug;
+use log::{debug, warn};
 use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
-use tokio::{fs::OpenOptions, io::AsyncWriteExt};
+use tokio::{
+    fs::{File, OpenOptions},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+};
 
 use super::{auth::storage::LockedAuthStorage, endpoints::API_CLOUDSYNC, library::OwnedOffer};
 
@@ -83,6 +86,50 @@ fn substitute_paths<P: AsRef<str>>(path: P) -> PathBuf {
     result
 }
 
+fn unsubstitute_paths<P: AsRef<Path>>(path: P) -> String {
+    let path = path.as_ref();
+    let home = home_dir();
+
+    let documents_path = home.join("Documents");
+    let saved_games_path = home.join("Saved Games");
+
+    let path_str = path.to_str().unwrap_or_default().to_string();
+
+    if path_str.contains(documents_path.to_str().unwrap_or_default()) {
+        path_str.replace(documents_path.to_str().unwrap_or_default(), "%Documents%")
+    } else if path_str.contains(saved_games_path.to_str().unwrap_or_default()) {
+        path_str.replace(
+            saved_games_path.to_str().unwrap_or_default(),
+            "%SavedGames%",
+        )
+    } else {
+        path_str
+    }
+}
+
+async fn calc_file_md5(file: File) -> Result<String> {
+    let len = file.metadata().await?.len();
+
+    let buf_len = len.min(1_000_000) as usize;
+    let mut buf = BufReader::with_capacity(buf_len, file);
+    let mut context = md5::Context::new();
+
+    loop {
+        let part = buf.fill_buf().await.unwrap();
+        if part.is_empty() {
+            break;
+        }
+
+        context.consume(part);
+
+        let len = part.len();
+        buf.consume(len);
+    }
+
+    let digest = context.compute();
+    Ok(format!("{:x}", digest))
+}
+
 #[derive(Getters)]
 pub struct CloudSyncLock<'a> {
     auth: &'a LockedAuthStorage,
@@ -90,6 +137,7 @@ pub struct CloudSyncLock<'a> {
     lock: String,
     manifest: CloudSyncManifest,
     mode: CloudSyncLockMode,
+    allowed_files: Vec<PathBuf>,
 }
 
 impl<'a> CloudSyncLock<'a> {
@@ -99,16 +147,41 @@ impl<'a> CloudSyncLock<'a> {
         manifest_url: String,
         lock: String,
         mode: CloudSyncLockMode,
+        allowed_files: Vec<PathBuf>,
     ) -> Result<Self> {
         let res = client.get(manifest_url).send().await?;
-        let text = res.text().await?;
-        let manifest: CloudSyncManifest = quick_xml::de::from_str(&text)?;
+
+        let manifest: CloudSyncManifest = {
+            let mut manifest = if let Ok(text) = res.text().await {
+                let result = quick_xml::de::from_str(&text);
+                if let Ok(manifest) = result {
+                    manifest
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if manifest.is_none() {
+                manifest = Some(CloudSyncManifest {
+                    attr_xmlns: String::new(),
+                    file: Vec::new(),
+                });
+            }
+
+            let mut manifest = manifest.unwrap();
+            manifest.attr_xmlns = "http://origin.com/cloudsaves/manifest".to_owned();
+            manifest
+        };
+
         Ok(Self {
             auth,
             client,
             lock,
             manifest,
             mode,
+            allowed_files,
         })
     }
 
@@ -129,30 +202,52 @@ impl<'a> CloudSyncLock<'a> {
         Ok(())
     }
 
+    /// The file syncing functions are some real hastily written code at the moment.
+    /// Lots of stuff could be better and merged between them. TODO: Clean it up.
     pub async fn sync_files(&self) -> Result<()> {
-        // This sucks.
-        #[derive(Serialize)]
-        struct requests {
-            request: Vec<CloudSyncRequest>,
-        }
+        Ok(match self.mode {
+            CloudSyncLockMode::Read => self.sync_read_files().await,
+            CloudSyncLockMode::Write => self.sync_write_files().await,
+        }?)
+    }
 
-        let mut value = requests {
-            request: Vec::new(),
-        };
+    async fn sync_read_files(&self) -> Result<()> {
+        let mut value = CloudSyncRequests::default();
 
         let mut paths = HashMap::new();
         for i in 0..self.manifest.file.len() {
+            let local_path = &self.manifest.file[i].local_name;
+            let path = substitute_paths(local_path);
+
+            let file = OpenOptions::new()
+                .read(true)
+                .open(path.clone())
+                .await;
+
+            if let Ok(file) = file {
+                let md5 = calc_file_md5(file).await?;
+                if let Some(_) = self.manifest.file_by_md5(&md5) {
+                    debug!("Skipping CloudSync read {}", md5);
+                    continue;
+                }
+            }
+
             value.request.push(CloudSyncRequest {
                 attr_id: i.to_string(),
                 verb: "GET".to_owned(),
                 resource: self.manifest.file[i].attr_href.to_owned(),
+                content_type: None,
             });
 
-            paths.insert(i, self.manifest.file[i].local_name.to_owned());
+            paths.insert(i.to_string(), path);
+        }
+
+        if value.request.is_empty() {
+            return Ok(());
         }
 
         let (token, user_id) = acquire_auth(self.auth).await?;
-        let body = quick_xml::se::to_string(&value)?;
+        let body = quick_xml::se::to_string(&value)?.replace("CloudSyncRequests", "requests");
 
         let res = self
             .client
@@ -160,25 +255,22 @@ impl<'a> CloudSyncLock<'a> {
             .header(AUTH_HEADER, token)
             .header(LOCK_HEADER, &self.lock)
             .header("Content-Type", "application/xml")
-            .body(body)
+            .body(body.to_owned())
             .send()
             .await?;
 
         let text = res.text().await?;
-        let authorizations: CloudSyncAuthorizatedRequests = quick_xml::de::from_str(&text)?;
+        let authorizations: CloudSyncAuthorizedRequests = quick_xml::de::from_str(&text)?;
 
         for i in 0..authorizations.request.len() {
             let auth_req = &authorizations.request[i];
             let mut req = self.client.get(&auth_req.url);
-            for ele in &auth_req.headers {
-                let header = &ele.header;
+            for header in &auth_req.headers.header {
                 req = req.header(&header.attr_key, &header.attr_value);
             }
 
             let res = req.send().await?;
-
-            let path = paths.get(&i).unwrap();
-            let path = substitute_paths(path);
+            let path = paths.get(&auth_req.attr_id).unwrap();
 
             debug!(
                 "Downloaded CloudSync file [{:?}, {} bytes]",
@@ -197,6 +289,141 @@ impl<'a> CloudSyncLock<'a> {
                 let chunk = item?;
                 file.write_all(&chunk).await?;
             }
+        }
+
+        Ok(())
+    }
+
+    async fn sync_write_files(&self) -> Result<()> {
+        let mut auth_reqs = CloudSyncRequests::default();
+
+        enum WriteData {
+            File(String, File, String), // Name, File, B64 MD5
+            Text(String, String),       // Name, Text
+        }
+
+        impl WriteData {
+            pub async fn file_key(&self) -> Result<String> {
+                Ok(match self {
+                    WriteData::File(_name, file, hash) => {
+                        format!("{}-{}", file.metadata().await?.len(), hash)
+                    }
+                    _ => String::new(),
+                })
+            }
+        }
+
+        auth_reqs.request.push(CloudSyncRequest {
+            attr_id: "0".to_owned(),
+            verb: "PUT".to_owned(),
+            resource: "manifest.xml".to_owned(),
+            content_type: Some("text/xml".to_owned()),
+        });
+
+        let mut data = HashMap::new();
+        let mut skipped = Vec::new();
+
+        let mut i = 1;
+        for path in &self.allowed_files {
+            let file = OpenOptions::new()
+                .read(true)
+                .open(path.clone())
+                .await?;
+
+            let md5 = calc_file_md5(file.try_clone().await?).await?;
+            if let Some(file) = self.manifest.file_by_md5(&md5) {
+                debug!("Skipping CloudSync write {}", md5);
+                skipped.push(file);
+                continue;
+            }
+
+            let name = unsubstitute_paths(&path);
+            let write_data = WriteData::File(name, file, md5);
+
+            auth_reqs.request.push(CloudSyncRequest {
+                attr_id: i.to_string(),
+                verb: "PUT".to_owned(),
+                resource: write_data.file_key().await?,
+                content_type: Some("binary/octet-stream".to_owned()),
+            });
+
+            data.insert(i, write_data);
+            i += 1;
+        }
+
+        // Build manifest
+        {
+            let mut manifest = self.manifest.clone();
+            manifest.file.clear();
+
+            for ele in skipped {
+                manifest.file.push(ele.clone());
+            }
+
+            for ele in &data {
+                if let WriteData::File(name, file, hash) = ele.1 {
+                    let file = CloudSyncFile {
+                        attr_href: ele.1.file_key().await?,
+                        attr_size: file.metadata().await?.len().to_string(),
+                        attr_md5: Some(hash.to_owned()),
+                        local_name: name.to_owned(),
+                    };
+
+                    manifest.file.push(file);
+                }
+            }
+
+            let manifest =
+                quick_xml::se::to_string(&manifest)?.replace("CloudSyncManifest", "manifest");
+            data.insert(0, WriteData::Text("manifest.xml".to_owned(), manifest));
+        }
+
+        let (token, user_id) = acquire_auth(self.auth).await?;
+        let body = quick_xml::se::to_string(&auth_reqs)?.replace("CloudSyncRequests", "requests");
+
+        let res = self
+            .client
+            .put(format!("{}/authorize/{}", API_CLOUDSYNC, user_id))
+            .header(AUTH_HEADER, token)
+            .header(LOCK_HEADER, &self.lock)
+            .header("Content-Type", "application/xml")
+            .body(body)
+            .send()
+            .await?;
+
+        let text = res.text().await?;
+        let authorizations: CloudSyncAuthorizedRequests = quick_xml::de::from_str(&text)?;
+
+        for i in 0..authorizations.request.len() {
+            let auth_req = &authorizations.request[i];
+            let mut req = self.client.put(&auth_req.url);
+            for header in &auth_req.headers.header {
+                req = req.header(&header.attr_key, &header.attr_value);
+            }
+
+            let (name, length) = match &data[&i] {
+                WriteData::File(name, file, _hash) => {
+                    let mut buffer = vec![0; file.metadata().await?.len() as usize];
+                    file.try_clone().await?.read_to_end(&mut buffer).await?;
+
+                    let len = buffer.len();
+                    req = req.body(buffer);
+
+                    (name.to_owned(), len as u64)
+                }
+                WriteData::Text(name, text) => {
+                    req = req.body(text.to_owned());
+                    (name.to_owned(), text.len() as u64)
+                }
+            };
+
+            req = req.header("Content-Length", length);
+            req.send().await.context(name)?.error_for_status()?;
+
+            debug!(
+                "Uploaded CloudSync file [{:?}, {} bytes]",
+                auth_reqs.request[i].resource, length
+            );
         }
 
         Ok(())
@@ -231,13 +458,31 @@ impl CloudSyncClient {
             offer.offer().multiplayer_id()
         );
 
-        Ok(self.obtain_lock_raw(&id, mode).await?)
+        let mut allowed_files = Vec::new();
+        if let Some(config) = offer.offer().cloud_save_configuration_override() {
+            let criteria: CloudSyncSaveFileCriteria = quick_xml::de::from_str(config)?;
+            for include in criteria.include {
+                let path = substitute_paths(include.value);
+                let paths = glob::glob(path.to_str().unwrap())?;
+                for path in paths {
+                    allowed_files.push(path?);
+                }
+            }
+        } else {
+            bail!(
+                "No cloud save configuration for {}",
+                offer.offer().display_name()
+            );
+        }
+
+        Ok(self.obtain_lock_raw(&id, mode, allowed_files).await?)
     }
 
     pub async fn obtain_lock_raw<'a>(
         &self,
         id: &str,
         mode: CloudSyncLockMode,
+        allowed_files: Vec<PathBuf>,
     ) -> Result<CloudSyncLock> {
         let (token, user_id) = acquire_auth(&self.auth).await?;
 
@@ -263,7 +508,15 @@ impl CloudSyncClient {
 
         let text = res.text().await?;
         let sync: CloudSyncSync = quick_xml::de::from_str(&text)?;
-        Ok(CloudSyncLock::new(&self.auth, &self.client, sync.manifest, lock, mode).await?)
+        Ok(CloudSyncLock::new(
+            &self.auth,
+            &self.client,
+            sync.manifest,
+            lock,
+            mode,
+            allowed_files,
+        )
+        .await?)
     }
 }
 
@@ -282,15 +535,41 @@ mod tests {
 
         let mut library = GameLibrary::new(auth.clone()).await;
         let offer = library
-            .game_by_base_slug("star-wars-jedi-survivor")
+            .game_by_base_slug("star-wars-battlefront-2")
             .await
             .unwrap();
+
+        println!("Got offer");
 
         let client = CloudSyncClient::new(auth);
 
         let lock = client.obtain_lock(offer, CloudSyncLockMode::Read).await?;
-        lock.sync_files().await?;
+        //lock.sync_read_files().await?;
         lock.release().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_files() -> Result<()> {
+        let auth = AuthStorage::load()?;
+        if !auth.lock().await.logged_in().await? {
+            bail!("Test cannot run when logged out");
+        }
+
+        let mut library = GameLibrary::new(auth.clone()).await;
+        let offer = library
+            .game_by_base_slug("star-wars-battlefront-2")
+            .await
+            .unwrap();
+
+        println!("Got offer");
+
+        let client = CloudSyncClient::new(auth);
+
+        let lock = client.obtain_lock(offer, CloudSyncLockMode::Write).await?;
+        let res = lock.sync_write_files().await;
+        lock.release().await?;
+        res.unwrap();
         Ok(())
     }
 }
@@ -337,6 +616,7 @@ cloudsync_type!(
     attr {
         href: String,
         size: String,
+        md5: Option<String>,
     },
     data {
         local_name: String,
@@ -352,6 +632,22 @@ cloudsync_type!(
         file: Vec<CloudSyncFile>,
     }
 );
+
+impl CloudSyncManifest {
+    pub fn file_by_md5(&self, md5: &str) -> Option<&CloudSyncFile> {
+        for ele in &self.file {
+            if let Some(ele_md5) = &ele.attr_md5 {
+                if ele_md5 != md5 {
+                    continue;
+                }
+
+                return Some(&ele);
+            }
+        }
+
+        None
+    }
+}
 
 cloudsync_type!(
     Sync;
@@ -369,6 +665,17 @@ cloudsync_type!(
     data {
         verb: String,
         resource: String,
+
+        #[serde(rename = "content-type")]
+        content_type: Option<String>,
+    }
+);
+
+cloudsync_type!(
+    Requests;
+    attr {},
+    data {
+        request: Vec<CloudSyncRequest>,
     }
 );
 
@@ -385,25 +692,44 @@ cloudsync_type!(
     HeaderWrapper;
     attr {},
     data {
-        header: CloudSyncHeader
+        header: Vec<CloudSyncHeader>,
     }
 );
 
 cloudsync_type!(
-    AuthorizatedRequest;
+    AuthorizedRequest;
     attr {
         id: String,
     },
     data {
         url: String,
-        headers: Vec<CloudSyncHeaderWrapper>,
+        headers: CloudSyncHeaderWrapper,
     }
 );
 
 cloudsync_type!(
-    AuthorizatedRequests;
+    AuthorizedRequests;
     attr {},
     data {
-        request: Vec<CloudSyncAuthorizatedRequest>,
+        request: Vec<CloudSyncAuthorizedRequest>,
+    }
+);
+
+cloudsync_type!(
+    SaveFileInclude;
+    attr {
+        order: String,
+    },
+    data {
+        #[serde(rename = "$value")]
+        value: String,
+    }
+);
+
+cloudsync_type!(
+    SaveFileCriteria;
+    attr {},
+    data {
+        include: Vec<CloudSyncSaveFileInclude>,
     }
 );

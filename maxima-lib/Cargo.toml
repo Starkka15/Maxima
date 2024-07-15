@@ -65,6 +65,8 @@ webpki-roots = "0.22.0"
 aes = "0.8.4"
 ecb = { version = "0.1.2", features = ["std"] }
 cbc = { version = "0.1.2", features = ["std"] }
+glob = "0.3.1"
+md5 = "0.7.0"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = [

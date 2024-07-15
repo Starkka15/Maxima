@@ -21,11 +21,18 @@ use maxima::{
 use maxima::{
     content::downloader::ZipDownloader,
     core::{
-        auth::{nucleus_token_exchange, TokenResponse}, clients::JUNO_PC_CLIENT_ID, dip::{DiPManifest, DIP_RELATIVE_PATH}, launch::LaunchMode, library::OwnedTitle, service_layer::{
+        auth::{nucleus_token_exchange, TokenResponse},
+        clients::JUNO_PC_CLIENT_ID,
+        cloudsync::CloudSyncLockMode,
+        dip::{DiPManifest, DIP_RELATIVE_PATH},
+        launch::LaunchMode,
+        library::OwnedTitle,
+        service_layer::{
             ServiceGetBasicPlayerRequestBuilder, ServiceGetLegacyCatalogDefsRequestBuilder,
             ServiceLegacyOffer, ServicePlayer, SERVICE_REQUEST_GETBASICPLAYER,
             SERVICE_REQUEST_GETLEGACYCATALOGDEFS,
-        }, LockedMaxima, MaximaOptionsBuilder
+        },
+        LockedMaxima, MaximaOptionsBuilder,
     },
     ooa,
     rtm::client::BasicPresence,
@@ -70,6 +77,12 @@ enum Mode {
     ListGames,
     LocateGame {
         path: String,
+    },
+    CloudSync {
+        game_slug: String,
+
+        #[arg(long)]
+        write: bool,
     },
     AccountInfo,
     CreateAuthCode {
@@ -274,6 +287,9 @@ async fn startup() -> Result<()> {
         } => start_game(&offer_id, game_path, game_args, login, maxima_arc.clone()).await,
         Mode::ListGames => list_games(maxima_arc.clone()).await,
         Mode::LocateGame { path } => locate_game(maxima_arc.clone(), &path).await,
+        Mode::CloudSync { game_slug, write } => {
+            do_cloud_sync(maxima_arc.clone(), &game_slug, write).await
+        }
         Mode::AccountInfo => print_account_info(maxima_arc.clone()).await,
         Mode::CreateAuthCode { client_id } => {
             create_auth_code(maxima_arc.clone(), &client_id).await
@@ -345,37 +361,27 @@ async fn interactive_start_game(maxima_arc: LockedMaxima) -> Result<()> {
         game.base_offer().offer_id().to_owned()
     };
 
-    start_game(
-        &offer_id,
-        None,
-        Vec::new(),
-        None,
-        maxima_arc.clone(),
-    )
-    .await?;
+    start_game(&offer_id, None, Vec::new(), None, maxima_arc.clone()).await?;
 
     Ok(())
 }
 
 async fn interactive_install_game(maxima_arc: LockedMaxima) -> Result<()> {
-    let maxima = maxima_arc.lock().await;
+    let mut maxima = maxima_arc.lock().await;
 
-    let owned_games = maxima.owned_games(1).await?;
-    let owned_games = owned_games.owned_game_products().as_ref().unwrap().items();
+    let content_service = ContentService::new(maxima.auth_storage().clone());
+
+    let owned_games = maxima.mut_library().games().await;
     let owned_games_strs = owned_games
         .iter()
-        .map(|g| g.product().name())
+        .map(|g| g.name())
         .collect::<Vec<String>>();
 
     let name = Select::new("What game would you like to install?", owned_games_strs).prompt()?;
-    let game = owned_games
-        .iter()
-        .find(|g| g.product().name() == name)
-        .unwrap();
+    let game = owned_games.iter().find(|g| g.name() == name).unwrap();
 
-    let content_service = ContentService::new(maxima.auth_storage().clone());
     let builds = content_service
-        .available_builds(&game.origin_offer_id())
+        .available_builds(&game.base_offer().offer_id())
         .await?;
     let build = builds.live_build();
     if build.is_none() {
@@ -386,7 +392,7 @@ async fn interactive_install_game(maxima_arc: LockedMaxima) -> Result<()> {
     info!("Installing game build {}", build.to_string());
 
     let url = content_service
-        .download_url(&game.origin_offer_id(), Some(&build.build_id()))
+        .download_url(&game.base_offer().offer_id(), Some(&build.build_id()))
         .await?;
 
     info!("URL: {}", url.url());
@@ -476,30 +482,27 @@ async fn download_specific_file(
 }
 
 async fn generate_download_links(maxima_arc: LockedMaxima) -> Result<()> {
-    let maxima = maxima_arc.lock().await;
+    let mut maxima = maxima_arc.lock().await;
 
-    let owned_games = maxima.owned_games(1).await?;
-    let owned_games = owned_games.owned_game_products().as_ref().unwrap().items();
+    let content_service = ContentService::new(maxima.auth_storage().clone());
+
+    let owned_games = maxima.mut_library().games().await;
     let owned_games_strs = owned_games
         .iter()
-        .map(|g| g.product().name())
+        .map(|g| g.name())
         .collect::<Vec<String>>();
 
     let name = Select::new("What game would you like to install?", owned_games_strs).prompt()?;
-    let game = owned_games
-        .iter()
-        .find(|g| g.product().name() == name)
-        .unwrap();
+    let game = owned_games.iter().find(|g| g.name() == name).unwrap();
 
-    let content_service = ContentService::new(maxima.auth_storage().clone());
     let builds = content_service
-        .available_builds(&game.origin_offer_id())
+        .available_builds(&game.base_offer().offer_id())
         .await?;
 
     let mut strs = String::new();
     for build in builds.builds {
         let url = content_service
-            .download_url(&game.origin_offer_id(), Some(&build.build_id()))
+            .download_url(&game.base_offer().offer_id(), Some(&build.build_id()))
             .await;
         if url.is_err() {
             continue;
@@ -592,10 +595,10 @@ async fn get_user_by_id(maxima_arc: LockedMaxima, user_id: &str) -> Result<()> {
 async fn get_game_by_slug(maxima_arc: LockedMaxima, slug: &str) -> Result<()> {
     let maxima = maxima_arc.lock().await;
 
-    match maxima.owned_game_by_slug(slug).await {
-        Ok(game) => info!("Game: {}", game.id()),
-        Err(err) => error!("{}", err),
-    };
+    // match maxima.owned_game_by_slug(slug).await {
+    //     Ok(game) => info!("Game: {}", game.id()),
+    //     Err(err) => error!("{}", err),
+    // };
 
     Ok(())
 }
@@ -699,6 +702,37 @@ async fn locate_game(maxima_arc: LockedMaxima, path: &str) -> Result<()> {
     Ok(())
 }
 
+async fn do_cloud_sync(maxima_arc: LockedMaxima, game_slug: &str, write: bool) -> Result<()> {
+    let mut maxima = maxima_arc.lock().await;
+    let offer = maxima
+        .mut_library()
+        .game_by_base_slug(game_slug)
+        .await
+        .unwrap()
+        .clone();
+
+    info!("Got offer");
+
+    let lock = maxima
+        .cloud_sync()
+        .obtain_lock(
+            &offer,
+            if write {
+                CloudSyncLockMode::Write
+            } else {
+                CloudSyncLockMode::Read
+            },
+        )
+        .await?;
+    let res = lock.sync_files().await;
+    lock.release().await?;
+    res.unwrap();
+
+    info!("Done");
+
+    Ok(())
+}
+
 async fn start_game(
     offer_id: &str,
     game_path_override: Option<String>,
@@ -746,7 +780,7 @@ async fn start_game(
             }
         }
 
-        maxima.update_playing_status();
+        maxima.update_playing_status().await;
         if maxima.playing().is_none() {
             break;
         }

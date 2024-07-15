@@ -568,23 +568,10 @@ pub extern "C" fn maxima_find_owned_offer(
 
         let rt = Box::from_raw(*runtime);
         let result = rt.block_on(async {
+            let mut maxima = maxima_arc.lock().await;
             let game_slug = parse_raw_string(c_game_slug);
-
-            let maxima = maxima_arc.lock().await;
-            let owned_games = maxima.owned_games(1).await?;
-            for game in owned_games.owned_game_products().as_ref().unwrap().items() {
-                if game.product().game_slug() != &game_slug {
-                    continue;
-                }
-
-                if !game.product().downloadable() {
-                    continue;
-                }
-
-                return Ok(game.origin_offer_id().to_owned());
-            }
-
-            bail!("Failed to find game");
+            let game = maxima.mut_library().game_by_base_slug(&game_slug).await?;
+            return Ok(game.offer_id().to_owned());
         });
 
         *runtime = Box::into_raw(rt);

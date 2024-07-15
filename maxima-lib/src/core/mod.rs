@@ -36,10 +36,10 @@ use std::{
 };
 
 use anyhow::{bail, Result};
-use cloudsync::CloudSyncClient;
+use cloudsync::{CloudSyncClient, CloudSyncLockMode};
 use derive_builder::Builder;
 use derive_getters::Getters;
-use log::error;
+use log::{error, info};
 use strum_macros::IntoStaticStr;
 use sysinfo::{Pid, PidExt, ProcessExt, ProcessStatus, System, SystemExt};
 
@@ -290,75 +290,6 @@ impl Maxima {
         events
     }
 
-    pub async fn owned_games(&self, page: u32) -> Result<ServiceUser> {
-        let data: ServiceUser = self
-            .service_layer
-            .request(
-                SERVICE_REQUEST_GETPRELOADEDOWNEDGAMES,
-                ServiceGetPreloadedOwnedGamesRequestBuilder::default()
-                    .is_mac(false)
-                    .locale(self.locale.to_owned())
-                    .limit(1000)
-                    .next(((page - 1) * 1000).to_string())
-                    .r#type(ServiceGameProductType::DigitalFullGame)
-                    .entitlement_enabled(None)
-                    .storefronts(vec![
-                        ServiceStorefront::Ea,
-                        ServiceStorefront::Steam,
-                        ServiceStorefront::Epic,
-                    ])
-                    .platforms(vec![ServicePlatform::Pc])
-                    .build()?,
-            )
-            .await?;
-
-        Ok(data)
-    }
-
-    pub async fn owned_game_by_slug(&self, slug: &str) -> Result<ServiceUserGameProduct> {
-        let games = self.owned_games(1).await?;
-        let game = games
-            .owned_game_products()
-            .as_ref()
-            .unwrap()
-            .items()
-            .iter()
-            .filter(|x| {
-                // Ensure the entitlement is active
-                if x.status() != &ServiceOwnershipStatus::Active {
-                    return false;
-                }
-
-                // Ensure it's the full game
-                if x.product().base_item().game_type().as_ref().unwrap_or(&ServiceGameProductType::ExpansionPack)
-                    != &ServiceGameProductType::BaseGame
-                {
-                    return false;
-                }
-
-                if !*x.product().downloadable() {
-                    return false;
-                }
-
-                // Ensure it isn't a trial
-                if x.product()
-                    .game_product_user()
-                    .game_product_user_trial()
-                    .is_some()
-                {
-                    return false;
-                }
-
-                true
-            })
-            .find(|x| x.product().game_slug() == &slug);
-
-        match game {
-            Some(game) => Ok(game.to_owned()),
-            None => bail!("Failed to find game"),
-        }
-    }
-
     pub async fn player_by_id(&self, id: &str) -> Result<ServicePlayer> {
         if let Some(user) = &self.dummy_local_user {
             return Ok(user.player().as_ref().unwrap().clone());
@@ -469,7 +400,7 @@ impl Maxima {
         self.playing.as_mut().unwrap().set_started();
     }
 
-    pub fn update_playing_status(&mut self) {
+    pub async fn update_playing_status(&mut self) {
         if self.lsx_connections > 0
             || self.playing.is_none()
             || !self.playing.as_ref().unwrap().started()
@@ -486,6 +417,23 @@ impl Maxima {
                 if proc.status() == ProcessStatus::Run {
                     return;
                 }
+            }
+        }
+
+        info!("Game stopped");
+
+        if let Some(offer) = playing.offer() {
+            let result = self.cloud_sync.obtain_lock(offer, CloudSyncLockMode::Write).await;
+            if let Err(err) = result {
+                error!("Failed to obtain CloudSync write lock: {}", err);
+            } else {
+                let lock = result.unwrap();
+                let result = lock.sync_files().await;
+                if let Err(err) = result {
+                    error!("Failed to write to CloudSync: {}", err);
+                }
+
+                lock.release().await.ok();
             }
         }
 

@@ -1,11 +1,10 @@
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use anyhow::{bail, Result};
 use derive_getters::Getters;
-use tokio::{fs::File, io::BufReader};
 
 use crate::util::registry::{parse_partial_registry_path, parse_registry_path};
 
@@ -117,7 +116,37 @@ fn group_offers(products: Vec<OwnedOffer>) -> Vec<OwnedTitle> {
             .base_item()
             .base_game_slug()
             .clone();
-        let full_game = product.offer.display_type() == "FullGame";
+
+        let full_game = (|| {
+            // Ensure it's the full game
+            if product.offer.display_type() != "FullGame"
+                || product
+                    .product()
+                    .product()
+                    .base_item()
+                    .game_type()
+                    .as_ref()
+                    .unwrap_or(&ServiceGameProductType::ExpansionPack)
+                    != &ServiceGameProductType::BaseGame
+            {
+                return false;
+            }
+
+            if !product.offer.is_downloadable() {
+                return false;
+            }
+
+            // Ensure it isn't a trial
+            if product.product().product()
+                .game_product_user()
+                .game_product_user_trial()
+                .is_some()
+            {
+                return false;
+            }
+
+            true
+        })();
 
         if slug.is_none() && full_game {
             base_products.insert(product.slug.clone(), product.clone());

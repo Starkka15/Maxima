@@ -16,7 +16,7 @@ use crate::{
 
 use serde::{Deserialize, Serialize};
 
-use super::{ecommerce::CommerceOffer, library::OwnedOffer, Maxima};
+use super::{library::OwnedOffer, Maxima};
 
 pub enum StartupStage {
     Launch,
@@ -166,6 +166,7 @@ pub async fn start_game(
     let path = path.to_str().unwrap();
     info!("Game path: {}", path);
 
+    #[cfg(unix)]
     linux_setup().await?;
 
     match mode {
@@ -294,11 +295,6 @@ pub async fn linux_setup() -> Result<()> {
         wine_install_vkd3d().await?;
     }
 
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub async fn linux_setup() -> Result<()> {
     Ok(())
 }
 

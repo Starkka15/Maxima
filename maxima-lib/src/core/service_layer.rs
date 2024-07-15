@@ -580,6 +580,7 @@ service_layer_type!(LegacyOffer, {
     display_name: String,
     display_type: String,
     dip_manifest_relative_path: Option<String>,
+    is_downloadable: bool,
     cloud_save_configuration_override: Option<String>,
 });
 

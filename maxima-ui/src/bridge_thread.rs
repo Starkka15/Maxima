@@ -156,7 +156,7 @@ impl BridgeThread {
                 future = now.checked_add(Duration::from_millis(100)).unwrap();
                 
                 let mut maxima = maxima_arc.lock().await;
-                maxima.update_playing_status();
+                maxima.update_playing_status().await;
                 let now_playing = maxima.playing();
 
                 if let Some(ctx) = now_playing {
