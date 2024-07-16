@@ -14,7 +14,7 @@ use maxima::core::{launch::ActiveGameContext, LockedMaxima, Maxima, MaximaOption
 
 use crate::{
     bridge::{
-        bitches::bitches_request, game_details::game_details_request,
+        game_details::game_details_request,
         game_images::game_images_request, get_friends::get_friends_request,
         get_games::get_games_request, get_user_avatar::get_user_avatar_request,
         login_creds::login_creds, login_oauth::login_oauth, start_game::start_game_request,
@@ -58,7 +58,6 @@ pub enum MaximaLibRequest {
     GetGameImagesRequest(String),
     GetGameDetailsRequest(String),
     StartGameRequest(String, bool),
-    BitchesRequest,
     ShutdownRequest,
 }
 
@@ -235,10 +234,7 @@ impl BridgeThread {
                 MaximaLibRequest::StartGameRequest(offer_id, hardcode) => {
                     start_game_request(maxima_arc.clone(), offer_id.clone(), hardcode).await;
                 }
-                MaximaLibRequest::BitchesRequest => {
-                    bitches_request();
-                }
-                MaximaLibRequest::ShutdownRequest => break 'outer Ok(()),
+                MaximaLibRequest::ShutdownRequest => break 'outer Ok(()), //TODO: kill the bridge thread
             }
         }
     }

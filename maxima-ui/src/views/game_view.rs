@@ -258,7 +258,6 @@ pub fn game_view_details_panel(app : &mut MaximaEguiApp, ui: &mut Ui) {
                     .rounding(Rounding::same(2.0))
                     .min_size(vec2(50.0,50.0))
                   ).clicked() {
-                    let _ = app.backend.tx.send(crate::interact_thread::MaximaLibRequest::BitchesRequest);
                   } */
                   let settings_str = { "  ".to_string() + &app.locale.localization.games_view.main.settings.to_uppercase() + "  " };
                   if buttons.add(egui::Button::new(egui::RichText::new(settings_str)

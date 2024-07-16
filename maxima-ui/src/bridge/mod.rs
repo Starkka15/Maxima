@@ -1,4 +1,3 @@
-pub mod bitches;
 pub mod game_details;
 pub mod game_images;
 pub mod get_friends;
