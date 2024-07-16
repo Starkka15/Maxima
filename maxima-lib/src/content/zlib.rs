@@ -87,7 +87,7 @@ macro_rules! if_win {
     };
 }
 
-type ZSize = if_win!(usize, c_ulong);
+type ZSize = if_win!(u32, c_ulong);
 type ZChecksum = if_win!(u32, c_ulong);
 
 pub(crate) fn write_zlib_state(buf: &mut BytesMut, stream: &mut mz_stream) {
