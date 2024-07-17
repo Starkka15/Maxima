@@ -52,7 +52,7 @@ impl CompressionType {
     }
 }
 
-#[derive(Default, Clone, Getters)]
+#[derive(Default, Debug, Clone, Getters)]
 pub struct ZipFileEntry {
     name: String,
     crc32: u32,

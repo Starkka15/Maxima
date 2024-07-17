@@ -102,7 +102,8 @@ impl GameDownloader {
             .entries()
             .iter()
             .map(|x| *x.compressed_size() as usize)
-            .sum();
+            .sum::<usize>()
+            + 1; // Add 1 to account for running touchup at the end. Bad solution, but we're a bit rushed
 
         Ok(GameDownloader {
             offer_id: game.offer_id.to_owned(),
@@ -118,7 +119,7 @@ impl GameDownloader {
 
     pub fn download(&self) {
         let (downloader_arc, cancel_token, completed_bytes, notify) = self.prepare_download_vars();
-        let total_count = self.total_count + 1; // Add 1 to account for running touchup at the end. Bad solution, but we're a bit rushed
+        let total_count = self.total_count;
         tokio::spawn(async move {
             GameDownloader::start_downloads(
                 total_count,
@@ -156,13 +157,17 @@ impl GameDownloader {
     ) {
         let mut handles = Vec::with_capacity(total_count);
 
-        for i in 0..total_count - 1 {
+        for i in 0..total_count {
             let downloader = downloader_arc.clone();
             let cancel_token = cancel_token.clone();
             let completed_bytes = completed_bytes.clone();
 
             handles.push(async move {
                 let ele = &downloader.manifest().entries()[i];
+
+                if ele.name().contains("Cleanup") {
+                    info!("Ele: {:?}", ele);
+                }
 
                 tokio::select! {
                     result = downloader.download_single_file(ele, Some(Box::new(move |bytes| {

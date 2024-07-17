@@ -468,6 +468,9 @@ impl ZipDownloader {
 
         let state = EntryDownloadRequest::state(&context, entry).await;
         if state == EntryDownloadState::Complete {
+            if let Some(callback) = callback {
+                callback(*entry.compressed_size() as usize);
+            }
             return Ok(0);
         }
 
