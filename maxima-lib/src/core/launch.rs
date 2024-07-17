@@ -177,16 +177,22 @@ pub async fn start_game(
 
             if offer.as_ref().unwrap().offer().has_cloud_save() {
                 info!("Syncing with cloud save...");
-                let lock = maxima.cloud_sync().obtain_lock(offer.as_ref().unwrap(), CloudSyncLockMode::Read).await?;
-    
-                let result = lock.sync_files().await;
+
+                let result = maxima.cloud_sync().obtain_lock(offer.as_ref().unwrap(), CloudSyncLockMode::Read).await;
                 if let Err(err) = result {
-                    error!("Failed to sync cloud save: {}", err);
+                    error!("Failed to obtain CloudSync write lock: {}", err);
                 } else {
-                    info!("Cloud save synced");
+                    let lock = result.unwrap();
+                    
+                    let result = lock.sync_files().await;
+                    if let Err(err) = result {
+                        error!("Failed to sync cloud save: {}", err);
+                    } else {
+                        info!("Cloud save synced");
+                    }
+        
+                    lock.release().await?;
                 }
-    
-                lock.release().await?;
             }
         }
         LaunchMode::OnlineOffline(_, ref persona, ref password) => {

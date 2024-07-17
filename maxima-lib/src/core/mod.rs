@@ -454,6 +454,7 @@ impl Maxima {
                     error!("Failed to obtain CloudSync write lock: {}", err);
                 } else {
                     let lock = result.unwrap();
+                    
                     let result = lock.sync_files().await;
                     if let Err(err) = result {
                         error!("Failed to write to CloudSync: {}", err);
