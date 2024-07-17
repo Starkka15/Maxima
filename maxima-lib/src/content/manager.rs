@@ -292,10 +292,13 @@ impl ContentManager {
             if current.is_done() {
                 event = Some(MaximaEvent::InstallFinished(current.offer_id.to_owned()));
                 self.current = None;
+                self.queue.current = None;
 
                 if let Some(game) = self.queue.queued.pop() {
                     self.install_now(game).await?;
                 }
+
+                self.queue.save().await?;
             }
         }
 
