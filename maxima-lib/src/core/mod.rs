@@ -39,7 +39,7 @@ use anyhow::{bail, Result};
 use cloudsync::{CloudSyncClient, CloudSyncLockMode};
 use derive_builder::Builder;
 use derive_getters::Getters;
-use log::{error, info};
+use log::{error, info, warn};
 use strum_macros::IntoStaticStr;
 use sysinfo::{Pid, PidExt, ProcessExt, ProcessStatus, System, SystemExt};
 
@@ -47,8 +47,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::{
+    content::manager::ContentManager,
     lsx::{self, types::LSXRequestType},
-    rtm::client::RtmClient,
+    rtm::client::{BasicPresence, RtmClient},
     util::native::maxima_dir,
 };
 
@@ -59,13 +60,10 @@ use self::{
     library::GameLibrary,
     locale::Locale,
     service_layer::{
-        ServiceAvatarListBuilder, ServiceFriends, ServiceGameProductType,
-        ServiceGetBasicPlayerRequestBuilder, ServiceGetMyFriendsRequestBuilder,
-        ServiceGetPreloadedOwnedGamesRequestBuilder, ServiceGetUserPlayerRequest, ServiceImage,
-        ServiceImageBuilder, ServiceLayerClient, ServiceOwnershipStatus, ServicePlatform,
-        ServicePlayer, ServicePlayerBuilder, ServiceStorefront, ServiceUser,
-        ServiceUserBuilder, ServiceUserGameProduct, SERVICE_REQUEST_GETBASICPLAYER,
-        SERVICE_REQUEST_GETMYFRIENDS, SERVICE_REQUEST_GETPRELOADEDOWNEDGAMES,
+        ServiceAvatarListBuilder, ServiceFriends, ServiceGetBasicPlayerRequestBuilder,
+        ServiceGetMyFriendsRequestBuilder, ServiceGetUserPlayerRequest, ServiceImage,
+        ServiceImageBuilder, ServiceLayerClient, ServicePlayer, ServicePlayerBuilder, ServiceUser,
+        ServiceUserBuilder, SERVICE_REQUEST_GETBASICPLAYER, SERVICE_REQUEST_GETMYFRIENDS,
         SERVICE_REQUEST_GETUSERPLAYER,
     },
 };
@@ -76,8 +74,8 @@ mod error;
 pub enum MaximaEvent {
     /// PID, Request Type
     ReceivedLSXRequest(u32, LSXRequestType),
-    /// To fix erroneous warning in maxima-native, remove once there are more events
-    Unknown,
+    /// Offer ID. Use `maxima.mut_library().title_by_base_offer(id)` for details
+    InstallFinished(String),
 }
 
 pub type MaximaLSXEventCallback = extern "C" fn(*const c_char);
@@ -99,6 +97,9 @@ pub struct Maxima {
     lsx_connections: u16,
 
     cloud_sync: CloudSyncClient,
+
+    #[getter(skip)]
+    content_manager: ContentManager,
 
     #[getter(skip)]
     rtm: RtmClient,
@@ -189,6 +190,7 @@ impl Maxima {
             lsx_event_callback: None,
             lsx_connections: 0,
             cloud_sync: CloudSyncClient::new(auth_storage.clone()),
+            content_manager: ContentManager::new(auth_storage.clone(), false).await?,
             rtm: RtmClient::new(auth_storage),
             request_cache,
             dummy_local_user,
@@ -202,7 +204,8 @@ impl Maxima {
                 .load_auth_storage(true)
                 .dummy_local_user(false)
                 .build()?,
-        ).await
+        )
+        .await
     }
 
     pub async fn start_lsx(&self, maxima: LockedMaxima) -> Result<()> {
@@ -380,6 +383,10 @@ impl Maxima {
         &mut self.library
     }
 
+    pub fn content_manager(&mut self) -> &mut ContentManager {
+        &mut self.content_manager
+    }
+
     pub fn rtm(&mut self) -> &mut RtmClient {
         &mut self.rtm
     }
@@ -400,7 +407,22 @@ impl Maxima {
         self.playing.as_mut().unwrap().set_started();
     }
 
-    pub async fn update_playing_status(&mut self) {
+    /// Call this as often as possible from the loop you consume events from
+    pub async fn update(&mut self) {
+        self.update_playing_status().await;
+
+        let result = self.content_manager.update().await;
+        if let Err(err) = result {
+            warn!("Failed to update content manager: {}", err);
+        } else {
+            let result = result.unwrap();
+            if let Some(event) = result {
+                self.call_event(event);
+            }
+        }
+    }
+
+    async fn update_playing_status(&mut self) {
         if self.lsx_connections > 0
             || self.playing.is_none()
             || !self.playing.as_ref().unwrap().started()
@@ -423,7 +445,10 @@ impl Maxima {
         info!("Game stopped");
 
         if let Some(offer) = playing.offer() {
-            let result = self.cloud_sync.obtain_lock(offer, CloudSyncLockMode::Write).await;
+            let result = self
+                .cloud_sync
+                .obtain_lock(offer, CloudSyncLockMode::Write)
+                .await;
             if let Err(err) = result {
                 error!("Failed to obtain CloudSync write lock: {}", err);
             } else {
@@ -437,6 +462,11 @@ impl Maxima {
             }
         }
 
+        // We need to store your BasicPresence somewhere
+        self.rtm
+            .set_presence(BasicPresence::Online, "", "")
+            .await
+            .ok();
         self.playing = None;
     }
 

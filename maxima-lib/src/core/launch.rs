@@ -167,7 +167,7 @@ pub async fn start_game(
     info!("Game path: {}", path);
 
     #[cfg(unix)]
-    linux_setup().await?;
+    mx_linux_setup().await?;
 
     match mode {
         LaunchMode::Offline(_) => {}
@@ -272,7 +272,7 @@ pub async fn start_game(
 }
 
 #[cfg(unix)]
-pub async fn linux_setup() -> Result<()> {
+pub async fn mx_linux_setup() -> Result<()> {
     use crate::unix::wine::{
         check_dxvk_validity, check_vkd3d_validity, check_wine_validity, install_wine,
         setup_wine_registry, wine_install_dxvk, wine_install_vkd3d,

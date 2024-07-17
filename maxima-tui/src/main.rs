@@ -464,11 +464,11 @@ async fn start_game(
         for event in maxima.consume_pending_events() {
             match event {
                 MaximaEvent::ReceivedLSXRequest(_pid, _request) => (),
-                MaximaEvent::Unknown => todo!(),
+                _ => {},
             }
         }
 
-        maxima.update_playing_status().await;
+        maxima.update().await;
         if maxima.playing().is_none() {
             break;
         }

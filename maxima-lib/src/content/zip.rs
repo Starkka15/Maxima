@@ -36,7 +36,7 @@ fn signature_scan_rev(data: &[u8], signature: u32) -> Option<usize> {
     None
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub enum CompressionType {
     #[default]
     None = 0,

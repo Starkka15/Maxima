@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 use anyhow::{bail, Result};
 use futures::StreamExt;
-use inquire::Select;
+use inquire::{Select, Text};
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use regex::Regex;
@@ -18,37 +18,35 @@ use maxima::{
     util::service::{is_service_running, is_service_valid, register_service_user, start_service},
 };
 
+#[cfg(unix)]
+use maxima::core::launch::mx_linux_setup;
+
 use maxima::{
-    content::downloader::ZipDownloader,
+    content::{
+        downloader::ZipDownloader,
+        manager::{QueuedGame, QueuedGameBuilder},
+        ContentService,
+    },
     core::{
-        auth::{nucleus_token_exchange, TokenResponse},
+        auth::{
+            context::AuthContext,
+            login::{begin_oauth_login_flow, manual_login},
+            nucleus_auth_exchange, nucleus_token_exchange, TokenResponse,
+        },
         clients::JUNO_PC_CLIENT_ID,
         cloudsync::CloudSyncLockMode,
         dip::{DiPManifest, DIP_RELATIVE_PATH},
-        launch::LaunchMode,
+        launch::{self, LaunchMode},
         library::OwnedTitle,
         service_layer::{
             ServiceGetBasicPlayerRequestBuilder, ServiceGetLegacyCatalogDefsRequestBuilder,
             ServiceLegacyOffer, ServicePlayer, SERVICE_REQUEST_GETBASICPLAYER,
             SERVICE_REQUEST_GETLEGACYCATALOGDEFS,
         },
-        LockedMaxima, MaximaOptionsBuilder,
+        LockedMaxima, Maxima, MaximaEvent, MaximaOptionsBuilder,
     },
     ooa,
     rtm::client::BasicPresence,
-};
-use maxima::{
-    content::ContentService,
-    core::{
-        auth::{
-            context::AuthContext,
-            login::{begin_oauth_login_flow, manual_login},
-            nucleus_auth_exchange,
-        },
-        launch,
-        service_layer::ServiceUserGameProduct,
-        Maxima, MaximaEvent,
-    },
     util::{log::init_logger, native::take_foreground_focus, registry::check_registry_validity},
 };
 
@@ -59,14 +57,13 @@ lazy_static! {
 #[derive(Subcommand, Debug)]
 enum Mode {
     Launch {
+        slug: String,
+
         #[arg(long)]
         game_path: Option<String>,
 
         #[arg(long)]
         game_args: Vec<String>,
-
-        #[arg(short, long)]
-        offer_id: String,
 
         /// When set, offer_id must be a content ID, and the only authenticated
         /// requests are made to the license server. A dummy name will be used
@@ -231,7 +228,7 @@ async fn startup() -> Result<()> {
         if let Some(Mode::Launch {
             game_path: _,
             game_args: _,
-            offer_id: _,
+            slug: _,
             ref login,
         }) = args.mode
         {
@@ -280,11 +277,11 @@ async fn startup() -> Result<()> {
     let mode = args.mode.unwrap();
     match mode {
         Mode::Launch {
+            slug,
             game_path,
             game_args,
-            offer_id,
             login,
-        } => start_game(&offer_id, game_path, game_args, login, maxima_arc.clone()).await,
+        } => start_game(&slug, game_path, game_args, login, maxima_arc.clone()).await,
         Mode::ListGames => list_games(maxima_arc.clone()).await,
         Mode::LocateGame { path } => locate_game(maxima_arc.clone(), &path).await,
         Mode::CloudSync { game_slug, write } => {
@@ -391,35 +388,47 @@ async fn interactive_install_game(maxima_arc: LockedMaxima) -> Result<()> {
     let build = build.unwrap();
     info!("Installing game build {}", build.to_string());
 
-    let url = content_service
-        .download_url(&game.base_offer().offer_id(), Some(&build.build_id()))
-        .await?;
-
-    info!("URL: {}", url.url());
-
-    let downloader = ZipDownloader::new(&url.url()).await?;
-
-    let num_of_entries = downloader.manifest().entries().len();
-    info!("Entries: {}", num_of_entries);
-
-    let mut handles = Vec::with_capacity(downloader.manifest().entries().len());
-    let downloader_arc = Arc::new(downloader);
-
-    let start_time = Instant::now();
-    for i in 0..num_of_entries {
-        let downloader = downloader_arc.clone();
-
-        handles.push(async move {
-            let ele = &downloader.manifest().entries()[i];
-            info!("File: {}", ele.name());
-            downloader.download_single_file(ele).await.unwrap();
-        });
+    let path = PathBuf::from(
+        Text::new("Where would you like to install the game? (must be an absolute path)")
+            .prompt()?,
+    );
+    if !path.is_absolute() {
+        error!("Path {:?} is not absolute.", path);
+        return Ok(());
     }
 
-    let _results = futures::stream::iter(handles)
-        .buffer_unordered(16)
-        .collect::<Vec<_>>()
-        .await;
+    let game = QueuedGameBuilder::default()
+        .offer_id(game.base_offer().offer_id().to_owned())
+        .build_id(build.build_id().to_owned())
+        .path(path.clone())
+        .build()?;
+
+    let start_time = Instant::now();
+    maxima.content_manager().install_now(game).await?;
+    
+    drop(maxima);
+    
+    loop {
+        let mut maxima = maxima_arc.lock().await;
+
+        for event in maxima.consume_pending_events() {
+            match event {
+                MaximaEvent::ReceivedLSXRequest(_pid, _request) => (),
+                _ => {}
+            }
+        }
+
+        maxima.update().await;
+
+        if let Some(downloader) = maxima.content_manager().current() {
+            info!("Downloading: {}%/100%", downloader.percentage_done());
+        } else {
+            break;
+        }
+
+        drop(maxima);
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 
     let end_time = Instant::now();
     let elapsed_time = end_time - start_time;
@@ -457,7 +466,7 @@ async fn download_specific_file(
 
     debug!("URL: {}", url.url());
 
-    let downloader = ZipDownloader::new(&url.url()).await?;
+    let downloader = ZipDownloader::new("test-game", &url.url(), "DownloadTest").await?;
     let num_of_entries = downloader.manifest().entries().len();
     info!("Entries: {}", num_of_entries);
 
@@ -492,8 +501,14 @@ async fn generate_download_links(maxima_arc: LockedMaxima) -> Result<()> {
         .map(|g| g.name())
         .collect::<Vec<String>>();
 
-    let name = Select::new("What game would you like to install?", owned_games_strs).prompt()?;
+    let name = Select::new(
+        "What game would you like to list builds for?",
+        owned_games_strs,
+    )
+    .prompt()?;
     let game = owned_games.iter().find(|g| g.name() == name).unwrap();
+
+    info!("Working...");
 
     let builds = content_service
         .available_builds(&game.base_offer().offer_id())
@@ -516,8 +531,7 @@ async fn generate_download_links(maxima_arc: LockedMaxima) -> Result<()> {
         strs += "\n";
     }
 
-    std::fs::write("test", strs).unwrap();
-
+    println!("{}", strs);
     Ok(())
 }
 
@@ -695,9 +709,12 @@ async fn list_games(maxima_arc: LockedMaxima) -> Result<()> {
 }
 
 async fn locate_game(maxima_arc: LockedMaxima, path: &str) -> Result<()> {
+    #[cfg(unix)]
+    mx_linux_setup().await?;
+
     let path = PathBuf::from(path);
     let manifest = DiPManifest::read(&path.join(DIP_RELATIVE_PATH)).await?;
-    manifest.run_touchup(path).await?;
+    manifest.run_touchup(&path).await?;
     info!("Installed!");
     Ok(())
 }
@@ -776,11 +793,11 @@ async fn start_game(
         for event in maxima.consume_pending_events() {
             match event {
                 MaximaEvent::ReceivedLSXRequest(_pid, _request) => (),
-                MaximaEvent::Unknown => todo!(),
+                _ => {}
             }
         }
 
-        maxima.update_playing_status().await;
+        maxima.update().await;
         if maxima.playing().is_none() {
             break;
         }

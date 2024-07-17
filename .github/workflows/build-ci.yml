@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         rust-version: [nightly]
-        os: [ubuntu-latest-m, windows-latest-l]
+        os: [ubuntu-latest, windows-latest]
         experimental: [false]
 
     env:
@@ -47,7 +47,7 @@ jobs:
       id: install-depends
       if: runner.os == 'Linux'
       run: |
-        sudo apt-get install -y libssl-dev musl-tools libssl-dev
+        sudo apt-get install -y musl-tools libx11-dev libxcursor-dev libxcb1-dev libxi-dev libxkbcommon-dev libxkbcommon-x11-dev
         rustup target add x86_64-unknown-linux-musl
 
     - uses: Swatinem/rust-cache@v2
@@ -79,10 +79,13 @@ jobs:
           target/release/maxima-cli.exe
           target/release/maxima.exe
 
-    - name: List Files
+    - name: File Permissions
       if: runner.os == 'Linux'
       run: |
         ls -l target/x86_64-unknown-linux-musl/release
+        chmod +x target/x86_64-unknown-linux-musl/release/maxima-bootstrap
+        chmod +x target/x86_64-unknown-linux-musl/release/maxima-cli
+        chmod +x target/x86_64-unknown-linux-musl/release/maxima
 
     - uses: actions/upload-artifact@v3
       if: runner.os == 'Linux'

@@ -243,6 +243,13 @@ impl GameLibrary {
         &self.library
     }
 
+    pub async fn title_by_base_offer(&mut self, offer_id: &str) -> Option<&OwnedTitle> {
+        self.update_if_needed().await;
+        self.library
+            .iter()
+            .find(|x| x.base_offer.offer.offer_id() == offer_id)
+    }
+
     pub async fn game_by_base_offer(&mut self, offer_id: &str) -> Option<&OwnedOffer> {
         self.update_if_needed().await;
         self.library

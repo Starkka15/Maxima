@@ -248,11 +248,14 @@ pub fn set_up_registry() -> Result<()> {
     // Hijack Qt's protocol for our login redirection
     register_custom_protocol("qrc", "Maxima Protocol", bootstrap_path)?;
 
+    // These are disabled until properly implemented in bootstrap. Epic/Steam-owned games
+    // can be launched directly from Maxima until that's done
+
     // We link2maxima now
-    register_custom_protocol("link2ea", "Maxima Launcher", bootstrap_path)?;
+    //register_custom_protocol("link2ea", "Maxima Launcher", bootstrap_path)?;
 
     // maxima2
-    register_custom_protocol("origin2", "Maxima Launcher", bootstrap_path)?;
+    //register_custom_protocol("origin2", "Maxima Launcher", bootstrap_path)?;
 
     Ok(())
 }

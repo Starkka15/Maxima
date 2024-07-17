@@ -7,7 +7,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use derive_getters::Getters;
 use futures::StreamExt;
-use log::{debug, warn};
+use log::debug;
 use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::{

@@ -13,3 +13,7 @@ members = [
 
 [profile.release]
 strip = true
+
+[patch.crates-io]
+flate2 = { git = 'https://github.com/ArmchairDevelopers/flate2-rs.git' }
+async-compression = { git = 'https://github.com/ArmchairDevelopers/async-compression.git' }

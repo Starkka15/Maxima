@@ -1,4 +1,5 @@
 pub mod github;
+pub mod hash;
 pub mod log;
 pub mod native;
 pub mod registry;

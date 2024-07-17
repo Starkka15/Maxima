@@ -1,8 +1,8 @@
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::HashMap,
     ffi::OsStr,
     fs::{File, self, create_dir_all, remove_dir_all},
-    io::{BufRead, Read},
+    io::Read,
     path::PathBuf,
     process::{Command, ExitStatus, Stdio},
 };
@@ -57,7 +57,7 @@ fn set_versions(versions: Versions) -> Result<()> {
     Ok(())
 }
 
-pub fn check_wine_validity() -> Result<bool> {
+pub(crate) fn check_wine_validity() -> Result<bool> {
     let version = versions()?.wine;
 
     let release = get_wine_release();
@@ -73,7 +73,7 @@ pub fn check_wine_validity() -> Result<bool> {
     Ok(version == release.unwrap().tag_name)
 }
 
-pub fn check_dxvk_validity() -> Result<bool> {
+pub(crate) fn check_dxvk_validity() -> Result<bool> {
     let version = versions()?.dxvk;
 
     let release = fetch_github_release("doitsujin", "dxvk", "latest");
@@ -88,7 +88,7 @@ pub fn check_dxvk_validity() -> Result<bool> {
     Ok(version == release.unwrap().tag_name)
 }
 
-pub fn check_vkd3d_validity() -> Result<bool> {
+pub(crate) fn check_vkd3d_validity() -> Result<bool> {
     let version = versions()?.vkd3d;
 
     let release = fetch_github_release("HansKristian-Work", "vkd3d-proton", "latest");
@@ -220,7 +220,7 @@ pub fn run_wine_command<I: IntoIterator<Item = T>, T: AsRef<OsStr>>(
     Ok(output_str.to_string())
 }
 
-pub async fn install_wine() -> Result<()> {
+pub(crate) async fn install_wine() -> Result<()> {
     let release = get_wine_release()?;
     let asset = release
         .assets
@@ -243,7 +243,7 @@ pub async fn install_wine() -> Result<()> {
     versions.wine = release.tag_name;
     set_versions(versions)?;
 
-    run_wine_command("wine", "wineboot", Some(vec![" --init"]), None, false)?;
+    run_wine_command("wine64", "wineboot", Some(vec![" --init"]), None, false)?;
 
     Ok(())
 }
@@ -298,7 +298,7 @@ fn add_dll_override(dll_name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn wine_install_dxvk() -> Result<()> {
+pub(crate) async fn wine_install_dxvk() -> Result<()> {
     let release = fetch_github_release("doitsujin", "dxvk", "latest")?;
     let asset = release
         .assets
@@ -413,7 +413,7 @@ where
 
 pub fn setup_wine_registry() -> Result<()> {
     run_wine_command(
-        "wine",
+        "wine64",
         "reg",
         Some(vec![
             "add",
@@ -429,7 +429,7 @@ pub fn setup_wine_registry() -> Result<()> {
         false,
     )?;
     run_wine_command(
-        "wine",
+        "wine64",
         "reg",
         Some(vec![
             "add",

@@ -105,13 +105,3 @@ pub fn rtp_handshake() -> u32 {
         ^ (current_date.day() * PRIME_30K);
     time ^ (time << 16) ^ (time >> 16)
 }
-
-pub fn hash_fnv1a(input: &[u8]) -> u64 {
-    static OFFSET: u64 = 0xcbf29ce484222325;
-    input
-        .iter()
-        .map(|val| (*val) as u64)
-        .fold(OFFSET, |acc, val: u64| {
-            (Wrapping(acc ^ val) * Wrapping(0x100000001b3)).0
-        })
-}

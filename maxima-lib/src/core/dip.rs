@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use derive_getters::Getters;
 use serde::Deserialize;
 
@@ -78,6 +78,10 @@ fn remove_leading_slash(path: &str) -> &str {
     path.strip_prefix('/').unwrap_or(path)
 }
 
+fn remove_trailing_slash(path: &str) -> &str {
+    path.strip_suffix('/').unwrap_or(path)
+}
+
 fn remove_trailing_backslash(path: &str) -> &str {
     path.strip_suffix('\\').unwrap_or(path)
 }
@@ -99,13 +103,45 @@ dip_type!(
     }
 );
 
+dip_type!(
+    LegacyManifest;
+    attr {},
+    data {
+        executable: DiPTouchup,
+    }
+);
+
+/// https://www.reddit.com/r/rust/comments/11co87m/comment/ja4sy88
+fn bytes_to_string(bytes: Vec<u8>) -> Option<String> {
+    if let Ok(v) = String::from_utf8(bytes.clone()) {
+        return Some(v);
+    }
+
+    let u16_bytes: Vec<u16> = bytes
+        .chunks_exact(2)
+        .into_iter()
+        .map(|a| u16::from_ne_bytes([a[0], a[1]]))
+        .collect();
+
+    if let Ok(v) = String::from_utf16(&u16_bytes) {
+        return Some(v);
+    }
+
+    None
+}
+
 impl DiPManifest {
     pub async fn read(path: &PathBuf) -> Result<Self> {
-        let file = tokio::fs::read_to_string(path)
+        let bytes = tokio::fs::read(path)
             .await
             .context("Failed to read DiP manifest file")
             .unwrap();
-        Ok(quick_xml::de::from_str(&file)?)
+        let string = bytes_to_string(bytes);
+        if string.is_none() {
+            bail!("Failed to decode DiPManifest file. Weird encoding?");
+        }
+
+        Ok(quick_xml::de::from_str(&string.unwrap())?)
     }
 
     pub fn execute_path(&self, trial: bool) -> Option<String> {
@@ -114,9 +150,10 @@ impl DiPManifest {
     }
 
     #[cfg(unix)]
-    pub async fn run_touchup(&self, install_path: PathBuf) -> Result<()> {
+    pub async fn run_touchup(&self, install_path: &PathBuf) -> Result<()> {
         use crate::unix::wine::{invalidate_mx_wine_registry, run_wine_command};
 
+        let install_path = PathBuf::from(remove_trailing_slash(install_path.to_str().unwrap()));
         let args = self.collect_touchup_args(&install_path);
         let path = install_path.join(&self.touchup.path());
         run_wine_command("wine64", path, Some(args), None, true)?;
@@ -126,8 +163,8 @@ impl DiPManifest {
     }
 
     #[cfg(windows)]
-    pub async fn run_touchup(&self, install_path: PathBuf) -> Result<()> {
-        let args = self.collect_touchup_args(&install_path);
+    pub async fn run_touchup(&self, install_path: &PathBuf) -> Result<()> {
+        let args = self.collect_touchup_args(install_path);
         let path = install_path.join(&self.touchup.path());
         // TODO
         Ok(())
