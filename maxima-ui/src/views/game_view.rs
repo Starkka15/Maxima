@@ -1,6 +1,6 @@
 use egui::{pos2, vec2, Color32, Margin, Mesh, Pos2, Rect, RichText, Rounding, ScrollArea, Shape, Stroke, Ui};
 use log::debug;
-use crate::{bridge_thread, widgets::enum_dropdown::enum_dropdown, GameDetails, GameDetailsWrapper, GameInfo, GameUIImages, GameUIImagesWrapper, MaximaEguiApp, PageType, PopupModal};
+use crate::{bridge_thread, set_app_modal, widgets::enum_dropdown::enum_dropdown, GameDetails, GameDetailsWrapper, GameInfo, GameUIImages, GameUIImagesWrapper, InstallModalState, MaximaEguiApp, PageType, PopupModal};
 
 use strum_macros::EnumIter;
 
@@ -49,42 +49,45 @@ fn skeleton_text_block1(ui: &mut egui::Ui, width: f32, width1: f32, height: f32)
 }
 
 pub fn game_view_details_panel(app : &mut MaximaEguiApp, ui: &mut Ui) {
-  puffin::profile_function!();
-  if app.games.len() < 1 { return }
-  let game: &mut GameInfo = if let Some(game) = app.games.get_mut(&app.game_sel) { game } else { return };
-  let game_images: Option<&GameUIImages> = match &game.images {
-    GameUIImagesWrapper::Unloaded => {
-      debug!("Loading images for {:?}", game.name);
-      app.backend.backend_commander.send(bridge_thread::MaximaLibRequest::GetGameImagesRequest(game.slug.clone())).unwrap();
-      game.images = GameUIImagesWrapper::Loading;
-      None
-    },
-    GameUIImagesWrapper::Loading => {
-      None
-    },
-    GameUIImagesWrapper::Available(images) => {
-      Some(images) },
-  };
+    puffin::profile_function!();
+    if app.games.len() < 1 { return }
+    let game: &mut GameInfo = if let Some(game) = app.games.get_mut(&app.game_sel) { game } else { return };
+    let game_images: Option<&GameUIImages> = match &game.images {
+        GameUIImagesWrapper::Unloaded => {
+            debug!("Loading images for {:?}", game.name);
+            app.backend.backend_commander.send(bridge_thread::MaximaLibRequest::GetGameImagesRequest(game.slug.clone())).unwrap();
+            game.images = GameUIImagesWrapper::Loading;
+            None
+        },
+        GameUIImagesWrapper::Loading => {
+            None
+        },
+        GameUIImagesWrapper::Available(images) => {
+            Some(images) },
+    };
 
-  let game_details: Option<&GameDetails> = match &game.details {
-    GameDetailsWrapper::Unloaded => {
-      debug!("Loading details for {:?}", game.name);
-      app.backend.backend_commander.send(bridge_thread::MaximaLibRequest::GetGameDetailsRequest(game.slug.clone())).unwrap();
-      game.details = GameDetailsWrapper::Loading;
-      None
-    },
-    GameDetailsWrapper::Loading => {
-      None
-    },
-    GameDetailsWrapper::Available(details) => {
-      Some(details) },
-};
+    let game_details: Option<&GameDetails> = match &game.details {
+        GameDetailsWrapper::Unloaded => {
+            debug!("Loading details for {:?}", game.name);
+            app.backend.backend_commander.send(bridge_thread::MaximaLibRequest::GetGameDetailsRequest(game.slug.clone())).unwrap();
+            game.details = GameDetailsWrapper::Loading;
+            None
+        },
+        GameDetailsWrapper::Loading => {
+            None
+        },
+        GameDetailsWrapper::Available(details) => {
+            Some(details) },
+    };
+
+    let game = game.clone();
+
     let mut hero_rect = Rect::clone(&ui.available_rect_before_wrap());
     let aspect_ratio: f32 = 
     if let Some(images) = game_images {
-      images.hero.size.x / images.hero.size.y
+        images.hero.size.x / images.hero.size.y
     } else {
-      16.0 / 9.0
+        16.0 / 9.0
     };
     let style = ui.style_mut();
     style.visuals.clip_rect_margin = 0.0;
@@ -92,290 +95,319 @@ pub fn game_view_details_panel(app : &mut MaximaEguiApp, ui: &mut Ui) {
     hero_rect.max.x -= style.spacing.scroll.bar_width + style.spacing.scroll.bar_inner_margin;
     hero_rect.max.y = hero_rect.min.y + (hero_rect.size().x / aspect_ratio);
     if hero_rect.size().x > 650.0 {
-      hero_rect.max.y = hero_rect.min.y + (650.0 / aspect_ratio);
+        hero_rect.max.y = hero_rect.min.y + (650.0 / aspect_ratio);
     }
-    ui.push_id("GameViewPanel_ScrollerArea", |ui| {
-      ui.style_mut().visuals.widgets.inactive.bg_fill = Color32::WHITE;
-      ui.vertical(|ui| {
-        
-        // scrollbar
-        ui.style_mut().visuals.widgets.inactive.bg_fill = Color32::WHITE;
-        ui.style_mut().visuals.widgets.inactive.rounding = Rounding::same(4.0);
-        ui.style_mut().visuals.widgets.active.rounding = Rounding::same(4.0);
-        ui.style_mut().visuals.widgets.hovered.rounding = Rounding::same(4.0);
-        
-        let mut logo_transition_frac = 0.0;
-        ScrollArea::vertical()
-        .auto_shrink(false)
-        .show(ui, |ui| {
-          puffin::profile_scope!("details");
-          let hero_height_capped = hero_rect.size().y.max(0.0);
-          ui.allocate_space(vec2(0.0, hero_height_capped));
-          let content_region_start = &ui.cursor().min.y;
-          let mut hero_vis_frac = (content_region_start - hero_rect.min.y) / (hero_rect.max.y - hero_rect.min.y); // how much of the hero image is visible
-          hero_vis_frac = if hero_vis_frac > 1.0 { 0.0 } else if hero_vis_frac < 0.0 { 1.0 } else { 1.0 - hero_vis_frac }; // clamping/inverting
-          logo_transition_frac = bezier_ease(hero_vis_frac);
 
-          { puffin::profile_scope!("hero image");
-            if let Some(images) = game_images {
-              if let Some(gvbg) = &app.game_view_bg_renderer {
-                gvbg.draw(ui, hero_rect, images.hero.size, images.hero.renderable, hero_vis_frac);
-                //TODO: negative allocation fix
-                //ui.allocate_space(hero_rect.size().max(vec2(0.0, 0.0)));
-              }
-              //ui.allocate_space(vec2(0.0,-hero_height_capped));
-            } else {
-              ui.painter().rect_filled(hero_rect, Rounding::same(0.0), Color32::TRANSPARENT);
+    ui.style_mut().visuals.widgets.inactive.bg_fill = Color32::WHITE;
+    ui.vertical(|ui| {
+    
+    // scrollbar
+    ui.style_mut().visuals.widgets.inactive.bg_fill = Color32::WHITE;
+    ui.style_mut().visuals.widgets.inactive.rounding = Rounding::same(4.0);
+    ui.style_mut().visuals.widgets.active.rounding = Rounding::same(4.0);
+    ui.style_mut().visuals.widgets.hovered.rounding = Rounding::same(4.0);
+    
+    let mut logo_transition_frac = 0.0;
+    ScrollArea::vertical()
+    .auto_shrink(false)
+    .id_source("GameViewPanel_ScrollerArea")
+    .show(ui, |ui| {
+        puffin::profile_scope!("details");
+        let hero_height_capped = hero_rect.size().y.max(0.0);
+        ui.allocate_space(vec2(0.0, hero_height_capped));
+        let content_region_start = &ui.cursor().min.y;
+        let mut hero_vis_frac = (content_region_start - hero_rect.min.y) / (hero_rect.max.y - hero_rect.min.y); // how much of the hero image is visible
+        hero_vis_frac = if hero_vis_frac > 1.0 { 0.0 } else if hero_vis_frac < 0.0 { 1.0 } else { 1.0 - hero_vis_frac }; // clamping/inverting
+        logo_transition_frac = bezier_ease(hero_vis_frac);
+
+        { puffin::profile_scope!("hero image");
+        if let Some(images) = game_images {
+            if let Some(gvbg) = &app.game_view_bg_renderer {
+            gvbg.draw(ui, hero_rect, images.hero.size, images.hero.renderable, hero_vis_frac);
+            //TODO: negative allocation fix
+            //ui.allocate_space(hero_rect.size().max(vec2(0.0, 0.0)));
             }
-          }
+            //ui.allocate_space(vec2(0.0,-hero_height_capped));
+        } else {
+            ui.painter().rect_filled(hero_rect, Rounding::same(0.0), Color32::TRANSPARENT);
+        }
+        }
 
-          if hero_vis_frac < 1.0 && game_images.is_some(){
-            // TODO: find a better solution
-            let mut mesh = Mesh::default();
+        if hero_vis_frac < 1.0 && game_images.is_some(){
+        // TODO: find a better solution
+        let mut mesh = Mesh::default();
+        
+        let hero_tint = if ui.is_enabled() { Color32::from_black_alpha(20) } else { Color32::from_black_alpha(174) };
+        mesh.colored_vertex(hero_rect.left_bottom() - vec2(0.0, hero_rect.height() * hero_vis_frac), hero_tint);
+        mesh.colored_vertex(hero_rect.right_bottom() - vec2(0.0, hero_rect.height() * hero_vis_frac), hero_tint);
+        mesh.colored_vertex(hero_rect.right_top(), hero_tint);
+        mesh.colored_vertex(hero_rect.left_top(), hero_tint);
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3); 
+        ui.painter().add(Shape::mesh(mesh));
+        }
+
+        let avoid_scrollbar_margin = Margin {
+        left: 0.0,
+        right: ui.style().spacing.scroll.bar_width + ui.style().spacing.scroll.bar_inner_margin,
+        top: 0.0,
+        bottom: 0.0,
+        };
+
+        let mut bar_rounding = Rounding::same(3.0);
+        bar_rounding.nw = 0.0;
+        bar_rounding.ne = 0.0;
+        let play_bar_frame = egui::Frame::default()
+        //.fill(Color32::from_black_alpha(120))
+        .outer_margin(avoid_scrollbar_margin)
+        .rounding(Rounding::ZERO);
+        //.inner_margin(Margin::same(4.0));
+        //.outer_margin(Margin::same(4.0));
+        play_bar_frame.show(ui, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let stats_frame = egui::Frame::default()
+            .fill(Color32::WHITE)
+            .rounding(bar_rounding)
+            .inner_margin(Margin::same(4.0));
+            stats_frame.show(ui, |stats| {
+            puffin::profile_scope!("stats");
+            stats.horizontal(|stats| {
+                stats.style_mut().spacing.item_spacing.x = 4.0;
+                if let Some(details) = game_details {
+                stats.label(
+                    RichText::new(&app.locale.localization.games_view.main.playtime)
+                    .color(Color32::BLACK)
+                    .strong()
+                );
+                stats.label(
+                    RichText::new(format!(": {:?} hours", details.time as f32 / 10.0))
+                    .color(Color32::BLACK)
+                );
+                stats.separator();
+                stats.label(
+                    RichText::new(&app.locale.localization.games_view.main.achievements)
+                    .color(Color32::BLACK)
+                    .strong()
+                );
+                stats.label(
+                    RichText::new(format!(": {:?} / {:?}", details.achievements_unlocked, details.achievements_total))
+                    .color(Color32::BLACK)
+                );
+                } else {
+                let mut skeleton_rect = stats.available_rect_before_wrap();
+                skeleton_rect.set_width(126.0);
+                stats.painter().rect_filled(skeleton_rect, Rounding::same(2.0), SKELETON_TEXT_COLOR);
+                stats.allocate_space(vec2(126.0,0.0));
+                stats.separator();
+                skeleton_rect = stats.available_rect_before_wrap();
+                skeleton_rect.set_width(126.0);
+                stats.painter().rect_filled(skeleton_rect, Rounding::same(2.0), SKELETON_TEXT_COLOR);
+                }
+
+                stats.allocate_space(vec2(stats.available_width(),0.0));
+            });
+            });
             
-            let hero_tint = if ui.is_enabled() { Color32::from_black_alpha(20) } else { Color32::from_black_alpha(174) };
-            mesh.colored_vertex(hero_rect.left_bottom() - vec2(0.0, hero_rect.height() * hero_vis_frac), hero_tint);
-            mesh.colored_vertex(hero_rect.right_bottom() - vec2(0.0, hero_rect.height() * hero_vis_frac), hero_tint);
-            mesh.colored_vertex(hero_rect.right_top(), hero_tint);
-            mesh.colored_vertex(hero_rect.left_top(), hero_tint);
-            mesh.add_triangle(0, 1, 2);
-            mesh.add_triangle(0, 2, 3); 
-            ui.painter().add(Shape::mesh(mesh));
-          }
+            let buttons_frame = egui::Frame::default()
+            .outer_margin(Margin::symmetric(0.0, 8.0))
+            .fill(Color32::TRANSPARENT);
+            buttons_frame.show(ui, |buttons| {
+            puffin::profile_scope!("action buttons");
+            buttons.horizontal(|buttons| {
+                buttons.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                buttons.style_mut().spacing.item_spacing.x = 8.0;
 
-          let avoid_scrollbar_margin = Margin {
-            left: 0.0,
-            right: ui.style().spacing.scroll.bar_width + ui.style().spacing.scroll.bar_inner_margin,
-            top: 0.0,
-            bottom: 0.0,
-          };
-
-          let mut bar_rounding = Rounding::same(3.0);
-          bar_rounding.nw = 0.0;
-          bar_rounding.ne = 0.0;
-          let play_bar_frame = egui::Frame::default()
-          //.fill(Color32::from_black_alpha(120))
-          .outer_margin(avoid_scrollbar_margin)
-          .rounding(Rounding::ZERO);
-          //.inner_margin(Margin::same(4.0));
-          //.outer_margin(Margin::same(4.0));
-          play_bar_frame.show(ui, |ui| {
-            ui.vertical(|ui| {
-              ui.spacing_mut().item_spacing.y = 0.0;
-              let stats_frame = egui::Frame::default()
-              .fill(Color32::WHITE)
-              .rounding(bar_rounding)
-              .inner_margin(Margin::same(4.0));
-              stats_frame.show(ui, |stats| {
-                puffin::profile_scope!("stats");
-                stats.horizontal(|stats| {
-                  stats.style_mut().spacing.item_spacing.x = 4.0;
-                  if let Some(details) = game_details {
-                    stats.label(
-                      RichText::new(&app.locale.localization.games_view.main.playtime)
-                      .color(Color32::BLACK)
-                      .strong()
-                    );
-                    stats.label(
-                      RichText::new(format!(": {:?} hours", details.time as f32 / 10.0))
-                      .color(Color32::BLACK)
-                    );
-                    stats.separator();
-                    stats.label(
-                      RichText::new(&app.locale.localization.games_view.main.achievements)
-                      .color(Color32::BLACK)
-                      .strong()
-                    );
-                    stats.label(
-                      RichText::new(format!(": {:?} / {:?}", details.achievements_unlocked, details.achievements_total))
-                      .color(Color32::BLACK)
-                    );
-                  } else {
-                    let mut skeleton_rect = stats.available_rect_before_wrap();
-                    skeleton_rect.set_width(126.0);
-                    stats.painter().rect_filled(skeleton_rect, Rounding::same(2.0), SKELETON_TEXT_COLOR);
-                    stats.allocate_space(vec2(126.0,0.0));
-                    stats.separator();
-                    skeleton_rect = stats.available_rect_before_wrap();
-                    skeleton_rect.set_width(126.0);
-                    stats.painter().rect_filled(skeleton_rect, Rounding::same(2.0), SKELETON_TEXT_COLOR);
-                  }
-
-                  stats.allocate_space(vec2(stats.available_width(),0.0));
-                });
-              });
-              
-              let buttons_frame = egui::Frame::default()
-              .outer_margin(Margin::symmetric(0.0, 8.0))
-              .fill(Color32::TRANSPARENT);
-              buttons_frame.show(ui, |buttons| {
-                puffin::profile_scope!("action buttons");
-                buttons.horizontal(|buttons| {
-                  buttons.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-                  buttons.style_mut().spacing.item_spacing.x = 8.0;
-
-                  if if let Some(slug) = &app.playing_game { slug.eq(&game.slug) } else { false } {
-                    let play_str = { "  ".to_string() + &app.locale.localization.games_view.main.stop.to_uppercase() + "  " };
-                      if buttons.add(egui::Button::new(egui::RichText::new(play_str)
-                        .size(20.0)
-                        .color(Color32::WHITE))
-                        .rounding(Rounding::same(2.0))
-                        .min_size(vec2(50.0,40.0))
-                      ).clicked() {
-                        //TODO
-                      }
-                  } else {
-                    if game.installed {
-                      let play_str = { "  ".to_string() + &app.locale.localization.games_view.main.play.to_uppercase() + "  " };
-                      if buttons.add_enabled(app.playing_game.is_none(),egui::Button::new(egui::RichText::new(play_str)
-                        .size(20.0)
-                        .color(Color32::WHITE))
-                        .rounding(Rounding::same(2.0))
-                        .min_size(vec2(50.0,40.0))
-                      ).clicked() {
-                        app.playing_game = Some(game.slug.clone());
-                        let _ = app.backend.backend_commander.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.clone()));
-                      }
-                    } else if app.install_queue.contains_key(&game.offer) || app.installing_now.as_ref().is_some_and(|n| n.offer.eq(&game.offer)) {
-                      let install_str = { "  ".to_string() + &app.locale.localization.games_view.main.resume.to_uppercase() + "  " };
-                      if buttons.add(egui::Button::new(egui::RichText::new(install_str)
-                        .size(20.0)
-                        .color(Color32::WHITE))
-                        .rounding(Rounding::same(2.0))
-                        .min_size(vec2(50.0,40.0))
-                      ).clicked() {
-                        app.page_view = PageType::Downloads;
-                      }
-                    } else {
-                      let install_str = { "  ".to_string() + &app.locale.localization.games_view.main.install.to_uppercase() + "  " };
-                      if buttons.add(egui::Button::new(egui::RichText::new(install_str)
-                        .size(20.0)
-                        .color(Color32::WHITE))
-                        .rounding(Rounding::same(2.0))
-                        .min_size(vec2(50.0,40.0))
-                      ).clicked() {
-                        app.modal = Some(PopupModal::GameInstall(game.slug.clone()));
-                      }
-                    }
-                  }
-                  
-                  /* buttons.set_enabled(false);
-                  if buttons.add(egui::Button::new(egui::RichText::new("  ⮋ Download  ")
-                    .size(26.0)
-                    .color(Color32::WHITE))
-                    .rounding(Rounding::same(2.0))
-                    .min_size(vec2(50.0,50.0))
-                  ).clicked() {
-                  } */
-                  let settings_str = { "  ".to_string() + &app.locale.localization.games_view.main.settings.to_uppercase() + "  " };
-                  if buttons.add(egui::Button::new(egui::RichText::new(settings_str)
+                if if let Some(slug) = &app.playing_game { slug.eq(&game.slug) } else { false } {
+                let play_str = { "  ".to_string() + &app.locale.localization.games_view.main.stop.to_uppercase() + "  " };
+                    if buttons.add(egui::Button::new(egui::RichText::new(play_str)
                     .size(20.0)
                     .color(Color32::WHITE))
                     .rounding(Rounding::same(2.0))
                     .min_size(vec2(50.0,40.0))
-                  ).clicked() {
-                    app.modal = Some(PopupModal::GameSettings(game.slug.clone()));
-                  }
-                });
-              });
-
+                    ).clicked() {
+                    //TODO
+                    }
+                } else {
+                if game.installed {
+                    let play_str = { "  ".to_string() + &app.locale.localization.games_view.main.play.to_uppercase() + "  " };
+                    if buttons.add_enabled(app.playing_game.is_none(),egui::Button::new(egui::RichText::new(play_str)
+                    .size(20.0)
+                    .color(Color32::WHITE))
+                    .rounding(Rounding::same(2.0))
+                    .min_size(vec2(50.0,40.0))
+                    ).clicked() {
+                    app.playing_game = Some(game.slug.clone());
+                    let settings = app.settings.game_settings.get(&game.slug);
+                    let settings = if let Some(settings) = settings {
+                      Some(settings.to_owned())
+                    } else { None };
+                    let _ = app.backend.backend_commander.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.clone(), settings));
+                    }
+                } else if app.install_queue.contains_key(&game.offer) || app.installing_now.as_ref().is_some_and(|n| n.offer.eq(&game.offer)) {
+                    let install_str = { "  ".to_string() + &app.locale.localization.games_view.main.resume.to_uppercase() + "  " };
+                    if buttons.add(egui::Button::new(egui::RichText::new(install_str)
+                    .size(20.0)
+                    .color(Color32::WHITE))
+                    .rounding(Rounding::same(2.0))
+                    .min_size(vec2(50.0,40.0))
+                    ).clicked() {
+                    app.page_view = PageType::Downloads;
+                    }
+                } else {
+                    let install_str = { "  ".to_string() + &app.locale.localization.games_view.main.install.to_uppercase() + "  " };
+                    if buttons.add(egui::Button::new(egui::RichText::new(install_str)
+                    .size(20.0)
+                    .color(Color32::WHITE))
+                    .rounding(Rounding::same(2.0))
+                    .min_size(vec2(50.0,40.0))
+                    ).clicked() {
+                        set_app_modal!(app, Some(PopupModal::GameInstall(game.slug.clone())));
+                    //app.modal = Some(PopupModal::GameInstall(game.slug.clone()));
+                    //app.installer_state = InstallModalState::new(&app.settings);
+                    }
+                }
+                }
+                
+                /* buttons.set_enabled(false);
+                if buttons.add(egui::Button::new(egui::RichText::new("  ⮋ Download  ")
+                .size(26.0)
+                .color(Color32::WHITE))
+                .rounding(Rounding::same(2.0))
+                .min_size(vec2(50.0,50.0))
+                ).clicked() {
+                } */
+                let settings_str = { "  ".to_string() + &app.locale.localization.games_view.main.settings.to_uppercase() + "  " };
+                if buttons.add(egui::Button::new(egui::RichText::new(settings_str)
+                .size(20.0)
+                .color(Color32::WHITE))
+                .rounding(Rounding::same(2.0))
+                .min_size(vec2(50.0,40.0))
+                ).clicked() {
+                    set_app_modal!(app, Some(PopupModal::GameSettings(game.slug.clone())));
+                }
             });
-          });
-          ui.vertical(|ui| {
-            puffin::profile_scope!("description");
-            
-            ui.style_mut().spacing.item_spacing = vec2(5.0,5.0);
-            
-            let req_width = ((ui.available_size_before_wrap().x - avoid_scrollbar_margin.right) - 5.0) / 2.0;
-            ui.horizontal(|sysreq| {
-              puffin::profile_scope!("system requirements");
-              if let Some(details) = game_details {
-
-                sysreq.vertical(|min| {
-                  puffin::profile_scope!("minimum");
-                  min.set_min_width(req_width);
-                  min.set_max_width(req_width);
-                  min.heading(&app.locale.localization.games_view.details.min_system_req);
-                  egui_demo_lib::easy_mark::easy_mark(min, &details.system_requirements_min);
-                });
-                sysreq.vertical(|rec| {
-                  puffin::profile_scope!("recommended");
-                  rec.set_min_width(req_width);
-                  rec.set_max_width(req_width);
-                  rec.heading(&app.locale.localization.games_view.details.rec_system_req);
-                  egui_demo_lib::easy_mark::easy_mark(rec, &details.system_requirements_rec);
-                });
-              } else {
-
-                sysreq.vertical(|min| {
-                  puffin::profile_scope!("minimum skeleton");
-                  min.set_min_width(req_width);
-                  min.set_max_width(req_width);
-                  
-                  skeleton_text_block(min, 248.0, 24.0);
-                  skeleton_text_block1(min, 20.0,70.0, 13.0);
-                  skeleton_text_block1(min, 25.0, 199.0, 13.0);
-                  skeleton_text_block1(min, 27.0, 135.0, 13.0);
-                  skeleton_text_block1(min, 69.0, 100.0, 13.0);
-                  skeleton_text_block1(min, 27.0, 257.0, 13.0);
-                  skeleton_text_block1(min, 28.0, 188.0, 13.0);
-                  skeleton_text_block1(min, 22.0, 62.0, 13.0);
-                });
-                sysreq.vertical(|rec| {
-                  puffin::profile_scope!("recommended skeleton");
-                  rec.set_min_width(req_width);
-                  rec.set_max_width(req_width);
-
-                  skeleton_text_block(rec, 296.0, 24.0);
-                  skeleton_text_block1(rec,20.0, 70.0, 13.0);
-                  skeleton_text_block1(rec,25.0, 290.0, 13.0);
-                  skeleton_text_block1(rec,27.0, 139.0, 13.0);
-                  skeleton_text_block1(rec,69.0, 149.0, 13.0);
-                  skeleton_text_block1(rec,27.0, 185.0, 13.0);
-                  skeleton_text_block1(rec,28.0, 196.0, 13.0);
-                  skeleton_text_block1(rec,22.0, 64.0, 13.0);
-                });
-              }
             });
-            {
-              puffin::profile_scope!("filler");
-              for _idx in 0..75 {
-                ui.heading("");
-              }
-            }
-          });
 
-        }); // ScrollArea
-        if let Some(images) = game_images {
-          if let Some(logo) = &images.logo {
-            let logo_size_pre = if logo.size.x >= logo.size.y {
-              // wider than it is tall, scale based on X as max
-              let mult_frac = 320.0 / logo.size.x;
-              logo.size.y * mult_frac
+        });
+        });
+        ui.vertical(|ui| {
+        puffin::profile_scope!("description");
+        
+        ui.style_mut().spacing.item_spacing = vec2(5.0,5.0);
+        
+        let req_width = ((ui.available_size_before_wrap().x - avoid_scrollbar_margin.right) - 5.0) / 2.0;
+        ui.horizontal(|sysreq| {
+            puffin::profile_scope!("system requirements");
+            if let Some(details) = game_details {
+
+            sysreq.vertical(|min| {
+                puffin::profile_scope!("minimum");
+                min.set_min_width(req_width);
+                min.set_max_width(req_width);
+                min.heading(&app.locale.localization.games_view.details.min_system_req);
+                egui_demo_lib::easy_mark::easy_mark(min, &details.system_requirements_min);
+            });
+            sysreq.vertical(|rec| {
+                puffin::profile_scope!("recommended");
+                rec.set_min_width(req_width);
+                rec.set_max_width(req_width);
+                rec.heading(&app.locale.localization.games_view.details.rec_system_req);
+                egui_demo_lib::easy_mark::easy_mark(rec, &details.system_requirements_rec);
+            });
             } else {
-              // taller than it is wide, scale based on Y
-              // fringe edge case, here in case EA decides they want to pull something really fucking stupid
-              0.0 // TODO:: CALCULATE IT
-            };
-            let frac2 = logo_transition_frac.clone();
-            let logo_size = vec2(egui::lerp(320.0..=160.0, frac2), egui::lerp(logo_size_pre..=(logo_size_pre/2.0), frac2));
-            let logo_rect = Rect::from_min_max(
-              Pos2 { x: (egui::lerp(hero_rect.min.x..=hero_rect.max.x-180.0, frac2)), y: (hero_rect.min.y) },
-              Pos2 { x: (egui::lerp(hero_rect.max.x..=hero_rect.max.x-20.0, frac2)), y: (egui::lerp(hero_rect.max.y..=hero_rect.min.y+80.0, frac2)) }
-            );
-            ui.put(logo_rect, egui::Image::new((logo.renderable, logo_size)));
+
+            sysreq.vertical(|min| {
+                puffin::profile_scope!("minimum skeleton");
+                min.set_min_width(req_width);
+                min.set_max_width(req_width);
+                
+                skeleton_text_block(min, 248.0, 24.0);
+                skeleton_text_block1(min, 20.0,70.0, 13.0);
+                skeleton_text_block1(min, 25.0, 199.0, 13.0);
+                skeleton_text_block1(min, 27.0, 135.0, 13.0);
+                skeleton_text_block1(min, 69.0, 100.0, 13.0);
+                skeleton_text_block1(min, 27.0, 257.0, 13.0);
+                skeleton_text_block1(min, 28.0, 188.0, 13.0);
+                skeleton_text_block1(min, 22.0, 62.0, 13.0);
+            });
+            sysreq.vertical(|rec| {
+                puffin::profile_scope!("recommended skeleton");
+                rec.set_min_width(req_width);
+                rec.set_max_width(req_width);
+
+                skeleton_text_block(rec, 296.0, 24.0);
+                skeleton_text_block1(rec,20.0, 70.0, 13.0);
+                skeleton_text_block1(rec,25.0, 290.0, 13.0);
+                skeleton_text_block1(rec,27.0, 139.0, 13.0);
+                skeleton_text_block1(rec,69.0, 149.0, 13.0);
+                skeleton_text_block1(rec,27.0, 185.0, 13.0);
+                skeleton_text_block1(rec,28.0, 196.0, 13.0);
+                skeleton_text_block1(rec,22.0, 64.0, 13.0);
+            });
             }
-        } else {
-          //ui.put(hero_rect, egui::Label::new("NO LOGO"));
+        });
+
+        ui.horizontal_wrapped(|dlc| {
+            puffin::profile_scope!("dlc");
+            for package in game.dlc {
+                
+                let (rect, response) = dlc.allocate_exact_size(vec2(400.0, 200.0), egui::Sense::click());
+                dlc.painter().rect_filled(rect, Rounding::same(4.0), Color32::from_black_alpha(128));
+                dlc.allocate_ui_at_rect(rect, |dlc| {
+                    let has = match package.product().status() {
+                        maxima::core::service_layer::ServiceOwnershipStatus::Active => true,
+                        maxima::core::service_layer::ServiceOwnershipStatus::Disabled => false,
+                    };
+
+                    dlc.heading(format!("{}", package.offer().display_name()));
+                });
+            }
+        });
+
+        {
+            puffin::profile_scope!("filler");
+            for _idx in 0..75 {
+            ui.heading("");
+            }
         }
-      }) // Vertical
-    }); // ID
+        });
+
+    }); // ScrollArea
+    if let Some(images) = game_images {
+        if let Some(logo) = &images.logo {
+        let logo_size_pre = if logo.size.x >= logo.size.y {
+            // wider than it is tall, scale based on X as max
+            let mult_frac = 320.0 / logo.size.x;
+            logo.size.y * mult_frac
+        } else {
+            // taller than it is wide, scale based on Y
+            // fringe edge case, here in case EA decides they want to pull something really fucking stupid
+            0.0 // TODO:: CALCULATE IT
+        };
+        let frac2 = logo_transition_frac.clone();
+        let logo_size = vec2(egui::lerp(320.0..=160.0, frac2), egui::lerp(logo_size_pre..=(logo_size_pre/2.0), frac2));
+        let logo_rect = Rect::from_min_max(
+            Pos2 { x: (egui::lerp(hero_rect.min.x..=hero_rect.max.x-180.0, frac2)), y: (hero_rect.min.y) },
+            Pos2 { x: (egui::lerp(hero_rect.max.x..=hero_rect.max.x-20.0, frac2)), y: (egui::lerp(hero_rect.max.y..=hero_rect.min.y+80.0, frac2)) }
+        );
+        ui.put(logo_rect, egui::Image::new((logo.renderable, logo_size)));
+        }
+    } else {
+        //ui.put(hero_rect, egui::Label::new("NO LOGO"));
+    }
+    }); // Vertical
+    
 }
 
 fn game_list_button_context_menu(app : &MaximaEguiApp, game : &GameInfo, ui : &mut Ui) {
   ui.add_enabled_ui(app.playing_game.is_none(), |play_button| {
     if play_button.button("▶ Play").clicked() {
-      let _ = app.backend.backend_commander.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.clone()));
+      let settings = app.settings.game_settings.get(&game.slug);
+      let settings = if let Some(settings) = settings {
+        Some(settings.to_owned())
+      } else { None };
+      let _ = app.backend.backend_commander.send(crate::bridge_thread::MaximaLibRequest::StartGameRequest(game.clone(), settings));
       play_button.close_menu();
     }
   });
@@ -427,7 +459,7 @@ fn show_game_list_buttons(app : &mut MaximaEguiApp, ui : &mut Ui) {
 
         {
           puffin::profile_scope!("game list filters");
-          filter_chunk.add_sized([260.,20.], egui::text_edit::TextEdit::hint_text(egui::text_edit::TextEdit::singleline(&mut app.game_view_bar.search_buffer), &app.locale.localization.games_view.toolbar.search_bar_hint));
+          filter_chunk.add_sized([260.,20.], egui::text_edit::TextEdit::hint_text(egui::text_edit::TextEdit::singleline(&mut app.game_view_bar.search_buffer).vertical_align(egui::Align::Center), &app.locale.localization.games_view.toolbar.search_bar_hint));
           filter_chunk.horizontal(|filters| {
             let combo_width = 130.0 - filters.spacing().item_spacing.x;
             enum_dropdown(filters, "GameTypeComboBox".to_owned(), &mut app.game_view_bar.genre_filter, combo_width, &app.locale);

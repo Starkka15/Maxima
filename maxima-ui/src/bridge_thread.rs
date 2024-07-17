@@ -1,5 +1,5 @@
 use anyhow::{Ok, Result};
-use egui::{mutex::MutexGuard, Context};
+use egui::Context;
 use log::info;
 
 use std::{
@@ -17,7 +17,7 @@ use crate::{
         game_images::game_images_request, get_friends::get_friends_request,
         get_games::get_games_request, get_user_avatar::get_user_avatar_request,
         login_creds::login_creds, login_oauth::login_oauth, start_game::start_game_request,
-    }, event_thread::{EventThread, MaximaEventRequest, MaximaEventResponse}, ui_image::UIImage, views::friends_view::UIFriend, GameDetails, GameInfo, GameUIImages
+    }, event_thread::{EventThread, MaximaEventRequest, MaximaEventResponse}, ui_image::UIImage, views::friends_view::UIFriend, GameDetails, GameInfo, GameSettings, GameUIImages
 };
 
 pub struct InteractThreadLoginResponse {
@@ -27,6 +27,7 @@ pub struct InteractThreadLoginResponse {
 
 pub struct InteractThreadGameListResponse {
     pub game: GameInfo,
+    pub settings: GameSettings
 }
 
 pub struct InteractThreadFriendListResponse {
@@ -71,7 +72,7 @@ pub enum MaximaLibRequest {
     GetUserAvatarRequest(String, String),
     GetGameImagesRequest(String),
     GetGameDetailsRequest(String),
-    StartGameRequest(GameInfo),
+    StartGameRequest(GameInfo, Option<GameSettings>),
     InstallGameRequest(String, PathBuf),
     LocateGameRequest(String, String),
     ShutdownRequest,
@@ -104,7 +105,7 @@ pub struct BridgeThread {
 }
 
 impl BridgeThread {
-    fn update_queue(mut content_manager: &ContentManager, backend_responder: Sender<MaximaLibResponse>) {
+    fn update_queue(content_manager: &ContentManager, backend_responder: Sender<MaximaLibResponse>) {
         let current = if let Some(now) = content_manager.queue().current() {
             Some(now.offer_id().to_owned())
         }else {
@@ -185,7 +186,7 @@ impl BridgeThread {
             }
         }
 
-        let ev_thread = EventThread::new(&ctx.clone(), maxima_arc.clone(), rtm_cmd_listener, rtm_responder);
+        let _ = EventThread::new(&ctx.clone(), maxima_arc.clone(), rtm_cmd_listener, rtm_responder);
 
         let mut future  = SystemTime::now();
         future = future.checked_add(Duration::from_millis(50)).unwrap();
@@ -284,7 +285,7 @@ impl BridgeThread {
                     }
                     .await?;
                 }
-                MaximaLibRequest::LocateGameRequest(slug, path) => {
+                MaximaLibRequest::LocateGameRequest(_, path) => {
                     #[cfg(unix)]
                     maxima::core::launch::mx_linux_setup().await?;
                     let mut path = path;
@@ -318,8 +319,8 @@ impl BridgeThread {
                     .build()?;
                     maxima.content_manager().add_install(game).await?;
                 }
-                MaximaLibRequest::StartGameRequest(info) => {
-                    start_game_request(maxima_arc.clone(), info).await;
+                MaximaLibRequest::StartGameRequest(info, settings) => {
+                    start_game_request(maxima_arc.clone(), info, settings).await;
                 }
                 MaximaLibRequest::ShutdownRequest => break 'outer Ok(()), //TODO: kill the bridge thread
             }

@@ -4,11 +4,10 @@ use clap::{arg, command, Parser};
 use egui::{pos2, Layout, ViewportBuilder, Widget};
 use egui::style::{ScrollStyle, Spacing};
 use egui::Style;
-use log::{error, info, warn};
+use log::{error, warn};
 use maxima::core::library::OwnedOffer;
 use views::downloads_view::{downloads_view, QueuedDownload};
 use views::undefinied_view::coming_soon_view;
-use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::default::Default;
 use std::path::PathBuf;
@@ -26,7 +25,6 @@ use egui_extras::{RetainedImage, Size, StripBuilder};
 use egui_glow::glow;
 
 use bridge_thread::{BridgeThread, InteractThreadLocateGameResponse};
-use event_thread::EventThread;
 
 use app_bg_renderer::AppBgRenderer;
 use fs::image_loader::ImageLoader;
@@ -222,12 +220,23 @@ pub enum GameDetailsWrapper {
     Available(GameDetails),
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct GameSettings {
-    cloud_saves: Option<bool>,
+    cloud_saves: bool,
     launch_args: String,
     exe_override: String,
 }
+
+impl GameSettings {
+    pub fn new() -> Self {
+        Self {
+            cloud_saves: true,
+            launch_args: String::new(),
+            exe_override: String::new()
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct GameInfo {
     /// Origin slug of the game
@@ -242,7 +251,7 @@ pub struct GameInfo {
     details: GameDetailsWrapper,
     dlc: Vec<OwnedOffer>,
     installed: bool,
-    settings: GameSettings,
+    has_cloud_saves: bool,
 }
 
 pub struct InstallModalState {
@@ -254,27 +263,13 @@ pub struct InstallModalState {
 }
 
 impl InstallModalState {
-    pub fn new() -> Self {
+    pub fn new(settings: &FrontendSettings) -> Self {
         Self {
             locate_path: String::new(),
-            install_folder: String::new(),
+            install_folder: settings.default_install_folder.clone(),
             locating: false,
             locate_response: None,
             should_close: false,
-        }
-    }
-}
-
-pub struct SettingsModalState {
-    cloud_saves: bool,
-    launch_args: String,
-}
-
-impl SettingsModalState {
-    pub fn new() -> Self {
-        Self {
-            cloud_saves: true,
-            launch_args: String::new()
         }
     }
 }
@@ -340,6 +335,23 @@ pub struct MaximaEguiApp {
     install_queue: HashMap<String, QueuedDownload>,
     /// State for installer modal
     installer_state: InstallModalState,
+    /// User Settings for the frontend
+    settings: FrontendSettings,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct FrontendSettings {
+    default_install_folder: String,
+    game_settings: HashMap<String, GameSettings>
+}
+
+impl FrontendSettings {
+    pub fn new() -> Self {
+        Self {
+            default_install_folder: String::new(),
+            game_settings: HashMap::new(),
+        }
+    }
 }
 
 const F9B233: Color32 = Color32::from_rgb(249, 178, 51);
@@ -434,6 +446,9 @@ impl MaximaEguiApp {
         #[cfg(debug_assertions)]
         cc.egui_ctx.set_debug_on_hover(args.debug);
 
+        let settings: FrontendSettings = if let Some(storage) = cc.storage {
+            eframe::get_value(storage, "settings").unwrap_or(FrontendSettings::new())
+        } else { FrontendSettings::new() };
         
         let _user_pfp =
             Rc::new(RetainedImage::from_image_bytes("Timothy Dean Sweeney", include_bytes!("../res/usericon_tmp.png")).expect("yeah"));
@@ -480,7 +495,8 @@ impl MaximaEguiApp {
             playing_game: None,
             installing_now: None,
             install_queue: HashMap::new(),
-            installer_state: InstallModalState::new(),
+            installer_state: InstallModalState::new(&settings),
+            settings,
         }
     }
 }
@@ -586,7 +602,35 @@ fn tab_button(ui: &mut Ui, edit_var: &mut PageType, page: PageType, label: &str)
     }
 }
 
+// god-awful macro to do something incredibly simple because apparently wrapping it in a function has rustc fucking implode
+// say what you want about C++ footguns but rust is the polar fucking opposite, shooting you in the head for doing literally anything
+macro_rules! set_app_modal {
+    ($arg1:expr, $arg2:expr) => {
+        if let Some(modal) = $arg2 {
+            match modal {
+                PopupModal::GameSettings(slug) => {
+                    if $arg1.settings.game_settings.get(&slug).is_none() {
+                        $arg1.settings.game_settings.insert(slug.clone(), crate::GameSettings::new());
+                    }
+                },
+                PopupModal::GameInstall(_) => {
+                    $arg1.installer_state = InstallModalState::new(&$arg1.settings);
+                },
+            }
+            $arg1.modal = $arg2;
+        } else {
+            $arg1.modal = None;
+        }
+    };
+}
+
+pub(crate) use set_app_modal;
+
 impl eframe::App for MaximaEguiApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, "settings", &self.settings);
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         puffin::profile_function!();
         bridge_processor::frontend_processor(self, ctx);
@@ -638,56 +682,58 @@ impl eframe::App for MaximaEguiApp {
                                 });
                             }
                             InProgressLoginType::UsernamePass => {
-                                ui.set_enabled(!self.credential_login_in_progress);
-                                ui.vertical_centered(|ui| {
-                                    ui.add_sized(
-                                        [260., 30.],
-                                        egui::text_edit::TextEdit::hint_text(
-                                            egui::text_edit::TextEdit::singleline(
-                                                &mut self.in_progress_username,
-                                            ),
-                                            &self.locale.localization.login.username_box_hint,
-                                        ),
-                                    );
-                                    ui.add_sized(
-                                        [260., 30.],
-                                        egui::text_edit::TextEdit::hint_text(
-                                            egui::text_edit::TextEdit::singleline(
-                                                &mut self.in_progress_password,
-                                            )
-                                            .password(true),
-                                            &self.locale.localization.login.password_box_hint,
-                                        ),
-                                    );
-                                    ui.heading(
-                                        egui::RichText::new(&self.in_progress_credential_status)
-                                            .color(Color32::RED),
-                                    );
-                                    if ui
-                                        .add_sized(
+                                ui.add_enabled_ui(!self.credential_login_in_progress, |ui| {
+                                    ui.vertical_centered(|ui| {
+                                        ui.add_sized(
                                             [260., 30.],
-                                            egui::Button::new(
-                                                egui::RichText::new(
-                                                    &self.locale.localization.login.credential_confirm,
-                                                )
-                                                .size(25.0),
+                                            egui::text_edit::TextEdit::hint_text(
+                                                egui::text_edit::TextEdit::singleline(
+                                                    &mut self.in_progress_username,
+                                                ).vertical_align(egui::Align::Center),
+                                                &self.locale.localization.login.username_box_hint,
                                             ),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.backend
-                                            .backend_commander
-                                            .send(
-                                                bridge_thread::MaximaLibRequest::LoginRequestUserPass(
-                                                    self.in_progress_username.clone(),
-                                                    self.in_progress_password.clone(),
+                                        );
+                                        ui.add_sized(
+                                            [260., 30.],
+                                            egui::text_edit::TextEdit::hint_text(
+                                                egui::text_edit::TextEdit::singleline(
+                                                    &mut self.in_progress_password,
+                                                )
+                                                .password(true)
+                                                .vertical_align(egui::Align::Center),
+                                                &self.locale.localization.login.password_box_hint,
+                                            ),
+                                        );
+                                        ui.heading(
+                                            egui::RichText::new(&self.in_progress_credential_status)
+                                                .color(Color32::RED),
+                                        );
+                                        if ui
+                                            .add_sized(
+                                                [260., 30.],
+                                                egui::Button::new(
+                                                    egui::RichText::new(
+                                                        &self.locale.localization.login.credential_confirm,
+                                                    )
+                                                    .size(25.0),
                                                 ),
                                             )
-                                            .unwrap();
-                                        self.credential_login_in_progress = true;
-                                        self.in_progress_credential_status =
-                                            self.locale.localization.login.credential_waiting.clone();
-                                    }
+                                            .clicked()
+                                        {
+                                            self.backend
+                                                .backend_commander
+                                                .send(
+                                                    bridge_thread::MaximaLibRequest::LoginRequestUserPass(
+                                                        self.in_progress_username.clone(),
+                                                        self.in_progress_password.clone(),
+                                                    ),
+                                                )
+                                                .unwrap();
+                                            self.credential_login_in_progress = true;
+                                            self.in_progress_credential_status =
+                                                self.locale.localization.login.credential_waiting.clone();
+                                        }
+                                    });
                                 });
                             }
                         }
@@ -834,10 +880,10 @@ impl eframe::App for MaximaEguiApp {
                                         puffin::profile_scope!("you");
                                         //profile.painter().rect_filled(profile.available_rect_before_wrap(), Rounding::ZERO, Color32::from_white_alpha(20));
                                         profile.with_layout(
-                                            egui::Layout::right_to_left(
-                                                egui::Align::Center,
-                                            ),
-                                            |rtl| {
+                                            egui::Layout::right_to_left(egui::Align::Center), |rtl| {
+                                                rtl.style_mut().spacing.item_spacing.x = 0.0;
+                                                rtl.allocate_space(vec2(2.0, 2.0));
+                                                rtl.style_mut().spacing.item_spacing.x = APP_MARGIN.x;
                                                 let img_response = rtl.image((self.user_pfp_renderable, vec2(36.0, 36.0)));
                                                 let stroke = Stroke::new(2.0, {
                                                     if self.playing_game.is_some() {
@@ -846,7 +892,7 @@ impl eframe::App for MaximaEguiApp {
                                                         Color32::GREEN
                                                     }
                                                 });
-                                                rtl.painter().rect(img_response.rect.expand(0.0), Rounding::same(4.0), Color32::TRANSPARENT, stroke);
+                                                rtl.painter().rect(img_response.rect.expand(1.0), Rounding::same(4.0), Color32::TRANSPARENT, stroke);
                                                 
                                                 rtl.label(
                                                     egui::RichText::new(self.user_name.clone())
@@ -889,7 +935,6 @@ impl eframe::App for MaximaEguiApp {
                         });
                     });
                     let mut clear = false;
-                    let mut clear_with: Option<PopupModal> = None;
                     if let Some(modal) = &self.modal {
                         ui.allocate_ui_at_rect(app_rect, |contents| {
 
@@ -916,28 +961,26 @@ impl eframe::App for MaximaEguiApp {
                                         });
                                         ui.separator();
                                         if game.installed {
-                                            if let Some(mut cloud_saves) = game.settings.cloud_saves {
-                                                ui.add_enabled(false, egui::Checkbox::new(&mut cloud_saves, "Cloud Saves"));
-                                            } else {
-                                                ui.add_enabled(false, egui::Checkbox::new(&mut false, "Cloud Saves"));
+                                            if let Some(settings) = self.settings.game_settings.get_mut(&game.slug) {
+                                                ui.add_enabled(/* game.has_cloud_saves */ false, egui::Checkbox::new(&mut settings.cloud_saves, "Cloud Saves"));
+                                                
+                                                ui.label("Launch Arguments:");
+                                                ui.add_sized(vec2(ui.available_width(), ui.style().spacing.interact_size.y), egui::TextEdit::singleline(&mut settings.launch_args).vertical_align(egui::Align::Center));
+
+                                                ui.separator();
+
+
+                                                let button_size = vec2(100.0, 30.0);
+
+                                                ui.label("Executable Override");
+                                                ui.horizontal(|ui| {
+                                                    let size = vec2(500.0 - (24.0 + ui.style().spacing.item_spacing.x), 30.0);
+                                                    ui.add_sized(size, egui::TextEdit::singleline(&mut settings.exe_override).vertical_align(egui::Align::Center));
+                                                    ui.add_sized(button_size, egui::Button::new("BROWSE"));
+                                                });
+
+                                                ui.separator();
                                             }
-                                            
-                                            ui.label("Launch Arguments:");
-                                            ui.add_sized(vec2(ui.available_width(), ui.style().spacing.interact_size.y), egui::TextEdit::singleline(&mut game.settings.launch_args));
-
-                                            ui.separator();
-
-
-                                            let button_size = vec2(100.0, 30.0);
-
-                                            ui.label("Executable Override");
-                                            ui.horizontal(|ui| {
-                                                let size = vec2(500.0 - (24.0 + ui.style().spacing.item_spacing.x), 30.0);
-                                                ui.add_sized(size, egui::TextEdit::singleline(&mut game.settings.exe_override));
-                                                ui.add_sized(button_size, egui::Button::new("BROWSE"));
-                                            });
-
-                                            ui.separator();
 
                                             ui.button("Uninstall");
                                         } else {
@@ -1002,12 +1045,15 @@ impl eframe::App for MaximaEguiApp {
                                         } else {
                                             ui.horizontal(|ui| {
                                                 let size = vec2(400.0 - (24.0 + ui.style().spacing.item_spacing.x*2.0), 30.0);
-                                                ui.add_sized(size, egui::TextEdit::singleline(&mut self.installer_state.locate_path));
+                                                ui.add_sized(size, egui::TextEdit::singleline(&mut self.installer_state.locate_path).vertical_align(egui::Align::Center));
                                                 ui.add_sized(button_size, egui::Button::new("BROWSE"));
-                                                if ui.add_sized(button_size, egui::Button::new("LOCATE")).clicked() {
-                                                    self.backend.backend_commander.send(bridge_thread::MaximaLibRequest::LocateGameRequest(slug.clone(), self.installer_state.locate_path.clone())).unwrap();
-                                                    self.installer_state.locating = true;
-                                                }
+                                                ui.add_enabled_ui(PathBuf::from(&self.installer_state.locate_path).exists(), |ui| {
+
+                                                    if ui.add_sized(button_size, egui::Button::new("LOCATE")).clicked() {
+                                                        self.backend.backend_commander.send(bridge_thread::MaximaLibRequest::LocateGameRequest(slug.clone(), self.installer_state.locate_path.clone())).unwrap();
+                                                        self.installer_state.locating = true;
+                                                    }
+                                                });
                                             });
                                         }
                                         ui.label("");
@@ -1015,7 +1061,7 @@ impl eframe::App for MaximaEguiApp {
                                         ui.add_enabled_ui(!self.installer_state.locating, |ui| {
                                             let size = vec2(500.0 - (24.0 + ui.style().spacing.item_spacing.x*2.0), 30.0);
                                             ui.horizontal(|ui| {
-                                                ui.add_sized(size, egui::TextEdit::singleline(&mut self.installer_state.install_folder));
+                                                ui.add_sized(size, egui::TextEdit::singleline(&mut self.installer_state.install_folder).vertical_align(egui::Align::Center));
                                             });
                                             let path = PathBuf::from(self.installer_state.install_folder.clone());
                                             let valid = path.exists();
@@ -1052,18 +1098,7 @@ impl eframe::App for MaximaEguiApp {
                         });
                     }
                     if clear {
-                        // reset it for the next time
-                        match &self.modal {
-                            Some(variant) => match variant {
-                                    PopupModal::GameSettings(_) => { },
-                                    PopupModal::GameInstall(_) => {
-                                        self.installer_state = InstallModalState::new();
-                                    },
-                                },
-                            None => {},
-                        }
                         self.modal = None;
-                        
                     }
                 }
             }

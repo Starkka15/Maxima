@@ -61,9 +61,9 @@ impl UIFriend {
 
 const F9B233: Color32 = Color32::from_rgb(249, 178, 51);
 const DARK_GREY: Color32 = Color32::from_rgb(64, 64, 64);
-const PFP_SIZE: f32 = 42.0;
-const PFP_IMG_SIZE: f32 = PFP_SIZE - 4.0;
-
+const PFP_SIZE: f32 = 36.0;
+const PFP_CORNER_RADIUS: f32 = 2.0;
+const PFP_ELEMENT_SIZE: f32 = (PFP_SIZE + PFP_CORNER_RADIUS * 2.0);
 const FRIEND_HIGHLIGHT_ROUNDING: Rounding = Rounding { nw: 6.0, ne: 4.0, sw: 6.0, se: 4.0 }; // the status border is flawed somehow, this "fixes" it slightly more than if i didn't
 
 pub fn friends_view(app : &mut MaximaEguiApp, ui: &mut Ui) {
@@ -84,8 +84,8 @@ pub fn friends_view(app : &mut MaximaEguiApp, ui: &mut Ui) {
   app.force_friends = false; // reset, it won't go away without this
   
   let hovering_friends = context.animate_bool_with_time(egui::Id::new("FriendsListWidthAnimator"), friend_rect_hovered, ui.style().animation_time*2.0);
-  let hover_diff = 300.0 - PFP_SIZE;
-  app.friends_width = PFP_SIZE + (hovering_friends * hover_diff);
+  let hover_diff = 300.0 - PFP_ELEMENT_SIZE;
+  app.friends_width = PFP_ELEMENT_SIZE + (hovering_friends * hover_diff);
 
   let top_bar = egui::Frame::default()
   //.fill(Color32::from_gray(255))
@@ -96,38 +96,38 @@ pub fn friends_view(app : &mut MaximaEguiApp, ui: &mut Ui) {
   top_bar.show(ui, |ui| {
     ui.style_mut().spacing.item_spacing = vec2(5.0,5.0);
     ui.vertical(|ui| {
-      
-      ui.vertical(|ui| { //separating this out for styling reasons
-        puffin::profile_scope!("filters");
-        ui.visuals_mut().extreme_bg_color = Color32::TRANSPARENT;
+      if friend_rect_hovered { //TODO : smooth transition
+        ui.vertical(|ui| { //separating this out for styling reasons
+          puffin::profile_scope!("filters");
+          ui.visuals_mut().extreme_bg_color = Color32::TRANSPARENT;
 
-        ui.visuals_mut().widgets.inactive.expansion = 0.0;
-        ui.visuals_mut().widgets.inactive.bg_fill = Color32::TRANSPARENT;
-        ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-        ui.visuals_mut().widgets.inactive.fg_stroke = Stroke::new(2.0, Color32::WHITE);
-        ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::new(2.0, DARK_GREY);
-        ui.visuals_mut().widgets.inactive.rounding = Rounding::same(2.0);
+          ui.visuals_mut().widgets.inactive.expansion = 0.0;
+          ui.visuals_mut().widgets.inactive.bg_fill = Color32::TRANSPARENT;
+          ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+          ui.visuals_mut().widgets.inactive.fg_stroke = Stroke::new(2.0, Color32::WHITE);
+          ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::new(2.0, DARK_GREY);
+          ui.visuals_mut().widgets.inactive.rounding = Rounding::same(2.0);
 
-        ui.visuals_mut().widgets.active.bg_fill = Color32::TRANSPARENT;
-        ui.visuals_mut().widgets.active.weak_bg_fill = Color32::TRANSPARENT;
-        ui.visuals_mut().widgets.active.fg_stroke = Stroke::new(2.0, Color32::WHITE);
-        ui.visuals_mut().widgets.active.bg_stroke = Stroke::new(2.0, DARK_GREY);
-        ui.visuals_mut().widgets.active.rounding = Rounding::same(2.0);
+          ui.visuals_mut().widgets.active.bg_fill = Color32::TRANSPARENT;
+          ui.visuals_mut().widgets.active.weak_bg_fill = Color32::TRANSPARENT;
+          ui.visuals_mut().widgets.active.fg_stroke = Stroke::new(2.0, Color32::WHITE);
+          ui.visuals_mut().widgets.active.bg_stroke = Stroke::new(2.0, DARK_GREY);
+          ui.visuals_mut().widgets.active.rounding = Rounding::same(2.0);
 
-        ui.visuals_mut().widgets.hovered.bg_fill = Color32::TRANSPARENT;
-        ui.visuals_mut().widgets.hovered.weak_bg_fill = Color32::TRANSPARENT;
-        ui.visuals_mut().widgets.hovered.fg_stroke = Stroke::new(2.0, F9B233);
-        ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::new(2.0, F9B233);
-        ui.visuals_mut().widgets.hovered.rounding = Rounding::same(2.0);
+          ui.visuals_mut().widgets.hovered.bg_fill = Color32::TRANSPARENT;
+          ui.visuals_mut().widgets.hovered.weak_bg_fill = Color32::TRANSPARENT;
+          ui.visuals_mut().widgets.hovered.fg_stroke = Stroke::new(2.0, F9B233);
+          ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::new(2.0, F9B233);
+          ui.visuals_mut().widgets.hovered.rounding = Rounding::same(2.0);
 
-        ui.visuals_mut().widgets.open.bg_fill = DARK_GREY;
-        ui.visuals_mut().widgets.open.weak_bg_fill = DARK_GREY;
-        ui.visuals_mut().widgets.open.fg_stroke = Stroke::new(2.0, Color32::WHITE);
-        ui.visuals_mut().widgets.open.bg_stroke = Stroke::new(2.0, DARK_GREY);
-        ui.visuals_mut().widgets.open.rounding = Rounding::same(2.0);
+          ui.visuals_mut().widgets.open.bg_fill = DARK_GREY;
+          ui.visuals_mut().widgets.open.weak_bg_fill = DARK_GREY;
+          ui.visuals_mut().widgets.open.fg_stroke = Stroke::new(2.0, Color32::WHITE);
+          ui.visuals_mut().widgets.open.bg_stroke = Stroke::new(2.0, DARK_GREY);
+          ui.visuals_mut().widgets.open.rounding = Rounding::same(2.0);
 
-        if friend_rect_hovered { //TODO : smooth transition
-          if ui.add_sized([ui.available_width(), 20.0], egui::TextEdit::hint_text(egui::text_edit::TextEdit::singleline(&mut app.friends_view_bar.search_buffer), "Search friends list")).has_focus() {
+        
+          if ui.add_sized([ui.available_width(), 20.0], egui::TextEdit::hint_text(egui::text_edit::TextEdit::singleline(&mut app.friends_view_bar.search_buffer).vertical_align(egui::Align::Center), "Search friends list")).has_focus() {
             app.force_friends = true;
           }
           let combo_width = (ui.available_width() / 2.0) - ui.spacing().item_spacing.x; //a lot of accounting for shit when i'm just gonna make it a fixed width anyway
@@ -138,8 +138,8 @@ pub fn friends_view(app : &mut MaximaEguiApp, ui: &mut Ui) {
               app.force_friends = true;
             }
           });
-        }
-      });
+        });
+      }
       
       
 
@@ -184,14 +184,13 @@ pub fn friends_view(app : &mut MaximaEguiApp, ui: &mut Ui) {
       .id_source("FriendsListFriendListScrollArea") //hmm yes, the friends list is made of friends list
       .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
       .show(ui, |ui| {
-        ui.allocate_space(vec2(ui.available_width(), 0.0));
         ui.set_clip_rect(clip_rect);
         puffin::profile_scope!("friends");
         let mut marge = Margin::same(0.0);
         marge.bottom = 4.5;
 
-        let button_height = PFP_IMG_SIZE * 0.6;
-        let button_gap = PFP_IMG_SIZE * 0.2;
+        let button_height = PFP_ELEMENT_SIZE * 0.6;
+        let button_gap = PFP_ELEMENT_SIZE * 0.2;
         let width = ui.available_width() - if friend_rect_hovered { ui.style().spacing.scroll.bar_inner_margin + ui.style().spacing.scroll.bar_width } else { 0.0 };
         for friend in friends {
           puffin::profile_scope!("friend");
@@ -245,9 +244,9 @@ pub fn friends_view(app : &mut MaximaEguiApp, ui: &mut Ui) {
             },
           };
 
-          let (f_res, f_painter) = ui.allocate_painter(vec2(width, 2.0 + PFP_IMG_SIZE + ((button_height + button_gap) * how_buttons)), egui::Sense::click());
+          let (f_res, f_painter) = ui.allocate_painter(vec2(width, 2.0 + PFP_ELEMENT_SIZE + ((button_height + button_gap) * how_buttons)), egui::Sense::click());
           let mut highlight_rect = f_res.rect.clone();
-          highlight_rect.set_height(2.0 + PFP_IMG_SIZE);
+          highlight_rect.set_height(2.0 + PFP_ELEMENT_SIZE);
           if f_res.clicked() {
             if buttons {
               app.friends_view_bar.friend_sel = String::new();
@@ -257,7 +256,7 @@ pub fn friends_view(app : &mut MaximaEguiApp, ui: &mut Ui) {
           }
 
           if how_buttons > 0.0 {
-            let size = vec2((width - (ui.style().spacing.item_spacing.x * 2.0)) / 3.0, PFP_IMG_SIZE * 0.6);
+            let size = vec2((width - (ui.style().spacing.item_spacing.x * 2.0)) / 3.0, PFP_ELEMENT_SIZE * 0.6);
 
             let rect_0 = Rect {
               min: pos2(f_res.rect.min.x, f_res.rect.max.y - size.y),
@@ -287,14 +286,14 @@ pub fn friends_view(app : &mut MaximaEguiApp, ui: &mut Ui) {
             f_painter.rect_filled(highlight_rect, FRIEND_HIGHLIGHT_ROUNDING, Color32::WHITE);
           }
 
-          let outline_rect = Rect {
-            min: f_res.rect.min + vec2(1.0, 1.0),
-            max: f_res.rect.min + vec2(PFP_IMG_SIZE + 1.0, PFP_IMG_SIZE + 1.0)
+          let pfp_rect = Rect {
+            min: f_res.rect.min + vec2(2.0, 2.0),
+            max: f_res.rect.min + vec2(2.0, 2.0) + vec2(PFP_SIZE, PFP_SIZE)
           };
 
-          let pfp_rect = Rect {
-            min: outline_rect.min + vec2(1.0, 1.0),
-            max: outline_rect.max - vec2(1.0, 1.0)
+          let outline_rect = Rect {
+            min: pfp_rect.min - vec2(1.0, 1.0),
+            max: pfp_rect.max + vec2(1.0, 1.0)
           };
 
           if let Some(pfp) = avatar {
@@ -311,8 +310,8 @@ pub fn friends_view(app : &mut MaximaEguiApp, ui: &mut Ui) {
             Color32::WHITE
           };
 
-          f_painter.text(pfp_rect.center() + vec2(PFP_IMG_SIZE/1.5,  2.0), Align2::LEFT_BOTTOM, &friend.name, FontId::proportional(15.0), text_col);
-          f_painter.text(pfp_rect.center() + vec2(PFP_IMG_SIZE/1.5,  2.0), Align2::LEFT_TOP, friend_status, FontId::proportional(10.0), text_col);
+          f_painter.text(pfp_rect.center() + vec2(PFP_SIZE/1.5,  2.0), Align2::LEFT_BOTTOM, &friend.name, FontId::proportional(15.0), text_col);
+          f_painter.text(pfp_rect.center() + vec2(PFP_SIZE/1.5,  2.0), Align2::LEFT_TOP, friend_status, FontId::proportional(10.0), text_col);
         }
       });
     });

@@ -36,15 +36,17 @@ pub async fn get_games_request(
             details: GameDetailsWrapper::Unloaded,
             dlc: game.extra_offers().clone(),
             installed: game.base_offer().installed().await,
-            settings: crate::GameSettings {
-                //TODO: eventually support cloud saves, Option<bool> for that but for now, keep it disabled in ui!
-                cloud_saves: Some(game.base_offer().offer().has_cloud_save()),
-                launch_args: String::new(),
-                exe_override: String::new(),
-            }
+            has_cloud_saves: game.base_offer().offer().has_cloud_save(),
+        };
+        let settings = crate::GameSettings {
+            //TODO: eventually support cloud saves, the option is here for that but for now, keep it disabled in ui!
+            cloud_saves: true,
+            launch_args: String::new(),
+            exe_override: String::new(),
         };
         let res = MaximaLibResponse::GameInfoResponse(InteractThreadGameListResponse {
             game: game_info,
+            settings
         });
         channel.send(res)?;
 

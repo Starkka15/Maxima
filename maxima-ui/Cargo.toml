@@ -9,7 +9,7 @@ maxima-lib = { path = "../maxima-lib" }
 winapi = { version = "0.3.9", features = [ "memoryapi", "handleapi", "synchapi", "wincon", "consoleapi", "psapi", "wininet", "winerror", "iphlpapi", "tcpmib" ] }
 anyhow = "1.0.71"
 clap = { version = "4.3.8", features = ["derive"] }
-eframe = "0.28.0"
+eframe = { version = "0.28.0", features = [ "persistence" ] }
 egui = "0.28.0"
 egui_extras = {version = "0.28.0", features = [ "svg", "all_loaders" ] }
 image = { version = "0.24.6", features = [ "png", "jpeg" ] }
