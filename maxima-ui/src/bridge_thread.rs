@@ -9,7 +9,7 @@ use std::{
     }, time::{Duration, SystemTime}
 };
 
-use maxima::core::{dip::{DiPManifest, DIP_RELATIVE_PATH}, launch::{linux_setup, ActiveGameContext}, LockedMaxima, Maxima, MaximaOptions, MaximaOptionsBuilder};
+use maxima::core::{dip::{DiPManifest, DIP_RELATIVE_PATH}, launch::ActiveGameContext, LockedMaxima, Maxima, MaximaOptions, MaximaOptionsBuilder};
 
 use crate::{
     bridge::{
@@ -241,7 +241,7 @@ impl BridgeThread {
                 }
                 MaximaLibRequest::LocateGameRequest(slug, path) => {
                     #[cfg(unix)] {        
-                        linux_setup().await?;
+                        maxima::core::launch::linux_setup().await?;
                         let mut path = path;
                         if path.ends_with("/") || path.ends_with("\\") {
                             path.remove(path.len()-1);
