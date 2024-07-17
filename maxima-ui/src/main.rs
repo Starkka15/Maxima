@@ -882,8 +882,8 @@ impl eframe::App for MaximaEguiApp {
                                         profile.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center), |rtl| {
                                                 rtl.style_mut().spacing.item_spacing.x = 0.0;
-                                                rtl.allocate_space(vec2(1.0, 1.0));
-                                                rtl.style_mut().spacing.item_spacing.x = 4.0;
+                                                rtl.allocate_space(vec2(2.0, 2.0));
+                                                rtl.style_mut().spacing.item_spacing.x = APP_MARGIN.x;
                                                 let img_response = rtl.image((self.user_pfp_renderable, vec2(36.0, 36.0)));
                                                 let stroke = Stroke::new(2.0, {
                                                     if self.playing_game.is_some() {
