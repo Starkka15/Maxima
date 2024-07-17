@@ -359,10 +359,10 @@ impl GameLibrary {
         Ok(ServiceGetPreloadedOwnedGamesRequestBuilder::default()
             .is_mac(false)
             .locale(locale.to_owned())
-            .limit(100)
-            .next(((page - 1) * 100).to_string())
+            .limit(1000)
+            .next(((page - 1) * 1000).to_string())
             .r#type(r#type)
-            .entitlement_enabled(Some(entitlement_enabled))
+            .entitlement_enabled(None)
             .storefronts(vec![
                 ServiceStorefront::Ea,
                 ServiceStorefront::Steam,
