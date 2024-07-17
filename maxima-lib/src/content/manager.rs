@@ -228,6 +228,10 @@ impl GameDownloader {
     pub fn bytes_total(&self) -> usize {
         self.total_bytes
     }
+
+    pub fn offer_id(&self) -> &String {
+        &self.offer_id
+    }
 }
 
 #[derive(Getters)]
