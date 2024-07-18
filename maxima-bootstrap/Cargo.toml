@@ -46,5 +46,5 @@ path = "src/main.rs"
 
 [package.metadata.bundle]
 name = "MaximaBootstrap"
-identifier = "dev.armchairdevelopers.MaximaBootstrap"
+identifier = "io.github.ArmchairDevelopers.MaximaBootstrap"
 osx_url_schemes = ["qrc", "link2ea", "origin2"]

@@ -132,11 +132,14 @@ pub fn run_wine_command<I: IntoIterator<Item = T>, T: AsRef<OsStr>>(
     want_output: bool,
 ) -> Result<String> {
     let path = maxima_dir()?.join(format!("wine/bin/{}", program));
+    //let path = PathBuf::from("umu-run");
 
     // Create command with all necessary wine env variables
     let mut binding = Command::new(path);
     let mut child = binding
         .env("WINEPREFIX", wine_prefix_dir()?)
+        //.env("GAMEID", "umu-0")
+        //.env("STORE", "ea")
         .env(
             "WINEDLLOVERRIDES",
             "CryptBase,bcrypt,dxgi,d3d11,d3d12,d3d12core=n,b;winemenubuilder.exe=d",

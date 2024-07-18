@@ -278,7 +278,19 @@ async fn startup() -> Result<()> {
             game_path,
             game_args,
             login,
-        } => start_game(&slug, game_path, game_args, login, maxima_arc.clone()).await,
+        } => {
+            let offer_id = {
+                let mut maxima = maxima_arc.lock().await;
+                let offer = maxima.mut_library().game_by_base_slug(&slug).await;
+                if offer.is_none() {
+                    bail!("No owned offer found for '{}'", slug);
+                }
+
+                offer.unwrap().offer_id().to_owned()
+            };
+
+            start_game(&offer_id, game_path, game_args, login, maxima_arc.clone()).await
+        },
         Mode::ListGames => list_games(maxima_arc.clone()).await,
         Mode::LocateGame { path } => locate_game(maxima_arc.clone(), &path).await,
         Mode::CloudSync { game_slug, write } => {

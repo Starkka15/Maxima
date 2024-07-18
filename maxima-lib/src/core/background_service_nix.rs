@@ -49,7 +49,12 @@ pub fn wine_get_pid(launch_id: &str, name: &str) -> Result<u32> {
         bail!("Failed to find PID");
     }
 
-    let pid = PID_PATTERN.captures(&output).unwrap().get(1).unwrap().as_str();
+    let pid = PID_PATTERN.captures(&output);
+    if pid.is_none() {
+        bail!("No PID pattern");
+    }
+
+    let pid = pid.unwrap().get(1).unwrap().as_str();
     Ok(pid.parse()?)
 }
 

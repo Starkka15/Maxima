@@ -437,6 +437,7 @@ service_layer_type!(AvailableBuild, {
     build_id: String,
     download_type: Option<ServiceDownloadType>,
     game_version: Option<String>,
+    build_release_version: Option<String>,
     build_live_date: Option<String>,
 });
 
@@ -453,6 +454,25 @@ impl ServiceAvailableBuild {
         }
 
         str
+    }
+}
+
+service_layer_type!(AvailableBuilds, {
+    pub builds: Vec<ServiceAvailableBuild>,
+});
+
+impl ServiceAvailableBuilds {
+    pub fn live_build(&self) -> Option<&ServiceAvailableBuild> {
+        self.builds.iter().find(|b| {
+            b.download_type()
+                .as_ref()
+                .unwrap_or(&ServiceDownloadType::None)
+                == &ServiceDownloadType::Live
+        })
+    }
+
+    pub fn build(&self, id: &str) -> Option<&ServiceAvailableBuild> {
+        self.builds.iter().find(|b| b.game_version() == &Some(id.to_owned()))
     }
 }
 
@@ -580,6 +600,7 @@ service_layer_type!(LegacyOffer, {
     display_name: String,
     display_type: String,
     dip_manifest_relative_path: Option<String>,
+    //downloads: Vec<ServiceAvailableBuild>,
     is_downloadable: bool,
     cloud_save_configuration_override: Option<String>,
 });

@@ -6,9 +6,10 @@ use crate::core::{
     auth::storage::LockedAuthStorage,
     cache::DynamicCache,
     service_layer::{
-        ServiceAvailableBuild, ServiceAvailableBuildsRequestBuilder, ServiceDownloadType,
-        ServiceDownloadUrlMetadata, ServiceDownloadUrlRequestBuilder, ServiceLayerClient,
-        SERVICE_REQUEST_AVAILABLEBUILDS, SERVICE_REQUEST_DOWNLOADURL,
+        ServiceAvailableBuild, ServiceAvailableBuilds, ServiceAvailableBuildsBuilder,
+        ServiceAvailableBuildsRequestBuilder, ServiceDownloadUrlMetadata,
+        ServiceDownloadUrlRequestBuilder, ServiceLayerClient, SERVICE_REQUEST_AVAILABLEBUILDS,
+        SERVICE_REQUEST_DOWNLOADURL,
     },
 };
 
@@ -16,26 +17,6 @@ pub mod downloader;
 pub mod manager;
 pub mod zip;
 pub mod zlib;
-
-#[derive(Clone)]
-pub struct ServiceAvailableBuilds {
-    pub builds: Vec<ServiceAvailableBuild>,
-}
-
-impl ServiceAvailableBuilds {
-    pub fn live_build(&self) -> Option<&ServiceAvailableBuild> {
-        self.builds.iter().find(|b| {
-            b.download_type()
-                .as_ref()
-                .unwrap_or(&ServiceDownloadType::None)
-                == &ServiceDownloadType::Live
-        })
-    }
-
-    pub fn build(&self, id: &str) -> Option<&ServiceAvailableBuild> {
-        self.builds.iter().find(|b| b.game_version() == &Some(id.to_owned()))
-    }
-}
 
 pub struct ContentService {
     service_layer: ServiceLayerClient,
@@ -72,7 +53,9 @@ impl ContentService {
             )
             .await?;
 
-        let builds = ServiceAvailableBuilds { builds };
+        let builds = ServiceAvailableBuildsBuilder::default()
+            .builds(builds)
+            .build()?;
         self.request_cache.insert(cache_key, builds.clone());
         Ok(builds)
     }
