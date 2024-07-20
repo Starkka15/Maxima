@@ -1,10 +1,11 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use base64::{engine::general_purpose, Engine};
 use lazy_static::lazy_static;
 use log::debug;
 use regex::Regex;
 use serde::Serialize;
 
+use crate::unix::wine::CommandType;
 use crate::{unix::wine::run_wine_command, util::native::module_path};
 
 lazy_static! {
@@ -23,7 +24,7 @@ pub struct WineInjectArgs {
     pub path: String,
 }
 
-pub fn wine_get_pid(launch_id: &str, name: &str) -> Result<u32> {
+pub async fn wine_get_pid(launch_id: &str, name: &str) -> Result<u32> {
     debug!("Seaching for wine PID for {}", name);
 
     let launch_args = WineGetPidArgs {
@@ -33,7 +34,6 @@ pub fn wine_get_pid(launch_id: &str, name: &str) -> Result<u32> {
 
     let b64 = general_purpose::STANDARD.encode(serde_json::to_string(&launch_args).unwrap());
     let output = run_wine_command(
-        "wine",
         module_path()
             .parent()
             .unwrap()
@@ -43,7 +43,8 @@ pub fn wine_get_pid(launch_id: &str, name: &str) -> Result<u32> {
         Some(vec!["get_pid", b64.as_str()]),
         None,
         true,
-    )?;
+        CommandType::RunInPrefix,
+    ).await?;
 
     if output.contains("Failed to find PID") {
         bail!("Failed to find PID");
@@ -68,7 +69,6 @@ pub async fn request_library_injection(pid: u32, path: &str) -> Result<()> {
 
     let b64 = general_purpose::STANDARD.encode(serde_json::to_string(&launch_args).unwrap());
     run_wine_command(
-        "wine",
         module_path()
             .parent()
             .unwrap()
@@ -78,7 +78,8 @@ pub async fn request_library_injection(pid: u32, path: &str) -> Result<()> {
         Some(vec!["inject", b64.as_str()]),
         None,
         false,
-    )?;
+        CommandType::RunInPrefix,
+    ).await?;
 
     Ok(())
 }

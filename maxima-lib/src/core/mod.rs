@@ -32,7 +32,7 @@ use std::{
     os::raw::c_char,
     path::PathBuf,
     time::Duration,
-    {io, io::Read},
+    io,
 };
 
 use anyhow::{bail, Result};
@@ -41,7 +41,6 @@ use derive_builder::Builder;
 use derive_getters::Getters;
 use log::{error, info, warn};
 use strum_macros::IntoStaticStr;
-use sysinfo::{Pid, PidExt, ProcessExt, ProcessStatus, System, SystemExt};
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -421,21 +420,14 @@ impl Maxima {
     async fn update_playing_status(&mut self) {
         if self.lsx_connections > 0
             || self.playing.is_none()
-            || !self.playing.as_ref().unwrap().started()
         {
             return;
         }
 
-        let playing = self.playing.as_ref().unwrap();
-        if let Some(pid) = playing.process().id() {
-            let sys = System::new_all();
-            let proc = sys.process(Pid::from_u32(pid));
-
-            if let Some(proc) = proc {
-                if proc.status() == ProcessStatus::Run {
-                    return;
-                }
-            }
+        let playing = self.playing.as_mut().unwrap();
+        match playing.process_mut().try_wait() {
+            Ok(None) => return,
+            _ => (),
         }
 
         info!("Game stopped");
@@ -450,7 +442,7 @@ impl Maxima {
                     error!("Failed to obtain CloudSync write lock: {}", err);
                 } else {
                     let lock = result.unwrap();
-                    
+
                     let result = lock.sync_files().await;
                     if let Err(err) = result {
                         error!("Failed to write to CloudSync: {}", err);

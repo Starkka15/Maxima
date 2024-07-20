@@ -2,7 +2,8 @@
 
 //extern crate windows_service;
 
-use std::{env::current_exe, process::Command};
+use std::env::current_exe;
+use tokio::process::Command;
 
 use anyhow::{bail, Result};
 
@@ -89,19 +90,26 @@ fn service_setup() -> Result<()> {
 }
 
 #[cfg(windows)]
-fn platform_launch(args: BootstrapLaunchArgs) -> Result<()> {
+async fn platform_launch(args: BootstrapLaunchArgs) -> Result<()> {
     let mut binding = Command::new(args.path);
     let child = binding.args(args.args);
 
-    let status = child.spawn()?.wait()?;
+    let status = child.spawn()?.wait().await?;
     bail!("{}", status.code().unwrap());
 }
 
 #[cfg(unix)]
-fn platform_launch(args: BootstrapLaunchArgs) -> Result<()> {
+async fn platform_launch(args: BootstrapLaunchArgs) -> Result<()> {
     use maxima::unix::wine::run_wine_command;
+    use maxima::unix::wine::CommandType;
 
-    run_wine_command("wine", args.path, Some(args.args), None, false)?;
+    run_wine_command(
+        args.path,
+        Some(args.args),
+        None,
+        false,
+        CommandType::WaitForExitAndRun,
+    ).await?;
 
     Ok(())
 }
@@ -141,7 +149,7 @@ async fn run(args: &[String]) -> Result<bool> {
             );
             child.env("KYBER_INTERFACE_PORT", "3005");
             child.args(["--mode", "launch", "--offer-id", "Origin.OFR.50.0002148"]);
-            child.spawn()?.wait()?;
+            child.spawn()?.wait().await?;
 
             return Ok(true);
         }
@@ -162,7 +170,7 @@ async fn run(args: &[String]) -> Result<bool> {
             "launch" => {
                 let decoded = general_purpose::STANDARD.decode(&args[1])?;
                 let launch_args: BootstrapLaunchArgs = serde_json::from_slice(&decoded)?;
-                platform_launch(launch_args)?;
+                platform_launch(launch_args).await?;
 
                 true
             }

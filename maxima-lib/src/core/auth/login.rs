@@ -9,10 +9,8 @@ use crate::core::clients::JUNO_PC_CLIENT_ID;
 use super::context::AuthContext;
 
 lazy_static! {
-    static ref HTTP_PATTERN: Regex = Regex::new(
-        r"^([A-Za-z]+) +(.*) +(HTTP/[0-9][.][0-9])"
-    )
-    .unwrap();
+    static ref HTTP_PATTERN: Regex =
+        Regex::new(r"^([A-Za-z]+) +(.*) +(HTTP/[0-9][.][0-9])").unwrap();
 }
 
 pub async fn begin_oauth_login_flow<'a>(context: &mut AuthContext<'a>) -> Result<()> {

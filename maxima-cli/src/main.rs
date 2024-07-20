@@ -1,7 +1,6 @@
 use clap::{Parser, Subcommand};
 
 use anyhow::{bail, Result};
-use futures::StreamExt;
 use inquire::{Select, Text};
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
@@ -290,7 +289,7 @@ async fn startup() -> Result<()> {
             };
 
             start_game(&offer_id, game_path, game_args, login, maxima_arc.clone()).await
-        },
+        }
         Mode::ListGames => list_games(maxima_arc.clone()).await,
         Mode::LocateGame { path } => locate_game(maxima_arc.clone(), &path).await,
         Mode::CloudSync { game_slug, write } => {

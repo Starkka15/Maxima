@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-};
+use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{bail, Result};
 use derive_getters::Getters;
@@ -35,6 +32,10 @@ impl OwnedOffer {
     pub async fn installed(&self) -> bool {
         let path =
             parse_registry_path(&self.offer.install_check_override().as_ref().unwrap()).await;
+        // If it wasn't replaced...
+        if path.starts_with("[") {
+            return false;
+        }
         #[cfg(unix)]
         let path = case_insensitive_path(path).await;
         path.exists()
@@ -145,7 +146,9 @@ fn group_offers(products: Vec<OwnedOffer>) -> Vec<OwnedTitle> {
             }
 
             // Ensure it isn't a trial
-            if product.product().product()
+            if product
+                .product()
+                .product()
                 .game_product_user()
                 .game_product_user_trial()
                 .is_some()

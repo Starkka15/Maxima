@@ -11,7 +11,9 @@ use uuid::Uuid;
 use anyhow::{bail, Result};
 
 use crate::{
-    core::cloudsync::CloudSyncLockMode, ooa::{request_and_save_license, LicenseAuth}, util::{registry::bootstrap_path, simple_crypto}
+    core::cloudsync::CloudSyncLockMode,
+    ooa::{request_and_save_license, LicenseAuth},
+    util::{registry::bootstrap_path, simple_crypto},
 };
 
 #[cfg(unix)]
@@ -86,6 +88,10 @@ impl ActiveGameContext {
 
     pub fn set_started(&mut self) {
         self.started = true;
+    }
+
+    pub fn process_mut(&mut self) -> &mut Child {
+        &mut self.process
     }
 }
 
@@ -183,7 +189,10 @@ pub async fn start_game(
             if offer.as_ref().unwrap().offer().has_cloud_save() {
                 info!("Syncing with cloud save...");
 
-                let result = maxima.cloud_sync().obtain_lock(offer.as_ref().unwrap(), CloudSyncLockMode::Read).await;
+                let result = maxima
+                    .cloud_sync()
+                    .obtain_lock(offer.as_ref().unwrap(), CloudSyncLockMode::Read)
+                    .await;
                 if let Err(err) = result {
                     error!("Failed to obtain CloudSync read lock: {}", err);
                 } else {
@@ -195,7 +204,7 @@ pub async fn start_game(
                     } else {
                         info!("Cloud save synced");
                     }
-        
+
                     lock.release().await?;
                 }
             }
@@ -286,27 +295,20 @@ pub async fn start_game(
 
 #[cfg(unix)]
 pub async fn mx_linux_setup() -> Result<()> {
-    use crate::unix::wine::{
-        check_dxvk_validity, check_vkd3d_validity, check_wine_validity, install_wine,
-        setup_wine_registry, wine_install_dxvk, wine_install_vkd3d,
-    };
+    use crate::unix::wine::{check_eac_runtime_validity, check_wine_validity, install_eac, install_wine, setup_wine_registry};
 
     info!("Verifying wine dependencies...");
 
     let skip = std::env::var("MAXIMA_DISABLE_WINE_VERIFICATION").is_ok();
-    if !skip && !check_wine_validity()? {
+    if !skip && !check_wine_validity().await? {
         install_wine().await?;
     }
 
-    setup_wine_registry()?;
-
-    if !skip && !check_dxvk_validity()? {
-        wine_install_dxvk().await?;
+    if !skip && !check_eac_runtime_validity().await? {
+        install_eac().await?;
     }
 
-    if !skip && !check_vkd3d_validity()? {
-        wine_install_vkd3d().await?;
-    }
+    setup_wine_registry().await?;
 
     Ok(())
 }

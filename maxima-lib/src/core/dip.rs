@@ -154,7 +154,7 @@ impl DiPManifest {
     pub async fn run_touchup(&self, install_path: &PathBuf) -> Result<()> {
         use crate::{
             core::launch::mx_linux_setup,
-            unix::wine::{invalidate_mx_wine_registry, run_wine_command},
+            unix::wine::{invalidate_mx_wine_registry, run_wine_command, CommandType},
         };
 
         mx_linux_setup().await?;
@@ -162,7 +162,7 @@ impl DiPManifest {
         let install_path = PathBuf::from(remove_trailing_slash(install_path.to_str().unwrap()));
         let args = self.collect_touchup_args(&install_path);
         let path = install_path.join(&self.touchup.path());
-        run_wine_command("wine64", path, Some(args), None, true)?;
+        run_wine_command(path, Some(args), None, true, CommandType::Run).await?;
 
         invalidate_mx_wine_registry().await;
         Ok(())

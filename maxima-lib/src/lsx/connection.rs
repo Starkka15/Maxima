@@ -163,15 +163,15 @@ pub fn get_os_pid(context: &ActiveGameContext) -> Result<u32> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn get_wine_pid(_launch_id: &str, _name: &str) -> Result<u32> {
+pub async fn get_wine_pid(_launch_id: &str, _name: &str) -> Result<u32> {
     Ok(0)
 }
 
 #[cfg(target_os = "linux")]
-pub fn get_wine_pid(launch_id: &str, name: &str) -> Result<u32> {
+pub async fn get_wine_pid(launch_id: &str, name: &str) -> Result<u32> {
     use crate::core::background_service::wine_get_pid;
 
-    wine_get_pid(launch_id, name)
+    wine_get_pid(launch_id, name).await
 }
 
 pub struct Connection {
@@ -214,7 +214,7 @@ impl Connection {
                     .unwrap()
                     .to_owned();
     
-                    pid = get_wine_pid(&context.launch_id(), &filename);
+                    pid = get_wine_pid(&context.launch_id(), &filename).await;
                 }
             }
         }

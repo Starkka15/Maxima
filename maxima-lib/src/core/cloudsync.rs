@@ -60,13 +60,7 @@ fn home_dir() -> PathBuf {
 #[cfg(unix)]
 fn home_dir() -> PathBuf {
     use crate::unix::wine::wine_prefix_dir;
-
-    let user = match env::var_os("USER") {
-        Some(user) => user,
-        None => "".into(),
-    };
-
-    wine_prefix_dir().unwrap().join("drive_c/users").join(user)
+    wine_prefix_dir().unwrap().join("drive_c/users/steamuser")
 }
 
 fn substitute_paths<P: AsRef<str>>(path: P) -> PathBuf {
@@ -219,10 +213,7 @@ impl<'a> CloudSyncLock<'a> {
             let local_path = &self.manifest.file[i].local_name;
             let path = substitute_paths(local_path);
 
-            let file = OpenOptions::new()
-                .read(true)
-                .open(path.clone())
-                .await;
+            let file = OpenOptions::new().read(true).open(path.clone()).await;
 
             if let Ok(file) = file {
                 let md5 = calc_file_md5(file).await?;
@@ -325,10 +316,7 @@ impl<'a> CloudSyncLock<'a> {
 
         let mut i = 1;
         for path in &self.allowed_files {
-            let file = OpenOptions::new()
-                .read(true)
-                .open(path.clone())
-                .await?;
+            let file = OpenOptions::new().read(true).open(path.clone()).await?;
 
             let md5 = calc_file_md5(file.try_clone().await?).await?;
             if let Some(file) = self.manifest.file_by_md5(&md5) {

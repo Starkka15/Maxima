@@ -28,7 +28,7 @@ paste = "1.0.12"
 anyhow = "1.0.71"
 hex = "0.4.3"
 lazy_static = "1.4.0"
-reqwest = { version = "0.11.18", features = ["stream", "rustls-tls", "gzip"], default-features = false }
+reqwest = { version = "0.11.18", features = ["stream", "rustls-tls", "gzip", "json"], default-features = false }
 base64 = "0.21.2"
 log = "0.4.19"
 enable-ansi-support = "0.2.1"

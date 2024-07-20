@@ -19,7 +19,7 @@ pub async fn case_insensitive_path(path: PathBuf) -> PathBuf {
             }
         } else {
             // If we run out of acnestors, return the original path
-            return path;
+            return original_path;
         }
     }
     // Reverse the array so we have the proper order of path parts

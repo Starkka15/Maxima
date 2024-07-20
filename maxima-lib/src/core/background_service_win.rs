@@ -23,7 +23,7 @@ pub async fn request_library_injection(pid: u32, path: &str) -> Result<()> {
         let process = OwnedProcess::from_pid(pid)?;
         let syringe = Syringe::for_process(process);
         syringe.inject(path).unwrap();
-        return Ok(())
+        return Ok(());
     }
 
     let request = &ServiceLibraryInjectionRequest {
@@ -50,9 +50,13 @@ pub async fn request_library_injection(pid: u32, path: &str) -> Result<()> {
 pub async fn request_registry_setup() -> Result<()> {
     if is_elevated() {
         set_up_registry()?;
-        return Ok(())
+        return Ok(());
     }
 
-    reqwest::get(format!("http://127.0.0.1:{}/set_up_registry", BACKGROUND_SERVICE_PORT)).await?;
+    reqwest::get(format!(
+        "http://127.0.0.1:{}/set_up_registry",
+        BACKGROUND_SERVICE_PORT
+    ))
+    .await?;
     Ok(())
 }
