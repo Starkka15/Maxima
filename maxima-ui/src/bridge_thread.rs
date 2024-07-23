@@ -132,11 +132,11 @@ impl BridgeThread {
             let die_fallback_transmittter = backend_responder.clone();
             //panic::set_hook(Box::new( |_| {}));
             let result = BridgeThread::run(backend_cmd_listener, backend_responder, rtm_cmd_listener, rtm_responder, &context).await;
-            if result.is_err() {
+            if let Err(result) = result {
                 die_fallback_transmittter
                     .send(MaximaLibResponse::InteractionThreadDiedResponse)
                     .unwrap();
-                panic!("Interact thread failed! {}", result.err().unwrap());
+                panic!("Interact thread failed! {}", result);
             } else {
                 info!("Interact thread shut down")
             }

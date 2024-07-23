@@ -511,6 +511,8 @@ pub fn tab_bar_button(ui: &mut Ui, res: Response) {
 
 /// We used to have a semi-functional implementation that only worked on Mac, but, as i would say, we do not care 🗣️🗣️🗣️
 fn custom_window_frame(
+    enabled: bool, // disables the entire app, used for if the bg thread crashes
+    crash_text: String,
     ctx: &egui::Context,
     frame: &mut eframe::Frame,
     _title: &str,
@@ -523,29 +525,44 @@ fn custom_window_frame(
         fill: Color32::RED,
         rounding: 0.0.into(),
         stroke: Stroke::NONE,
-        outer_margin: 0.0.into(), // this used to check if it was maximized but that got deprecated and we don't care
+        outer_margin: Margin {
+            left: APP_MARGIN.x,
+            right: APP_MARGIN.x,
+            top: APP_MARGIN.y + if !enabled { APP_MARGIN.y * 3.0 } else { 0.0 },
+            bottom: APP_MARGIN.y,
+        },
         ..Default::default()
     };
 
+    /*if !enabled {
+        let mut warning_margin = Margin::same(0.0 - );
+        warning_margin.bottom = APP_MARGIN.y;
+        egui::Frame::default()
+            .fill(Color32::RED)
+            .outer_margin(warning_margin)
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading(
+                        egui::RichText::new(
+                            &self
+                                .locale
+                                .localization
+                                .errors
+                                .critical_thread_crashed,
+                        )
+                        .color(Color32::BLACK)
+                        .size(16.0),
+                    );
+                });
+            });
+    }*/
+
     CentralPanel::default()
     .frame(panel_frame).show(ctx, |ui| {
-        let app_rect = ui.max_rect();
-
-        let title_bar_height = 28.0; //height on a standard monitor on macOS monterey
-        let _title_bar_rect = {
-            let mut rect = app_rect;
-            rect.max.y = rect.min.y + title_bar_height;
-            rect
-        };
-        
-        let content_rect = Rect {
-            min: app_rect.min + APP_MARGIN,
-            max: app_rect.max - APP_MARGIN,
-        };
-
-        let mut content_ui = ui.child_ui(content_rect, *ui.layout(), None);
-
-        add_contents(&mut content_ui);
+        let warning_rect = Rect { min: pos2(0.0,0.0), max: pos2(ui.available_width() + APP_MARGIN.x * 2.0, APP_MARGIN.y * 3.0) };
+        ui.painter().rect_filled(warning_rect, Rounding::same(0.0), Color32::RED);
+        ui.painter().text(warning_rect.center(), Align2::CENTER_CENTER, crash_text, FontId::proportional(16.0), Color32::BLACK);
+        ui.add_enabled_ui(enabled, add_contents);
     });
 }
 
@@ -621,8 +638,10 @@ impl eframe::App for MaximaEguiApp {
         puffin::profile_function!();
         bridge_processor::frontend_processor(self, ctx);
         event_processor::frontend_processor(self, ctx);
-
-        custom_window_frame(ctx, frame, "Maxima", |ui| {
+        
+        custom_window_frame(!self.critical_bg_thread_crashed,
+            self.locale.localization.errors.critical_thread_crashed.clone(),
+            ctx, frame, "Maxima", |ui| {
             if let Some(render) = &self.app_bg_renderer {
                 let mut fullrect = ui.available_rect_before_wrap().clone();
                 fullrect.min -= APP_MARGIN;
@@ -648,28 +667,6 @@ impl eframe::App for MaximaEguiApp {
                 } else {
                     render.draw(ui, fullrect, fullrect.size(), TextureId::Managed(1), 0.0);
                 }
-            }
-            if self.critical_bg_thread_crashed {
-                let mut warning_margin = Margin::same(0.0 - APP_MARGIN.x);
-                warning_margin.bottom = APP_MARGIN.y;
-                egui::Frame::default()
-                    .fill(Color32::RED)
-                    .outer_margin(warning_margin)
-                    .show(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.heading(
-                                egui::RichText::new(
-                                    &self
-                                        .locale
-                                        .localization
-                                        .errors
-                                        .critical_thread_crashed,
-                                )
-                                .color(Color32::BLACK)
-                                .size(16.0),
-                            );
-                        });
-                    });
             }
             let app_rect = ui.available_rect_before_wrap().clone();
             match self.backend_state {
