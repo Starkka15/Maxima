@@ -75,7 +75,7 @@ define_graphql_request!(SearchPlayer, players); // Input: ServiceSearchPlayerReq
 define_graphql_request!(getLegacyCatalogDefs, legacyOffers); // Input: ServiceGetLegacyCatalogDefsRequest, Output: Vec<ServiceLegacyOffer>
 define_graphql_request!(getGameProducts, gameProducts); // Input: ServiceGetLegacyCatalogDefsRequest, Output: Vec<ServiceLegacyProduct>
 define_graphql_request!(GetGamePlayTimes, me); // Input: ServiceGetLegacyCatalogDefsRequest, Output: Vec<ServiceLegacyProduct>
-define_graphql_request!(GetHeroBackgroundImage, gameHubCollection); // Input: ServiceHeroBackgroundImageRequest, Output: GameHubCollection
+define_graphql_request!(GetHeroBackgroundImage, gameHubCollection); // Input: ServiceHeroBackgroundImageRequest, Output: ServiceGameHubCollection
 
 #[derive(Clone)]
 pub struct ServiceLayerClient {
