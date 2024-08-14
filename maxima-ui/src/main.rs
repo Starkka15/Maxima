@@ -2,6 +2,7 @@
 use anyhow::bail;
 use clap::{arg, command, Parser};
 
+use desktop::check_desktop_icon;
 use egui::{pos2, Align2, FontId, IconData, Layout, ViewportBuilder, Widget};
 use egui::style::{ScrollStyle, Spacing};
 use egui::Style;
@@ -59,8 +60,7 @@ mod renderers;
 mod translation_manager;
 mod enum_locale_map;
 mod ui_image;
-
-use maxima::util::registry::check_registry_validity;
+mod desktop;
 
 const ACCENT_COLOR: Color32 = Color32::from_rgb(8, 171, 244);
 const APP_MARGIN: Vec2 = vec2(12.0, 12.0); //TODO: user setting
@@ -83,6 +83,10 @@ struct Args {
 async fn main() {
     init_logger();
     let mut args = Args::parse();
+
+    if let Err(err) = check_desktop_icon() {
+        error!("Failed to register desktop icon! {}", err);
+    }
 
     if !cfg!(debug_assertions) {
         args.debug = false;

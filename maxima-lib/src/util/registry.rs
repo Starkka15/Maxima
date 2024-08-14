@@ -337,7 +337,7 @@ fn register_custom_protocol(protocol: &str, name: &str, executable: &str) -> Res
     let maxima_dir = maxima_dir()?;
     let home = maxima_dir.parent().unwrap();
     let desktop_file_name = format!("maxima-{}.desktop", protocol);
-    let desktop_file_path = format!("{}/.local/share/applications/{}", home.to_str().unwrap(), desktop_file_name);
+    let desktop_file_path = format!("{}/applications/{}", home.to_str().unwrap(), desktop_file_name);
     fs::write(desktop_file_path, desktop_file)?;
 
     set_mime_type(
