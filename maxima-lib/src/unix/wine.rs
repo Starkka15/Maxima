@@ -218,6 +218,10 @@ pub async fn run_wine_command<I: IntoIterator<Item = T>, T: AsRef<OsStr>>(
         .env("LD_PRELOAD", "") // Fixes some log errors for some games
         .arg(arg);
 
+    if wine_path != "umu-run" {
+        child = child.env("WINEDLLOVERRIDES", "CryptBase,bcrypt,dxgi,d3d11,d3d12,d3d12core=n,b;winemenubuilder.exe=d");
+    }
+
     if let Some(arguments) = args {
         child = child.args(arguments);
     }
