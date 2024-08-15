@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{bail, Result};
 
 #[cfg(target_os = "linux")]
-pub fn check_desktop_icon() -> Result<()>{
+pub fn check_desktop_icon() -> Result<()> {
     let maxima_dir = maxima_dir()?;
     let desktop_file_path = maxima_dir.parent().unwrap().join("applications").join("maxima.desktop");
 
@@ -65,6 +65,6 @@ pub fn check_desktop_icon() -> Result<()>{
 }
 
 #[cfg(target_os = "windows")]
-pub fn check_desktop_icon() {
-
+pub fn check_desktop_icon() -> Result<()> {
+    Ok(())
 }
