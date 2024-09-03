@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 #[cfg(target_os = "linux")]
 pub fn check_desktop_icon() -> Result<()> {
     let maxima_dir = maxima_dir()?;
-    let desktop_file_path = maxima_dir.parent().unwrap().join("applications").join("maxima.desktop");
+    let desktop_file_path = maxima_dir.parent().unwrap().join("applications").join("io.github.ArmchairDevelopers.Maxima.desktop");
 
     if let Err(err) = std::fs::metadata(&desktop_file_path) {
         info!("creating application shortcut");

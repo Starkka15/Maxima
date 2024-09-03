@@ -120,6 +120,7 @@ async fn main() {
         viewport: ViewportBuilder::default()
         .with_inner_size([1280.0, 720.0])
         .with_min_inner_size([940.0, 480.0])
+        .with_app_id("io.github.ArmchairDevelopers.Maxima")
         .with_icon(eframe::icon_data::from_png_bytes(&include_bytes!("../../maxima-resources/assets/logo.png")[..]).unwrap()),
         ..Default::default()
     };
