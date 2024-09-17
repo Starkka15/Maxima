@@ -1,9 +1,35 @@
-use regex::Regex;
-
 use crate::util::hash::hash_fnv1a;
+use gethostname::gethostname;
+use hex::ToHex;
+use regex::Regex;
+use ring::digest::SHA1_FOR_LEGACY_USE_ONLY;
+use std::arch::x86_64::CpuidResult;
+
+#[derive(Debug)]
+pub struct CpuDetails {
+    pub flags: CpuidResult,
+    pub manufacturer: String,
+    pub brand_name: String,
+}
+
+impl Default for CpuDetails {
+    fn default() -> Self {
+        Self {
+            flags: CpuidResult {
+                eax: 0,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            },
+            manufacturer: String::default(),
+            brand_name: String::default(),
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct HardwareInfo {
+    pub version: u32,
     pub board_manufacturer: String,
     pub board_sn: String,
     pub bios_manufacturer: String,
@@ -11,13 +37,16 @@ pub struct HardwareInfo {
     pub os_install_date: String,
     pub os_sn: String,
     pub disk_sn: String,
+    pub volume_sn: String,
     pub gpu_pnp_id: Option<String>,
     pub mac: Option<String>,
+    pub cpu_details: CpuDetails,
+    pub hostname: String,
 }
 
 impl HardwareInfo {
     #[cfg(windows)]
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(version: u32) -> anyhow::Result<Self> {
         use std::collections::HashMap;
 
         use log::warn;
@@ -46,7 +75,10 @@ impl HardwareInfo {
 
         let wmi_data = wmi_thread.join();
         if wmi_data.is_err() {
-            warn!("WMI call failed, using dummy hardware info. Please report this! {:?}", wmi_data.err().unwrap());
+            warn!(
+                "WMI call failed, using dummy hardware info. Please report this! {:?}",
+                wmi_data.err().unwrap()
+            );
             return Ok(Self::default());
         }
 
@@ -78,14 +110,22 @@ impl HardwareInfo {
             disk_sn = disk_info.serial_number.as_str();
         }
 
+        let volume_sn = format!("{:08x}", get_c_drive_volume_serial());
+
         let mut gpu_pnp_id: Option<String> = None;
         if let Some(gpu_info) = gpu_data.get(0) {
-            gpu_pnp_id = Some(gpu_info.pnp_device_id.clone());
+            let device_id = &gpu_info.pnp_device_id;
+            let device_id =
+                device_id[..device_id.rfind('\\').unwrap_or(device_id.len())].to_string();
+            gpu_pnp_id = Some(device_id);
         }
 
         let mac = get_ea_mac_address();
+        let cpu_details = Self::get_cpu_details();
+        let hostname = gethostname().to_string_lossy().to_string();
 
         Ok(Self {
+            version,
             bios_manufacturer: bios_manufacturer.to_owned(),
             bios_sn: bios_sn.to_owned(),
             board_manufacturer: board_manufacturer.to_owned(),
@@ -93,13 +133,16 @@ impl HardwareInfo {
             os_install_date: os_install_date.to_owned(),
             os_sn: os_sn.to_owned(),
             disk_sn: disk_sn.to_owned(),
+            volume_sn,
             gpu_pnp_id,
             mac,
+            cpu_details,
+            hostname,
         })
     }
 
     #[cfg(target_os = "linux")]
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(version: u32) -> anyhow::Result<Self> {
         use std::{fs, path::Path, process::Command};
 
         let board_manufacturer = match fs::read_to_string("/sys/class/dmi/id/board_vendor") {
@@ -107,21 +150,21 @@ impl HardwareInfo {
             Err(_) => String::from("Linux Foundation"),
         };
 
-        let board_sn = String::from("None");
+        let board_sn = match fs::read_to_string("/var/lib/dbus/machine-id") {
+            Ok(machine_id) => machine_id.trim().to_ascii_uppercase().to_owned(),
+            Err(_) => String::from("None"),
+        };
         let bios_manufacturer = match fs::read_to_string("/sys/class/dmi/id/bios_vendor") {
             Ok(vendor) => vendor.trim().to_owned(),
             Err(_) => String::from("Linux Foundation"),
         };
 
-        let bios_sn = String::from("None");
+        let bios_sn = String::from("Serial number");
         let os_install_date = get_root_creation_str();
-        let os_sn = match fs::read_to_string("/etc/machine-id") {
-            Ok(machine_id) => machine_id.trim().to_owned(),
-            Err(_) => String::from("None"),
-        };
+        let os_sn = String::from("00330-50000-00000-AAOEM");
 
         let mut gpu_pnp_id: Option<String> = None;
-        let output = Command::new("lspci").args(["-Dd", "*:*:0300"]).output();
+        let output = Command::new("lspci").args(["-Dd", "::0300"]).output();
         if let Ok(output) = output {
             if output.status.success() {
                 let output = String::from_utf8_lossy(&output.stdout);
@@ -138,9 +181,10 @@ impl HardwareInfo {
                     if Path::new(path_str).exists() {
                         let vendor_id = read_file_hex_contents(format!("{}/{}", path, "vendor"));
                         let device_id = read_file_hex_contents(format!("{}/{}", path, "device"));
-                        let rev_id = read_file_hex_contents(format!("{}/{}", path, "revision"));
+                        let rev_id = Some(0u16);
 
-                        gpu_pnp_id = Some(generate_pci_pnp_id(vendor_id, device_id, rev_id));
+                        gpu_pnp_id =
+                            Some(generate_pci_pnp_id(version, vendor_id, device_id, rev_id));
                     }
                 }
             }
@@ -156,7 +200,7 @@ impl HardwareInfo {
                 if !line.starts_with('#') && !line.is_empty() {
                     // Split the line into fields
                     let fields: Vec<&str> = line.split_whitespace().collect();
-    
+
                     // Check if the line corresponds to the root filesystem ("/")
                     if fields.len() >= 2 && fields[1] == "/" {
                         // Extract the UUID
@@ -174,8 +218,11 @@ impl HardwareInfo {
         }
 
         let mac = get_ea_mac_address();
+        let cpu_details = Self::get_cpu_details();
+        let hostname = gethostname().to_string_lossy().to_string();
 
         Ok(Self {
+            version,
             bios_manufacturer,
             bios_sn,
             board_manufacturer,
@@ -183,13 +230,16 @@ impl HardwareInfo {
             os_install_date,
             os_sn,
             disk_sn,
+            volume_sn: String::from("43000000"),
             gpu_pnp_id,
             mac,
+            cpu_details,
+            hostname,
         })
     }
 
     #[cfg(target_os = "macos")]
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(version: u32) -> anyhow::Result<Self> {
         use std::process::Command;
 
         use smbioslib::{
@@ -232,6 +282,7 @@ impl HardwareInfo {
 
             if let Some(gpu) = result.items.first() {
                 gpu_pnp_id = Some(generate_pci_pnp_id(
+                    version,
                     None,
                     Some(gpu.device_id),
                     Some(gpu.revision_id),
@@ -253,8 +304,11 @@ impl HardwareInfo {
         }
 
         let mac = get_ea_mac_address();
+        let cpu_details = Self::get_cpu_details();
+        let hostname = gethostname().to_string_lossy().to_string();
 
         Ok(Self {
+            version,
             bios_manufacturer,
             bios_sn,
             board_manufacturer,
@@ -263,7 +317,9 @@ impl HardwareInfo {
             os_sn,
             gpu_pnp_id,
             disk_sn,
+            volume_sn: String::from("43000000"),
             mac,
+            cpu_details,
         })
     }
 
@@ -278,6 +334,44 @@ impl HardwareInfo {
                 None => 0,
             },
             None => 0,
+        }
+    }
+
+    pub fn get_cpu_details() -> CpuDetails {
+        use core::arch::x86_64::__cpuid;
+
+        let m = unsafe { __cpuid(0) };
+        let flags = unsafe { __cpuid(1) };
+
+        let mut man = Vec::new();
+        for val in [m.ebx, m.edx, m.ecx] {
+            for b in val.to_ne_bytes() {
+                man.push(b);
+            }
+        }
+
+        let mut brand_name = Vec::with_capacity(47);
+        'outer: for eax in [0x80000002, 0x80000003, 0x80000004] {
+            let part = unsafe { __cpuid(eax) };
+            for val in [part.eax, part.ebx, part.ecx, part.edx] {
+                for b in val.to_ne_bytes() {
+                    if b == 0 {
+                        break 'outer;
+                    }
+                    brand_name.push(b);
+                }
+            }
+        }
+        brand_name.resize(47, 0);
+        let brand_name = std::str::from_utf8(&brand_name)
+            .unwrap_or("Unknown")
+            .to_string();
+        let manufacturer = std::str::from_utf8(&man).unwrap_or("Unknown").to_string();
+
+        CpuDetails {
+            flags,
+            manufacturer,
+            brand_name,
         }
     }
 
@@ -296,26 +390,98 @@ impl HardwareInfo {
 
         Ok(hash_fnv1a(buffer.as_bytes()).to_string())
     }
+
+    pub fn generate_hardware_hash(&self) -> String {
+        let mut buffer: Vec<&str> = Vec::new();
+        let gpu = self.gpu_pnp_id.clone().unwrap_or("None".to_string());
+        let cpu_edx = format!("{:08x}", self.cpu_details.flags.edx);
+        let cpu_edx_eax = format!(
+            "{:08X}{:08X}",
+            self.cpu_details.flags.edx, self.cpu_details.flags.eax
+        );
+        let cpu_ecx = format!("{:08x}", self.cpu_details.flags.ecx);
+
+        buffer.push(&self.board_manufacturer);
+        buffer.push(&self.board_sn);
+        match self.version {
+            0 | 1 => {
+                buffer.push(&self.hostname);
+                buffer.push(&self.bios_manufacturer);
+                buffer.push(&self.bios_sn);
+                buffer.push(&self.os_install_date);
+                buffer.push(&self.os_sn)
+            }
+            2 => {
+                buffer.push(&self.bios_manufacturer);
+                buffer.push(&self.bios_sn);
+                buffer.push(&self.os_install_date);
+                buffer.push(&self.os_sn);
+                buffer.push(&self.volume_sn);
+                buffer.push(&gpu);
+                buffer.push(&self.cpu_details.manufacturer);
+                buffer.push(&cpu_edx);
+                buffer.push(&cpu_ecx);
+            }
+            3 => {
+                buffer.push(&self.bios_manufacturer);
+                buffer.push(&self.bios_sn);
+                buffer.push(&self.volume_sn);
+                buffer.push(&gpu);
+                buffer.push(&self.cpu_details.manufacturer);
+                buffer.push(&cpu_edx);
+                buffer.push(&cpu_ecx);
+            }
+            4_u32..=u32::MAX => {
+                buffer.push(&self.bios_manufacturer);
+                buffer.push(&self.bios_sn);
+                buffer.push(&self.volume_sn);
+                buffer.push(&gpu); // THIS IS EXTENDED IN generate_pci_pnp_id
+                buffer.push(&self.cpu_details.manufacturer);
+                buffer.push(&cpu_edx_eax);
+            }
+        }
+
+        let mut final_data = buffer.join(";").to_string();
+        final_data.push(';');
+        if self.version >= 2 {
+            final_data.push_str(&self.cpu_details.brand_name);
+            final_data.push(';');
+        }
+        log::debug!("Hardware hash string \"{}\"", final_data);
+        let digest = ring::digest::digest(&SHA1_FOR_LEGACY_USE_ONLY, final_data.as_bytes());
+        if self.version < 4 {
+            // they fucked up the format and used :x instead of :02x
+            digest
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{:x}", byte))
+                .collect::<Vec<String>>()
+                .join("")
+        } else {
+            digest.encode_hex()
+        }
+    }
 }
 
 #[cfg(unix)]
 fn get_root_creation_str() -> String {
-    use std::fs;
-
+    use crate::unix::wine::wine_prefix_dir;
     use chrono::{TimeZone, Utc};
-    use filetime::FileTime;
+    use std::{fs, os::unix::fs::MetadataExt};
 
-    let date_str = String::from("1970-01-0100:00:00.000000000+0000");
-    let date_str = match fs::metadata("/") {
+    let date_str = String::from("1970010100:00:00.000000000+0000");
+    let wine_prefix = wine_prefix_dir();
+    if wine_prefix.is_err() {
+        return date_str;
+    }
+    let wine_prefix = wine_prefix.unwrap();
+    let date_str = match fs::metadata(wine_prefix.join("drive_c")) {
         Ok(metadata) => {
-            if let Some(creation_time) = FileTime::from_creation_time(&metadata) {
-                // Convert Unix timestamp to a DateTime
-                let datetime = Utc.timestamp_nanos(creation_time.unix_seconds() * 1_000_000_000);
-                // Format the DateTime
-                return datetime.format("%Y-%m-%d%H:%M:%S%.9f%z").to_string();
-            }
-
-            date_str
+            let nsec = (metadata.mtime_nsec() / 1_000_000) * 1_000_000;
+            // Convert Unix timestamp to a DateTime
+            let datetime = Utc.timestamp_nanos((metadata.mtime() * 1_000_000_000) + nsec);
+            // Format the DateTime
+            return datetime.format("%Y%m%d%H%M%S%.6f+000").to_string();
         }
         Err(_) => date_str,
     };
@@ -324,19 +490,25 @@ fn get_root_creation_str() -> String {
 }
 
 #[cfg(unix)]
-fn generate_pci_pnp_id(vendor: Option<u16>, device: Option<u16>, revision: Option<u16>) -> String {
+fn generate_pci_pnp_id(
+    version: u32,
+    vendor: Option<u16>,
+    device: Option<u16>,
+    revision: Option<u16>,
+) -> String {
     let mut sections = vec![];
 
-    if let Some(vendor) = vendor {
-        sections.push(format!("VEN_{:04X}", vendor));
-    }
-
-    if let Some(device) = device {
-        sections.push(format!("DEV_{:04X}", device));
-    }
-
-    if let Some(revision) = revision {
-        sections.push(format!("REV_{:02X}", revision));
+    sections.push(format!("VEN_{:04X}", vendor.unwrap_or(0)));
+    sections.push(format!("DEV_{:04X}", device.unwrap_or(0)));
+    sections.push(format!("SUBSYS_{:08X}", 0));
+    if version < 4 {
+        sections.push(format!("REV_{:02X}", revision.unwrap_or(0)));
+    } else {
+        // TODO: check how this looks on windows
+        sections.push(format!("REV_{:02X}\\0", revision.unwrap_or(0)));
+        sections.push(format!("{:08X}", 0xDEADBEEFu32));
+        sections.push(format!("{:X}", 0));
+        sections.push(format!("{:04X}", 0xDEAD));
     }
 
     format!("PCI\\{}", sections.join("&"))
@@ -364,6 +536,37 @@ fn extract_diskutil_volume_uuid(output: &str) -> Option<&str> {
         }
     }
     None
+}
+
+#[cfg(target_os = "windows")]
+fn get_c_drive_volume_serial() -> u32 {
+    use std::ptr;
+    use winapi::shared::minwindef::DWORD;
+    use winapi::um::fileapi::GetVolumeInformationW;
+
+    let mut serial: DWORD = 0;
+    let res = unsafe {
+        GetVolumeInformationW(
+            "C:\\"
+                .encode_utf16()
+                .chain(Some(0))
+                .collect::<Vec<u16>>()
+                .as_ptr(),
+            ptr::null_mut(),
+            0,
+            &mut serial,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0,
+        )
+    };
+
+    if res == 0 {
+        return 0;
+    }
+
+    serial
 }
 
 fn get_ea_mac_address() -> Option<String> {
