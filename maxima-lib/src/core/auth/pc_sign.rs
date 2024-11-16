@@ -34,7 +34,7 @@ pub struct PCSign<'a> {
 
 impl PCSign<'_> {
     pub fn new() -> anyhow::Result<Self> {
-        let hw_info = HardwareInfo::new()?;
+        let hw_info = HardwareInfo::new(1)?;
 
         let timestamp = Utc::now();
         let formatted_timestamp = timestamp.format("%Y-%m-%d %H:%M:%S:%3f");

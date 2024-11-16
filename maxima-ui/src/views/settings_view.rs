@@ -11,6 +11,7 @@ enum SettingsViewDemoTheme {
 
 pub fn settings_view(app: &mut MaximaEguiApp, ui: &mut Ui) {
     ui.style_mut().spacing.interact_size.y = 30.0;
+    ui.style_mut().spacing.icon_width = 30.0;
     ui.heading(&app.locale.localization.settings_view.interface.header);
     ui.separator();
     ui.horizontal(|ui| {
@@ -27,4 +28,9 @@ pub fn settings_view(app: &mut MaximaEguiApp, ui: &mut Ui) {
 
         }
     });
+
+    ui.heading("");
+    ui.heading(&app.locale.localization.settings_view.performance.header);
+    ui.separator();
+    ui.checkbox(&mut app.settings.performance_settings.disable_blur, &app.locale.localization.settings_view.performance.disable_blur);
 }

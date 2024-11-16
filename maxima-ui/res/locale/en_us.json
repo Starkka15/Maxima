@@ -94,6 +94,10 @@
         "game_installation" : {
             "header": "Game Installation",
             "default_folder": "Default installation folder"
+        },
+        "performance" : {
+            "header": "Performance",
+            "disable_blur": "Disable blur effects"
         }
     },
     "locale" : {

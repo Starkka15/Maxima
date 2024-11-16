@@ -71,6 +71,8 @@ bytes = "1.5.0"
 async-trait = "0.1.81"
 crc32fast = "1.4.2"
 async-recursion = "1.1.1"
+pelite = "0.10.0"
+gethostname = "0.5.0"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = [
@@ -85,7 +87,7 @@ winapi = { version = "0.3.9", features = [
     "iphlpapi",
     "tcpmib",
     "winsvc",
-    "impl-default",
+    "impl-default"
 ] }
 winreg = "0.51.0"
 windows-service = "0.6.0"

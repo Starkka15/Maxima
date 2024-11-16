@@ -140,6 +140,8 @@ pub struct LocalizedSettingsView {
     pub interface: LocalizedInterfaceSettings,
     /// Label for a section of settings pertaining to the installation of games
     pub game_installation: LocalizedGameInstallationSettings,
+    /// Label for a section of settings pertaining to performance of the launcher
+    pub performance: LocalizedPerformanceSettings,
 }
 
 #[derive(Deserialize)]
@@ -154,6 +156,13 @@ pub struct LocalizedGameInstallationSettings {
     pub header: String,
     /// Label for a text box for a default path to install games
     pub default_folder: String,
+}
+
+#[derive(Deserialize)]
+pub struct LocalizedPerformanceSettings {
+    pub header: String,
+    /// Label for a checkbox to disable blur effects
+    pub disable_blur: String,
 }
 
 #[derive(Deserialize)]

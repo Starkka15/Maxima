@@ -1,11 +1,4 @@
-use std::{
-    io::{self, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
-    pin::Pin,
-    prelude,
-    sync::{Arc, Mutex},
-    task,
-};
+use std::{cmp, io::{self, Seek, SeekFrom, Write}, path::{Path, PathBuf}, pin::Pin, prelude, sync::{Arc, Mutex}, task};
 
 use anyhow::{bail, Context, Result};
 use async_compression::tokio::write::DeflateDecoder;
@@ -16,14 +9,15 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use log::{debug, error, info, warn};
 use reqwest::Client;
 use strum_macros::Display;
+use flate2::bufread::DeflateDecoder as BufreadDeflateDecoder;
+use std::io::{Cursor, Read};
 use tokio::{
     fs::{create_dir, create_dir_all, File, OpenOptions},
     io::{AsyncSeekExt, AsyncWrite, BufReader, BufWriter},
     runtime::Handle,
 };
-
+use tokio::io::AsyncReadExt;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
-
 use crate::{
     content::{
         zip::CompressionType,
@@ -382,7 +376,7 @@ impl<'a> EntryDownloadRequest<'a> {
             self.entry.name().to_owned(),
             &mut self.decoder,
         )
-        .await;
+            .await;
 
         let result = tokio::io::copy(&mut stream_reader, &mut wrapper)
             .await
@@ -423,6 +417,59 @@ impl ZipDownloader {
             client: Client::builder().build()?,
             manifest,
         })
+    }
+
+    pub async fn read_zip_entry_bytes(
+        &self,
+        entry: &ZipFileEntry,
+        length: u64,
+    ) -> Result<Bytes> {
+        let offset = entry.data_offset();
+        let compressed_size = *entry.compressed_size();
+
+        let range_header = format!(
+            "bytes={}-{}",
+            offset,
+            offset + compressed_size - 1
+        );
+
+        let response = self
+            .client
+            .get(&self.url)
+            .header("Range", range_header)
+            .send()
+            .await?;
+
+        if !response.status().is_success()
+            && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+        {
+            bail!("Failed to download range: {}", response.status());
+        }
+
+        let compressed_data = response.bytes().await?;
+        let decompressed_data = match entry.compression_type() {
+            CompressionType::None => {
+                let entry_size = *entry.uncompressed_size() as u64;
+                let available_length = std::cmp::min(length, entry_size);
+
+                if available_length > compressed_data.len() as u64 {
+                    bail!("Requested length exceeds entry size");
+                }
+
+                Bytes::copy_from_slice(&compressed_data[..available_length as usize])
+            }
+            CompressionType::Deflate => {
+                let mut decoder = BufreadDeflateDecoder::new(Cursor::new(&compressed_data));
+                let mut limited_reader = decoder.take(length);
+                let mut decompressed_data = Vec::with_capacity(length as usize);
+                limited_reader.read_to_end(&mut decompressed_data)?;
+
+                Bytes::from(decompressed_data)
+            }
+            _ => bail!("Unsupported compression type"),
+        };
+
+        Ok(decompressed_data)
     }
 
     pub async fn download_single_file(
@@ -518,7 +565,7 @@ struct ByteCountingStream<'a, S> {
 
 impl<'a, S> ByteCountingStream<'a, S>
 where
-    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>>,
+    S: Stream<Item=Result<bytes::Bytes, reqwest::Error>>,
 {
     fn new(inner: S, callback: Option<&'a BytesDownloadedCallback>) -> Self {
         ByteCountingStream {
@@ -535,7 +582,7 @@ where
 
 impl<'a, S> Stream for ByteCountingStream<'a, S>
 where
-    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+    S: Stream<Item=Result<bytes::Bytes, reqwest::Error>> + Unpin,
 {
     type Item = Result<bytes::Bytes, tokio::io::Error>;
 

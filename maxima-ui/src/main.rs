@@ -320,11 +320,25 @@ pub enum FrontendLanguage {
     EnUS,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Copy, Clone)]
+pub struct FrontendPerformanceSettings {
+    disable_blur: bool
+}
+
+impl FrontendPerformanceSettings {
+    pub fn new() -> Self {
+        Self {
+            disable_blur: false,
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct FrontendSettings {
     default_install_folder: String,
     language: FrontendLanguage,
-    game_settings: HashMap<String, GameSettings>
+    game_settings: HashMap<String, GameSettings>,
+    performance_settings: FrontendPerformanceSettings,
 }
 
 impl FrontendSettings {
@@ -333,6 +347,7 @@ impl FrontendSettings {
             default_install_folder: String::new(),
             language: FrontendLanguage::SystemDefault,
             game_settings: HashMap::new(),
+            performance_settings: FrontendPerformanceSettings::new(),
         }
     }
 }
@@ -647,11 +662,11 @@ impl eframe::App for MaximaEguiApp {
                     }
                     //TODO: background
                     match &self.img_cache.get(ui_image::UIImageType::Hero(self.games[&self.game_sel].slug.clone())) {
-                        Some(tex) => render.draw(ui, fullrect, tex.size_vec2(), tex.id(), how_game),
-                        None => { render.draw(ui, fullrect, fullrect.size(), TextureId::Managed(1), 0.0); },
+                        Some(tex) => render.draw(ui, fullrect, tex.size_vec2(), tex.id(), how_game, self.settings.performance_settings),
+                        None => { render.draw(ui, fullrect, fullrect.size(), TextureId::Managed(1), 0.0, self.settings.performance_settings); },
                     }
                 } else {
-                    render.draw(ui, fullrect, fullrect.size(), TextureId::Managed(1), 0.0);
+                    render.draw(ui, fullrect, fullrect.size(), TextureId::Managed(1), 0.0, self.settings.performance_settings);
                 }
             }
             let app_rect = ui.available_rect_before_wrap().clone();

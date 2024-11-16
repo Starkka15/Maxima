@@ -5,6 +5,7 @@ out vec4 out_color;
 uniform sampler2D u_hero;
 uniform vec3 u_dimensions;
 uniform vec2 u_img_dimensions;
+uniform uint u_flags;
 
 const vec3 mistCol = vec3(0.047, 0.106, 0.286);
 const vec2 gridSquareSize = vec2(40.0);
@@ -90,6 +91,10 @@ vec3 pattern() {
 }
 
 vec3 bg() {
+    if ((int(u_flags) & 0x000001) > 0) {
+        return texture(u_hero, tex_coords).rgb * 0.25;
+    }
+
     float gamma = 1.8;
     float Pi = 6.28318530718; // Pi*2
 

@@ -118,7 +118,7 @@ pub fn game_view_details_panel(app : &mut MaximaEguiApp, ui: &mut Ui) {
         { puffin::profile_scope!("hero image");
         if let Some(handle) = hero {
             if let Some(gvbg) = &app.game_view_bg_renderer {
-            gvbg.draw(ui, hero_rect, handle.size_vec2(), handle.id(), hero_vis_frac);
+            gvbg.draw(ui, hero_rect, handle.size_vec2(), handle.id(), hero_vis_frac, app.settings.performance_settings);
             //TODO: negative allocation fix
             //ui.allocate_space(hero_rect.size().max(vec2(0.0, 0.0)));
             }

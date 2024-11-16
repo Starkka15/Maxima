@@ -76,6 +76,53 @@ pub fn detect_ooa_state(game_path: PathBuf) -> OOAState {
     OOAState::SignatureDecoded
 }
 
+pub async fn detect_ooa_version(game_path: PathBuf) -> Result<u32> {
+    #[cfg(unix)]
+    use crate::unix::fs::case_insensitive_path;
+    let activation_dll = game_path.join("Core/activation.dll");
+    let awc = game_path.join("Core/awc.dll");
+
+    #[cfg(unix)]
+    let activation_dll = case_insensitive_path(activation_dll).await;
+    #[cfg(unix)]
+    let awc = case_insensitive_path(awc).await;
+
+    let dest_dll = if activation_dll.exists() {
+        activation_dll
+    } else {
+        awc
+    };
+
+    if !dest_dll.exists() {
+        return Ok(1);
+    }
+
+    let image = tokio::fs::read(dest_dll).await?;
+    let pe = pelite::PeFile::from_bytes(&image)?;
+
+    let version = pe.resources()?.version_info()?;
+    let version = if let Some(v) = version.fixed() {
+        v.dwProductVersion
+    } else {
+        return Ok(1);
+    };
+    let major = version.Major;
+    let minor = version.Minor;
+    let patch = version.Patch;
+
+    if major >= 5 {
+        return Ok(4);
+    } else if major == 4 && (minor > 7 || minor == 7 && patch >= 6) {
+        return Ok(3);
+    } else if major == 4 && minor >= 7 {
+        return Ok(2);
+    } else if major >= 4 {
+        return Ok(1);
+    } else {
+        return Ok(0);
+    }
+}
+
 pub enum LicenseAuth {
     AccessToken(String),
     /// Persona/Email, Password
@@ -115,15 +162,17 @@ pub async fn request_and_save_license(
         game_path = game_path.parent().unwrap().to_path_buf();
     }
 
-    let state = detect_ooa_state(game_path);
+    let state = detect_ooa_state(game_path.clone());
     if state == OOAState::Disabled {
         return Ok(());
     }
 
-    let hw_info = HardwareInfo::new()?;
+    let version = detect_ooa_version(game_path).await.unwrap_or(1);
+
+    let hw_info = HardwareInfo::new(version)?;
     let license = request_license(
         content_id,
-        "8f87c1d4c0e11d65c5aaa623c662788416c582", // TODO generate proper MID. `hw_info.generate_mid()?` generates the wrong format, which OOA doesn't accept
+        &hw_info.generate_hardware_hash(),
         auth,
         None,
         None,
@@ -144,6 +193,7 @@ pub async fn request_license(
     let mut query = Vec::new();
     query.push(("contentId", content_id));
     query.push(("machineHash", machine_hash));
+    log::debug!("Using hash {}", machine_hash);
 
     match auth {
         LicenseAuth::AccessToken(access_token) => {

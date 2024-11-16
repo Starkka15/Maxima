@@ -34,10 +34,11 @@ pub async fn handle_license_request(
         }
     };
 
-    let hw_info = HardwareInfo::new()?;
+    // TODO: how to get version
+    let hw_info = HardwareInfo::new(2)?;
     let license = request_license(
         &content_id,
-        &hw_info.generate_mid()?,
+        &hw_info.generate_hardware_hash(),
         &auth,
         Some(request.attr_RequestTicket.as_str()),
         Some(request.attr_TicketEngine.as_str()),

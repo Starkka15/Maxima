@@ -4,7 +4,10 @@ use egui::mutex::Mutex;
 use egui::{TextureId, Vec2};
 use egui_glow::glow;
 use log::error;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::FrontendPerformanceSettings;
 
 /// FUCK
 pub struct AppBgRenderer {
@@ -19,7 +22,7 @@ impl AppBgRenderer {
         })
     }
 
-    pub fn draw(&self, ui: &mut egui::Ui, rect: egui::Rect, img_size: Vec2, img: TextureId, game: f32) {
+    pub fn draw(&self, ui: &mut egui::Ui, rect: egui::Rect, img_size: Vec2, img: TextureId, game: f32, flags: FrontendPerformanceSettings) {
         puffin::profile_function!("app background renderer");
         let render = self.render.clone();
 
@@ -30,6 +33,7 @@ impl AppBgRenderer {
                 img_size,
                 painter.texture(img).expect("fuck you"),
                 game,
+                flags,
             );
         });
 
@@ -47,6 +51,7 @@ struct ABGUnsafe {
     program: glow::Program,
     app_dimensions: glow::NativeUniformLocation,
     img_dimensions: glow::NativeUniformLocation,
+    flags: glow::NativeUniformLocation,
 }
 
 impl ABGUnsafe {
@@ -104,6 +109,7 @@ impl ABGUnsafe {
 
             let app_dimensions = gl.get_uniform_location(program, "u_dimensions");
             let img_dimensions = gl.get_uniform_location(program, "u_img_dimensions");
+            let flags = gl.get_uniform_location(program, "u_flags");
 
             for shader in shaders {
                 gl.detach_shader(program, shader);
@@ -114,6 +120,7 @@ impl ABGUnsafe {
                 program,
                 app_dimensions: app_dimensions.expect("app dimensions uniform not found!"),
                 img_dimensions: img_dimensions.expect("image dimensions uniform not found!"),
+                flags: flags.expect("flags uniform not found"),
             })
         }
     }
@@ -124,7 +131,8 @@ impl ABGUnsafe {
         dimensions: Vec2,
         img_dimensions: Vec2,
         img: glow::Texture,
-        game_fade: f32
+        game_fade: f32,
+        flags: FrontendPerformanceSettings
     ) {
         puffin::profile_function!();
         use glow::HasContext as _;
@@ -132,6 +140,11 @@ impl ABGUnsafe {
             gl.use_program(Some(self.program));
             gl.uniform_3_f32(Some(&self.app_dimensions), dimensions.x, dimensions.y, game_fade);
             gl.uniform_2_f32(Some(&self.img_dimensions), img_dimensions.x, img_dimensions.y,);
+            let mut bitflags: u32 = 0;
+            if flags.disable_blur {
+                bitflags = bitflags | 0x000001;
+            }
+            gl.uniform_1_u32(Some(&self.flags), bitflags);
 
             gl.bind_texture(TEXTURE_2D, Some(img));
 

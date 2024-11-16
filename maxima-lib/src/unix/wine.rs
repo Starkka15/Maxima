@@ -10,7 +10,6 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
-use xz2::read::XzDecoder;
 use lazy_static::lazy_static;
 use log::{info, warn};
 use regex::Regex;
@@ -19,9 +18,10 @@ use serde::{Deserialize, Serialize};
 use tar::Archive;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
+    process::Command,
     sync::Mutex,
-    process::Command
 };
+use xz2::read::XzDecoder;
 
 use crate::util::{
     github::{fetch_github_release, fetch_github_releases, github_download_asset, GithubRelease},
@@ -59,7 +59,7 @@ const VERSION_FILE: &str = "dependency-versions.toml";
 struct LutrisRuntime {
     name: String,
     created_at: String,
-    url: String
+    url: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -81,7 +81,6 @@ pub fn proton_dir() -> Result<PathBuf> {
 pub fn eac_dir() -> Result<PathBuf> {
     Ok(maxima_dir()?.join("wine/eac_runtime"))
 }
-
 
 fn versions() -> Result<Versions> {
     let file = maxima_dir()?.join(VERSION_FILE);
@@ -120,9 +119,12 @@ pub(crate) async fn check_wine_validity() -> Result<bool> {
 }
 
 async fn get_lutris_runtimes() -> Result<Vec<LutrisRuntime>> {
-    let client = reqwest::Client::builder().user_agent("ArmchairDevelopers/Maxima").build().unwrap();
+    let client = reqwest::Client::builder()
+        .user_agent("ArmchairDevelopers/Maxima")
+        .build()
+        .unwrap();
     let res = client.get("https://lutris.net/api/runtimes").send().await?;
-    let res = res.error_for_status()?; 
+    let res = res.error_for_status()?;
     let data = res.json().await?;
     Ok(data)
 }
@@ -161,7 +163,7 @@ pub(crate) async fn install_eac() -> Result<()> {
     }
 
     create_dir_all(&path)?;
-    
+
     let xz = XzDecoder::new(&body[..]);
     let archive = Archive::new(xz);
     extract_archive(path, archive)?;
@@ -170,7 +172,6 @@ pub(crate) async fn install_eac() -> Result<()> {
     versions.eac_runtime = eac_runtime.created_at.clone();
     set_versions(versions)
 }
-
 
 fn get_wine_release() -> Result<GithubRelease> {
     let releases = fetch_github_releases("GloriousEggroll", "proton-ge-custom")?;
@@ -253,9 +254,9 @@ pub async fn run_wine_command<I: IntoIterator<Item = T>, T: AsRef<OsStr>>(
 
     if !status.success() {
         bail!(
-            "Failed to run wine command: {} ({})",
+            "Failed to run wine command: {} ({:?})",
             output_str,
-            status.code().unwrap()
+            status.code()
         );
     }
 
@@ -289,13 +290,7 @@ pub(crate) async fn install_wine() -> Result<()> {
         log::warn!("Failed to delete {:?} - {:?}", path, err);
     }
 
-    let _ = run_wine_command(
-        "",
-        None::<[&str; 0]>,
-        None,
-        false,
-        CommandType::Run,
-    ).await;
+    let _ = run_wine_command("", None::<[&str; 0]>, None, false, CommandType::Run).await;
 
     Ok(())
 }
@@ -349,7 +344,8 @@ pub async fn setup_wine_registry() -> Result<()> {
         None,
         false,
         CommandType::Run,
-    ).await?;
+    )
+    .await?;
     run_wine_command(
         "reg",
         Some(vec![
@@ -365,7 +361,8 @@ pub async fn setup_wine_registry() -> Result<()> {
         None,
         false,
         CommandType::Run,
-    ).await?;
+    )
+    .await?;
 
     Ok(())
 }

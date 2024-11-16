@@ -7,6 +7,7 @@ out vec4 out_color;
 uniform sampler2D u_hero;
 uniform vec2 u_dimensions;
 uniform vec2 u_img_dimensions;
+uniform uint u_flags;
 
 void main() {
     float gamma = 1.8;
@@ -17,6 +18,11 @@ void main() {
         fade1 = pow(fade1, gamma/1.0);
         out_color = vec4(pow(texture(u_hero, tex_coords).rgb, vec3(1.0/gamma)) * vec3(fade1), fade1);
     } else {                    // blurred background, space filler
+        if ((int(u_flags) & 0x01) > 0) {
+            out_color = vec4(texture(u_hero, tex_coords).rgb, 1.0);
+            return;
+        }
+        
         float Tau = 6.28318530718;
 
         // Gaussian blur, https://www.shadertoy.com/view/Xltfzj

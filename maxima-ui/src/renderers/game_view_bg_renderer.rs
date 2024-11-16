@@ -2,12 +2,14 @@
 // :)
 
 use eframe::egui_glow;
-use eframe::glow::{BLEND, TEXTURE_2D};
+use eframe::glow::{NativeUniformLocation, BLEND, TEXTURE_2D};
 use egui::mutex::Mutex;
 use egui::{TextureId, Vec2};
 use egui_glow::glow;
 use log::error;
 use std::sync::Arc;
+
+use crate::FrontendPerformanceSettings;
 
 /// FUCK
 pub struct GameViewBgRenderer {
@@ -29,6 +31,7 @@ impl GameViewBgRenderer {
         img_size: Vec2,
         img: TextureId,
         frac: f32,
+        flags: FrontendPerformanceSettings
     ) {
         puffin::profile_function!("game hero renderer");
         let render = self.render.clone();
@@ -40,6 +43,7 @@ impl GameViewBgRenderer {
                 img_size,
                 painter.texture(img).expect("fuck you"),
                 frac,
+                flags,
             );
         });
 
@@ -55,7 +59,8 @@ impl GameViewBgRenderer {
 struct GVBGUnsafe {
     //I say this despite having used C++ for years before rust
     program: glow::Program,
-    frac_uniform: Option<glow::NativeUniformLocation>,
+    frac_uniform: NativeUniformLocation,
+    flag_uniform: NativeUniformLocation,
 }
 
 impl GVBGUnsafe {
@@ -118,7 +123,8 @@ impl GVBGUnsafe {
 
             Some(Self {
                 program: program,
-                frac_uniform: gl.get_uniform_location(program, "u_frac"),
+                frac_uniform: gl.get_uniform_location(program, "u_frac").expect("Failed to find frac uniform"),
+                flag_uniform: gl.get_uniform_location(program, "u_flags").expect("Failed to find flag uniform"),
             })
         }
     }
@@ -130,6 +136,7 @@ impl GVBGUnsafe {
         img_dimensions: Vec2,
         img: glow::Texture,
         frac: f32,
+        flags: FrontendPerformanceSettings,
     ) {
         use glow::HasContext as _;
         unsafe {
@@ -155,7 +162,12 @@ impl GVBGUnsafe {
                 img_dimensions.x,
                 img_dimensions.y,
             );
-            gl.uniform_1_f32(self.frac_uniform.as_ref(), frac);
+            gl.uniform_1_f32(Some(&self.frac_uniform), frac);
+            let mut bitflags: u32 = 0;
+            if flags.disable_blur {
+                bitflags = bitflags | 0x000001;
+            }
+            gl.uniform_1_u32(Some(&self.flag_uniform), bitflags);
 
             gl.bind_texture(TEXTURE_2D, Some(img));
 
