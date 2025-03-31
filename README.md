@@ -21,7 +21,7 @@ Maxima itself is a library (`maxima-lib`), with povided CLI (`maxima-cli`), TUI 
  - Launch EA games owned on Epic/Steam through Maxima directly
  - Playing games installed with EA Desktop on Maxima + vice versa
  - Displaying your in-game status to your friends, and viewing your friends' status'
- - Locating games
+ - Locating games (aka. game importing)
  - Running games under [proton](https://github.com/GloriousEggroll/proton-ge-custom) on Linux/SteamDeck
    - `proton-ge` is automatically installed together with [umu](https://github.com/Open-Wine-Components/umu-launcher).
 
@@ -39,6 +39,7 @@ Maxima itself is a library (`maxima-lib`), with povided CLI (`maxima-cli`), TUI 
  - Support for the store (buying games)
  - Friend Adding/Removing/Inviting
  - Status setting; locked to "online" at the moment
+ - Refactoring Maxima to new architecture allowing multiple frontends to co-exist
  
 **Unsupported:**
  - Battlefield 3/4 are currently unsupported due to how battlelog does game launching. This is on our radar, but isn't a huge priority at the moment.
@@ -52,6 +53,9 @@ Maxima itself is a library (`maxima-lib`), with povided CLI (`maxima-cli`), TUI 
 
 ## Why the name 'Maxima'?
 It's the farthest you can get from the Origin.
+
+## Contributing
+See [CONTRIBUTING.md](./CONTRIBUTING.md)
 
 ## Maintainers:
  - [Sean Kahler](https://github.com/BattleDash) (Lib, Bootstrap, Service)
