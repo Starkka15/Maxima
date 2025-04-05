@@ -306,11 +306,11 @@ service_layer_type!(Image, {
 });
 
 service_layer_type!(AvatarList, {
-    #[serde(default = "ServiceImage::large_avatar")]
+    #[serde(deserialize_with = "ServiceImage::deserialize_large_avatar")]
     large: ServiceImage,
-    #[serde(default = "ServiceImage::medium_avatar")]
+    #[serde(deserialize_with = "ServiceImage::deserialize_medium_avatar")]
     medium: ServiceImage,
-    #[serde(default = "ServiceImage::small_avatar")]
+    #[serde(deserialize_with = "ServiceImage::deserialize_small_avatar")]
     small: ServiceImage,
 });
 
@@ -664,28 +664,44 @@ service_layer_type!(GameHubCollection, {
     items: Vec<ServiceGameHub>,
 });
 
+// Serde treats a field being null differently from the field not being there, so we need to do custom deserialization to handle this.
 impl ServiceImage {
-    fn large_avatar() -> Self {
-        ServiceImage {
-            height: Some(416),
-            width: Some(416),
-            path: LARGE_AVATAR_PATH.to_owned(),
-        }
+    fn deserialize_large_avatar<'de, D>(deserializer: D) -> Result<ServiceImage, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(
+            ServiceImage::deserialize(deserializer).unwrap_or(ServiceImage {
+                height: Some(416),
+                width: Some(416),
+                path: LARGE_AVATAR_PATH.to_owned(),
+            }),
+        )
     }
 
-    fn medium_avatar() -> Self {
-        ServiceImage {
-            width: Some(208),
-            height: Some(208),
-            path: MEDIUM_AVATAR_PATH.to_owned(),
-        }
+    fn deserialize_medium_avatar<'de, D>(deserializer: D) -> Result<ServiceImage, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(
+            ServiceImage::deserialize(deserializer).unwrap_or(ServiceImage {
+                width: Some(208),
+                height: Some(208),
+                path: MEDIUM_AVATAR_PATH.to_owned(),
+            }),
+        )
     }
 
-    fn small_avatar() -> Self {
-        ServiceImage {
-            width: Some(40),
-            height: Some(40),
-            path: SMALL_AVATAR_PATH.to_owned(),
-        }
+    fn deserialize_small_avatar<'de, D>(deserializer: D) -> Result<ServiceImage, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(
+            ServiceImage::deserialize(deserializer).unwrap_or(ServiceImage {
+                width: Some(40),
+                height: Some(40),
+                path: SMALL_AVATAR_PATH.to_owned(),
+            }),
+        )
     }
 }
