@@ -17,3 +17,4 @@ strip = true
 [patch.crates-io]
 flate2 = { git = 'https://github.com/ArmchairDevelopers/flate2-rs.git' }
 async-compression = { git = 'https://github.com/ArmchairDevelopers/async-compression.git' }
+dll-syringe = { git = "https://github.com/fry/dll-syringe", rev = "0a8b18e" }

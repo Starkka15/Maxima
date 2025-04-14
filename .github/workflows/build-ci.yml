@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust-version: [nightly-2025-02-28]
+        rust-version: [nightly]
         os: [ubuntu-latest, windows-latest]
         experimental: [false]
 
