@@ -112,7 +112,7 @@ async fn read_reg_key(path: &str) -> Option<String> {
                 return None;
             }
 
-            let mut buf: Vec<u16> = vec![0; (dw_size as usize / 2) - 1];
+            let mut buf: Vec<u16> = vec![0; dw_size as usize / 2];
             if RegQueryValueExW(
                 handle,
                 U16CString::from_str(value_name).unwrap().as_ptr(),
@@ -127,7 +127,7 @@ async fn read_reg_key(path: &str) -> Option<String> {
             }
 
             RegCloseKey(handle);
-            return Some(String::from_utf16_lossy(&buf));
+            return Some(String::from_utf16_lossy(&buf[..buf.len() - 1]));
         }
     }
 
