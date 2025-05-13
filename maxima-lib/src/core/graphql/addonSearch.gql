@@ -1,0 +1,35 @@
+query addonSearch($masterTitleId: String!, $categoryId: String!, $offerIds: [String!]!, $platform: String!) {
+    me {
+        addonSearch(input: { masterTitleId: $masterTitleId, categoryId: $categoryId, offerIds: $offerIds, platform: $platform }) {
+            addonOffers {
+                offerId
+                offerType
+                financeId
+                defaultLocale
+                platform
+                imageServer
+                gameEditionTypeFacetKeyRankDesc
+                longDescription
+                displayName
+                shortDescription
+                packArtSmall
+                packArtMedium
+                packArtLarge
+                originDisplayType
+                isPublished
+                publishedDate
+                cdnAssetRoot
+                originStorePreview
+                isOwned
+                userCanPurchase
+                price
+                displayPrice
+                listPrice
+                displayListPrice
+                currencyType
+                currency
+                isDiscount
+            }
+        }
+    }
+}

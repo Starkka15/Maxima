@@ -34,6 +34,7 @@ use super::{
         game::{handle_all_game_info_request, handle_game_info_request},
         igo::handle_show_igo_window_request,
         license::handle_license_request,
+        offer::handle_query_offers_request,
         profile::{
             handle_presence_request, handle_profile_request, handle_query_friends_request,
             handle_query_image_request, handle_query_presence_request, handle_set_presence_request,
@@ -402,6 +403,7 @@ impl Connection {
             GetAuthCode handle_auth_code_request,
             GetPresence handle_presence_request,
             SetPresence handle_set_presence_request,
+            QueryOffers handle_query_offers_request,
             QueryPresence handle_query_presence_request,
             QueryFriends handle_query_friends_request,
             QueryEntitlements handle_query_entitlements_request,

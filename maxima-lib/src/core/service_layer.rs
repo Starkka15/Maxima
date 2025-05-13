@@ -79,6 +79,7 @@ macro_rules! define_graphql_request {
     }}
 }
 
+define_graphql_request!(ServiceAggregationLayer, addonSearch, me); // Input: ServiceAddonSearchRequest, Output: AddonSearchResult
 define_graphql_request!(ServiceAggregationLayer, availableBuilds, availableBuilds); // Input: ServiceAvailableBuildsRequest, Output: ServiceAvailableBuild[]
 define_graphql_request!(ServiceAggregationLayer, downloadUrl, downloadUrl); // Input: ServiceDownloadUrlRequest, Output: ServiceDownloadUrlMetadata
 define_graphql_request!(ServiceAggregationLayer, GameImages, game); // Input: ServiceGameImagesRequest, Output: ServiceGame
@@ -295,6 +296,13 @@ service_layer_type!(GetPreloadedOwnedGamesRequest, {
 service_layer_type!(GetUserPlayerRequest, {
     // There are presumably variables for this request,
     // but I'm not sure what they are.
+});
+
+service_layer_type!(AddonSearchRequest, {
+    master_title_id: String,
+    category_id: String,
+    offer_ids: Vec<String>,
+    platform: String,
 });
 
 // Responses
@@ -643,6 +651,45 @@ impl ServiceLegacyOffer {
             .is_empty()
     }
 }
+
+service_layer_type!(AddonOffer, {
+        offer_id: String,
+        offer_type: String,
+        finance_id: String,
+        default_locale: String,
+        platform: crate::core::ecommerce::CommercePlatform,
+        image_server: String,
+        game_edition_type_facet_key_rank_desc: String,
+        long_description: String,
+        display_name: String,
+        short_description: String,
+        pack_art_small: String,
+        pack_art_medium: String,
+        pack_art_large: String,
+        origin_display_type: String,
+        is_published: bool,
+        published_date: String,
+        cdn_asset_root: String,
+        origin_store_preview: bool,
+        is_owned: bool,
+        user_can_purchase: bool,
+        price: f32,
+        display_price: String,
+        list_price: f64,
+        display_list_price: String,
+        currency_type: String,
+        currency: String,
+        is_discount: bool,
+    }
+);
+
+service_layer_type!(AddonSearchResultRoot, {
+    addonSearch: ServiceAddonSearchResult,
+});
+
+service_layer_type!(AddonSearchResult, {
+    addonOffers: Vec<ServiceAddonOffer>,
+});
 
 service_layer_type!(RecentGames, {});
 

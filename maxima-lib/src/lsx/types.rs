@@ -105,6 +105,7 @@ pub enum LSXRequestType {
     GetAuthCode(LSXGetAuthCode),
     GetPresence(LSXGetPresence),
     SetPresence(LSXSetPresence),
+    QueryOffers(LSXQueryOffers),
     QueryPresence(LSXQueryPresence),
     QueryFriends(LSXQueryFriends),
     QueryEntitlements(LSXQueryEntitlements),
@@ -129,6 +130,7 @@ pub enum LSXResponseType {
     AreChunksInstalledResponse(LSXAreChunksInstalledResponse),
     AuthCode(LSXAuthCode),
     GetPresenceResponse(LSXGetPresenceResponse),
+    QueryOffersResponse(LSXQueryOffersResponse),
     QueryPresenceResponse(LSXQueryPresenceResponse),
     QueryFriendsResponse(LSXQueryFriendsResponse),
     QueryEntitlementsResponse(LSXQueryEntitlementsResponse),
@@ -302,6 +304,16 @@ lsx_message! {
         SessionId: Option<String>,
     },
     data {}
+}
+
+lsx_message! {
+    QueryOffers;
+    attr {
+        UserId: u64,
+    },
+    data {
+        FilterCategories: Vec<String>,
+    }
 }
 
 lsx_message! {
@@ -570,6 +582,42 @@ lsx_message! {
         GroupId: Option<String>,
     },
     data {}
+}
+
+lsx_message! {
+    Offer;
+    attr {
+        InventorySold: u64,
+        LocalizedPrice: String,
+        OriginalPrice: String,
+        DownloadDate: String,
+        Currency: String,
+        InventoryAvailable: u64,
+        PurchaseDate: String,
+        DownloadSize: u64,
+        bCanPurchase: bool,
+        Price: String,
+        Type: String,
+        LocalizedOriginalPrice: String,
+        InventoryCap: u64,
+        Description: String,
+        bHidden: bool,
+        PlayableDate: String,
+        Name: String,
+        ImageId: String,
+        bIsDiscounted: bool,
+        OfferId: String,
+        bIsOwned: bool,
+    },
+    data {}
+}
+
+lsx_message! {
+    QueryOffersResponse;
+    attr {},
+    data {
+        offer: Vec<LSXOffer>
+    }
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
