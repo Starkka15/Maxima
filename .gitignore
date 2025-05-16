@@ -3,7 +3,3 @@
 /.idea
 
 Cargo.lock
-
-maxima-native/bindings.h
-maxima-native/test/*
-!maxima-native/test/example.c

@@ -4,7 +4,6 @@ members = [
     "maxima-bootstrap",
     "maxima-cli",
     "maxima-lib",
-    "maxima-native",
     "maxima-service",
     "maxima-tui",
     "maxima-ui",

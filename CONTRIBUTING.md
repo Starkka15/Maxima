@@ -17,7 +17,6 @@ Currently Maxima is split into crates that serve different purposes. Let's break
 - [maxima-cli](./maxima-cli) - CLI frontend code
 - [maxima-tui](./maxima-tui) - TUI client built using `ratatui`
 - [maxima-bootstrap](./maxima-bootstrap) - separate utility used for handling `link2ea`, `origin`, `origin2` and `qrc` (for auth) protocols
-- [maxima-native](./maxima-native) - C bindings for maxima lib
 - [maxima-service](./maxima-service) - (Windows only) a background service for tasks requiring privilege elevation
 - [maxima-resources](./maxima-resources) - (Windows only) small crate exposing common assets and metadata
 

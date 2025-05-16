@@ -73,7 +73,6 @@ jobs:
       with:
         name: maxima-x86_64-win64
         path: |
-          target/release/maxima_native.dll
           target/release/maxima-service.exe
           target/release/maxima-bootstrap.exe
           target/release/maxima-cli.exe
@@ -94,7 +93,6 @@ jobs:
       with:
         name: maxima-x86_64-linux-musl
         path: |
-          target/x86_64-unknown-linux-musl/release/libmaxima_native.so
           target/x86_64-unknown-linux-musl/release/maxima-bootstrap
           target/x86_64-unknown-linux-musl/release/maxima-cli
           target/x86_64-unknown-linux-musl/release/maxima-tui
