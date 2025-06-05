@@ -17,7 +17,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use tar::Archive;
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
     sync::Mutex,
 };
@@ -240,6 +240,7 @@ pub async fn run_wine_command<I: IntoIterator<Item = T>, T: AsRef<OsStr>>(
         .env("PROTONPATH", proton_path)
         .env("STORE", "ea")
         .env("PROTON_EAC_RUNTIME", eac_path)
+        .env("UMU_ZENITY", "1")
         .env("WINEDEBUG", "fixme-all")
         .env("LD_PRELOAD", "") // Fixes some log errors for some games
         .arg(arg);
@@ -357,94 +358,60 @@ fn extract_archive<R: Read + Sized>(dir: PathBuf, mut archive: Archive<R>) -> Re
 }
 
 pub async fn setup_wine_registry() -> Result<()> {
+    let mut reg_content = "Windows Registry Editor Version 5.00\n\n".to_string();
+    // This supports text values only at the moment
+    // if you need a dword - implement it
+    let entries: &[(&str, &[(&str, &str)])] = &[
+        (
+            "HKEY_LOCAL_MACHINE\\Software\\Electronic Arts\\EA Desktop",
+            &[("InstallSuccessful", "true")],
+        ),
+        (
+            "HKEY_LOCAL_MACHINE\\Software\\Electronic Arts\\Origin",
+            &[
+                ("InstallSuccessful", "true"),
+                ("ClientPath", "C:/Windows/System32/conhost.exe"),
+            ],
+        ),
+        (
+            "HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Electronic Arts\\EA Desktop",
+            &[("InstallSuccessful", "true")],
+        ),
+        (
+            "HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Electronic Arts\\Origin",
+            &[
+                ("InstallSuccessful", "true"),
+                ("ClientPath", "C:/Windows/System32/conhost.exe"),
+            ],
+        ),
+    ];
+
+    for (key, values) in entries.into_iter() {
+        reg_content.push_str(&format!("[{}]\n", key));
+        for (name, value) in values.into_iter() {
+            let value = value.replace("\\", "\\\\");
+            reg_content.push_str(&format!("\"{}\"=\"{}\"\n\n", name, value));
+        }
+    }
+
+    let path = maxima_dir().unwrap().join("temp").join("wine.reg");
+    let _ = tokio::fs::create_dir_all(path.parent().unwrap());
+
+    {
+        let mut reg_file = tokio::fs::File::create(&path).await?;
+        reg_file.write_all(reg_content.as_bytes()).await;
+    }
+
     run_wine_command(
-        "reg",
-        Some(vec![
-            "add",
-            "HKLM\\Software\\Electronic Arts\\EA Desktop",
-            "/v",
-            "InstallSuccessful",
-            "/d",
-            "true",
-            "/f",
-            "/reg:64",
-        ]),
-        None,
-        false,
-        CommandType::Run,
-    )
-    .await?;
-    run_wine_command(
-        "reg",
-        Some(vec![
-            "add",
-            "HKLM\\Software\\Origin",
-            "/v",
-            "InstallSuccessful",
-            "/d",
-            "true",
-            "/f",
-            "/reg:64",
-        ]),
+        "regedit",
+        Some(vec![path.to_str().unwrap()]),
         None,
         false,
         CommandType::Run,
     )
     .await?;
 
-    run_wine_command(
-        "reg",
-        Some(vec![
-            "add",
-            "HKLM\\Software\\Origin",
-            "/v",
-            "InstallSuccessful",
-            "/d",
-            "true",
-            "/f",
-            "/reg:32",
-        ]),
-        None,
-        false,
-        CommandType::Run,
-    )
-    .await?;
-
-    run_wine_command(
-        "reg",
-        Some(vec![
-            "add",
-            "HKLM\\Software\\Origin",
-            "/v",
-            "ClientPath",
-            "/d",
-            "C:/Windows/System32/conhost.exe",
-            "/f",
-            "/reg:32",
-        ]),
-        None,
-        false,
-        CommandType::Run,
-    )
-    .await?;
-
-    run_wine_command(
-        "reg",
-        Some(vec![
-            "add",
-            "HKLM\\Software\\Origin",
-            "/v",
-            "ClientPath",
-            "/d",
-            "C:/Windows/System32/conhost.exe",
-            "/f",
-            "/reg:64",
-        ]),
-        None,
-        false,
-        CommandType::Run,
-    )
-    .await?;
+    let _ = tokio::fs::remove_file(path).await;
 
     Ok(())
 }
