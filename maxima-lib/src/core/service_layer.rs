@@ -1,20 +1,20 @@
 #![allow(non_snake_case)]
 
-use anyhow::{bail, Result};
-
 use log::debug;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2_const::Sha256;
+use thiserror::Error;
 
 use derive_builder::Builder;
 use derive_getters::Getters;
 
-use crate::core::endpoints::API_CONTENTFUL_PROXY;
-
 use super::{
-    auth::storage::LockedAuthStorage, endpoints::API_SERVICE_AGGREGATION_LAYER, locale::Locale,
+    auth::storage::{LockedAuthStorage, TokenError},
+    endpoints::API_CONTENTFUL_PROXY,
+    endpoints::API_SERVICE_AGGREGATION_LAYER,
+    locale::Locale,
 };
 
 const LARGE_AVATAR_PATH: &str =
@@ -23,6 +23,41 @@ const MEDIUM_AVATAR_PATH: &str =
     "https://eaavatarservice.akamaized.net/production/avatar/prod/1/599/208x208.JPEG";
 const SMALL_AVATAR_PATH: &str =
     "https://eaavatarservice.akamaized.net/production/avatar/prod/1/599/40x40.JPEG";
+
+#[derive(Error, Debug)]
+pub enum ServiceLayerError {
+    #[error(transparent)]
+    RequestFailure(#[from] reqwest::Error),
+    #[error(transparent)]
+    AuthToken(#[from] TokenError),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    ServiceAvailableBuildsRequestBuilder(#[from] ServiceAvailableBuildsRequestBuilderError),
+    #[error(transparent)]
+    ServiceAvailableBuildsBuilder(#[from] ServiceAvailableBuildsBuilderError),
+    #[error(transparent)]
+    ServiceDownloadUrlRequestBuilder(#[from] ServiceDownloadUrlRequestBuilderError),
+    #[error(transparent)]
+    ServiceGetLegacyCatalogDefsRequestBuilder(
+        #[from] ServiceGetLegacyCatalogDefsRequestBuilderError,
+    ),
+
+    #[error("HTTP {status_code:?}: `{message}`")]
+    Http {
+        status_code: StatusCode,
+        message: String,
+    },
+    #[error("GraphQL error in operation `{operation}`: `{error:?}`")]
+    GraphQL {
+        operation: String,
+        error: Option<String>,
+    },
+    #[error("Request did not return a `data` key")]
+    NoData,
+    #[error("Request did not return a response containing the requested field")]
+    MissingField,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -112,7 +147,7 @@ impl ServiceLayerClient {
         &self,
         operation: &ServiceLayerGraphQLRequest,
         variables: T,
-    ) -> Result<R>
+    ) -> Result<R, ServiceLayerError>
     where
         T: Serialize,
         R: for<'a> Deserialize<'a>,
@@ -132,7 +167,7 @@ impl ServiceLayerClient {
         operation: &ServiceLayerGraphQLRequest,
         variables: T,
         full_query: bool,
-    ) -> Result<R>
+    ) -> Result<R, ServiceLayerError>
     where
         T: Serialize,
         R: for<'a> Deserialize<'a>,
@@ -184,7 +219,10 @@ impl ServiceLayerClient {
         let status = res.status();
         let text = res.text().await?;
         if status != StatusCode::OK {
-            bail!("Service request '{}' failed: {}", operation.operation, text);
+            return Err(ServiceLayerError::Http {
+                status_code: status,
+                message: text,
+            });
         }
 
         debug!(
@@ -194,31 +232,37 @@ impl ServiceLayerClient {
 
         let result = serde_json::from_str::<Value>(text.as_str())?;
         let errors = result.get("errors");
-        if errors.is_some() {
-            let errors = errors.unwrap().as_array().unwrap();
+        if let Some(errors) = errors {
+            let errors = errors.as_array().unwrap();
             let error = if let Value::Object(o) = &errors[0] {
                 o
             } else {
-                bail!("Service request '{}' failed", operation.operation);
+                return Err(ServiceLayerError::GraphQL {
+                    operation: operation.operation.to_string(),
+                    error: None,
+                });
             };
 
-            bail!(
-                "Service request '{}' failed: {}",
-                operation.operation,
-                error.get("message").unwrap().as_str().unwrap()
-            );
+            return Err(ServiceLayerError::GraphQL {
+                operation: operation.operation.to_string(),
+                error: if let Some(error) = error.get("message") {
+                    Some(error.to_string())
+                } else {
+                    None
+                },
+            });
         }
 
         let data = result
             .get("data")
-            .unwrap()
+            .ok_or(ServiceLayerError::NoData)?
             .as_object()
-            .unwrap()
+            .ok_or(ServiceLayerError::NoData)?
             .get(operation.key)
-            .unwrap()
+            .ok_or(ServiceLayerError::NoData)?
             .to_owned();
 
-        Ok(serde_json::from_value::<R>(data).unwrap())
+        Ok(serde_json::from_value::<R>(data)?)
     }
 }
 
@@ -480,12 +524,12 @@ impl ServiceAvailableBuild {
     pub fn to_string(&self) -> String {
         let mut str = self.game_version.to_owned().unwrap_or("UnkVer".to_owned());
 
-        if self.download_type.is_some() {
-            str += &("/".to_owned() + &self.download_type.as_ref().unwrap().to_string());
+        if let Some(download_type) = &self.download_type {
+            str += &("/".to_owned() + &*download_type.to_string());
         }
 
-        if self.build_live_date.is_some() {
-            str += &(" - ".to_owned() + &self.build_live_date.as_ref().unwrap());
+        if let Some(build_live_date) = &self.build_live_date {
+            str += &(" - ".to_owned() + build_live_date);
         }
 
         str

@@ -5,6 +5,7 @@ pub mod cloudsync;
 pub mod concurrency;
 pub mod ecommerce;
 pub mod endpoints;
+pub mod error;
 pub mod launch;
 pub mod library;
 pub mod locale;
@@ -35,7 +36,6 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{bail, Result};
 use cloudsync::{CloudSyncClient, CloudSyncLockMode};
 use derive_builder::Builder;
 use derive_getters::Getters;
@@ -43,31 +43,31 @@ use log::{error, info, warn};
 use strum_macros::IntoStaticStr;
 
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::{
-    content::manager::ContentManager,
-    lsx::{self, types::LSXRequestType},
-    rtm::client::{BasicPresence, RtmClient},
-    util::native::maxima_dir,
-};
-
 use self::{
-    auth::storage::{AuthStorage, LockedAuthStorage},
+    auth::storage::{AuthError, AuthStorage, LockedAuthStorage, TokenError},
     cache::DynamicCache,
     launch::ActiveGameContext,
     library::GameLibrary,
     locale::Locale,
     service_layer::{
-        ServiceAvatarListBuilder, ServiceFriends, ServiceGetBasicPlayerRequestBuilder,
-        ServiceGetMyFriendsRequestBuilder, ServiceGetUserPlayerRequest, ServiceImage,
-        ServiceImageBuilder, ServiceLayerClient, ServicePlayer, ServicePlayerBuilder, ServiceUser,
-        ServiceUserBuilder, SERVICE_REQUEST_GETBASICPLAYER, SERVICE_REQUEST_GETMYFRIENDS,
+        ServiceAvatarListBuilder, ServiceAvatarListBuilderError, ServiceFriends,
+        ServiceGetBasicPlayerRequestBuilder, ServiceGetMyFriendsRequestBuilder,
+        ServiceGetUserPlayerRequest, ServiceImage, ServiceImageBuilder, ServiceImageBuilderError,
+        ServiceLayerClient, ServiceLayerError, ServicePlayer, ServicePlayerBuilder,
+        ServicePlayerBuilderError, ServiceUser, ServiceUserBuilder, ServiceUserBuilderError,
+        SERVICE_REQUEST_GETBASICPLAYER, SERVICE_REQUEST_GETMYFRIENDS,
         SERVICE_REQUEST_GETUSERPLAYER,
     },
 };
-
-mod error;
+use crate::{
+    content::manager::{ContentManager, ContentManagerError},
+    lsx::{self, service::LSXServerError, types::LSXRequestType},
+    rtm::client::{BasicPresence, RtmClient},
+    util::native::{maxima_dir, NativeError},
+};
 
 #[derive(Clone, IntoStaticStr)]
 pub enum MaximaEvent {
@@ -119,12 +119,34 @@ pub struct MaximaOptions {
     dummy_local_user: bool,
 }
 
+#[derive(Error, Debug)]
+pub enum MaximaCreationError {
+    #[error(transparent)]
+    Auth(#[from] AuthError),
+    #[error(transparent)]
+    ContentManager(#[from] ContentManagerError),
+    #[error(transparent)]
+    MaximaOptionsBuilder(#[from] MaximaOptionsBuilderError),
+    #[error(transparent)]
+    ParseInt(#[from] std::num::ParseIntError),
+    #[error(transparent)]
+    ServiceAvatarListBuilder(#[from] ServiceAvatarListBuilderError),
+    #[error(transparent)]
+    ServiceImageBuilder(#[from] ServiceImageBuilderError),
+    #[error(transparent)]
+    ServicePlayerBuilder(#[from] ServicePlayerBuilderError),
+    #[error(transparent)]
+    ServiceUserBuilder(#[from] ServiceUserBuilderError),
+}
+
 pub type LockedMaxima = Arc<Mutex<Maxima>>;
 
 impl Maxima {
-    pub async fn new_with_options(options: MaximaOptions) -> Result<LockedMaxima> {
+    pub async fn new_with_options(
+        options: MaximaOptions,
+    ) -> Result<LockedMaxima, MaximaCreationError> {
         let lsx_port = if let Ok(lsx_port) = env::var("MAXIMA_LSX_PORT") {
-            lsx_port.parse::<u16>().unwrap()
+            lsx_port.parse::<u16>()?
         } else {
             3216
         };
@@ -197,7 +219,7 @@ impl Maxima {
         })))
     }
 
-    pub async fn new() -> Result<LockedMaxima> {
+    pub async fn new() -> Result<LockedMaxima, MaximaCreationError> {
         Maxima::new_with_options(
             MaximaOptionsBuilder::default()
                 .load_auth_storage(true)
@@ -207,7 +229,7 @@ impl Maxima {
         .await
     }
 
-    pub async fn start_lsx(&self, maxima: LockedMaxima) -> Result<()> {
+    pub async fn start_lsx(&self, maxima: LockedMaxima) -> Result<(), LSXServerError> {
         let lsx_port = self.lsx_port;
 
         tokio::spawn(async move {
@@ -220,17 +242,15 @@ impl Maxima {
         Ok(())
     }
 
-    pub async fn access_token(&mut self) -> Result<String> {
+    pub async fn access_token(&mut self) -> Result<String, TokenError> {
         let mut auth_storage = self.auth_storage.lock().await;
-        let access_token = auth_storage.access_token().await?;
-        if access_token.is_none() {
-            bail!("You are not signed in");
+        match auth_storage.access_token().await? {
+            None => Err(TokenError::Absent),
+            Some(token) => Ok(token),
         }
-
-        Ok(access_token.unwrap())
     }
 
-    pub async fn local_user(&self) -> Result<ServiceUser> {
+    pub async fn local_user(&self) -> Result<ServiceUser, ServiceLayerError> {
         if let Some(user) = self.dummy_local_user.clone() {
             return Ok(user);
         }
@@ -253,7 +273,7 @@ impl Maxima {
         Ok(user)
     }
 
-    pub async fn friends(&self, page: u32) -> Result<Vec<ServicePlayer>> {
+    pub async fn friends(&self, page: u32) -> Result<Vec<ServicePlayer>, ServiceLayerError> {
         let cache_key = format!("friends_{}", page);
         if let Some(cached) = self.request_cache.get(&cache_key) {
             return Ok(cached);
@@ -267,7 +287,8 @@ impl Maxima {
                     .limit(100)
                     .offset(page)
                     .is_mutual_friends_enabled(false)
-                    .build()?,
+                    .build()
+                    .unwrap(),
             )
             .await?;
 
@@ -292,9 +313,13 @@ impl Maxima {
         events
     }
 
-    pub async fn player_by_id(&self, id: &str) -> Result<ServicePlayer> {
+    pub async fn player_by_id(&self, id: &str) -> Result<ServicePlayer, ServiceLayerError> {
         if let Some(user) = &self.dummy_local_user {
-            return Ok(user.player().as_ref().unwrap().clone());
+            return Ok(user
+                .player()
+                .as_ref()
+                .ok_or(ServiceLayerError::MissingField)?
+                .clone());
         }
 
         let cache_key = "basic_player_".to_owned() + id;
@@ -308,25 +333,27 @@ impl Maxima {
                 SERVICE_REQUEST_GETBASICPLAYER,
                 ServiceGetBasicPlayerRequestBuilder::default()
                     .pd(id.to_string())
-                    .build()?,
+                    .build()
+                    .unwrap(),
             )
             .await?;
 
         let avatars = data.avatar();
-        if avatars.is_none() {
-            bail!("No avatars found");
-        }
 
-        let avatars = avatars.as_ref().unwrap();
-        self.cache_avatar_image(&id, avatars.large()).await?;
-        self.cache_avatar_image(&id, avatars.medium()).await?;
-        self.cache_avatar_image(&id, avatars.small()).await?;
+        let avatars = avatars.as_ref().ok_or(ServiceLayerError::MissingField)?;
+        let _ = self.cache_avatar_image(&id, avatars.large()).await;
+        let _ = self.cache_avatar_image(&id, avatars.medium()).await;
+        let _ = self.cache_avatar_image(&id, avatars.small()).await;
 
         self.request_cache.insert(cache_key, data.clone());
         Ok(data)
     }
 
-    async fn cache_avatar_image(&self, id: &str, image: &ServiceImage) -> Result<()> {
+    async fn cache_avatar_image(
+        &self,
+        id: &str,
+        image: &ServiceImage,
+    ) -> Result<(), error::CacheRetrievalError> {
         let path = self.cached_avatar_path(
             id,
             image.width().unwrap_or(727),
@@ -346,7 +373,12 @@ impl Maxima {
         Ok(())
     }
 
-    pub async fn avatar_image(&self, id: &str, width: u16, height: u16) -> Result<PathBuf> {
+    pub async fn avatar_image(
+        &self,
+        id: &str,
+        width: u16,
+        height: u16,
+    ) -> Result<PathBuf, error::CacheRetrievalError> {
         let path = self.cached_avatar_path(id, width, height)?;
         if !path.exists() {
             self.player_by_id(id).await?;
@@ -357,13 +389,18 @@ impl Maxima {
         }
 
         if !path.exists() {
-            bail!("Failed to cache avatar images for {}", id);
+            return Err(error::CacheRetrievalError::Incapable(id.to_string()));
         }
 
         Ok(path)
     }
 
-    pub fn cached_avatar_path(&self, id: &str, width: u16, height: u16) -> Result<PathBuf> {
+    pub fn cached_avatar_path(
+        &self,
+        id: &str,
+        width: u16,
+        height: u16,
+    ) -> Result<PathBuf, NativeError> {
         let dir = maxima_dir()?.join("cache/avatars");
         create_dir_all(&dir)?;
 
@@ -395,11 +432,10 @@ impl Maxima {
     }
 
     pub fn set_player_started(&mut self) {
-        if self.playing.is_none() {
-            return;
+        match &mut self.playing {
+            Some(ref mut playing) => playing.set_started(),
+            None => return,
         }
-
-        self.playing.as_mut().unwrap().set_started();
     }
 
     /// Call this as often as possible from the loop you consume events from
@@ -407,12 +443,12 @@ impl Maxima {
         self.update_playing_status().await;
 
         let result = self.content_manager.update().await;
-        if let Err(err) = result {
-            warn!("Failed to update content manager: {}", err);
-        } else {
-            let result = result.unwrap();
-            if let Some(event) = result {
-                self.call_event(event);
+        match result {
+            Err(err) => warn!("Failed to update content manager: {}", err),
+            Ok(result) => {
+                if let Some(event) = result {
+                    self.call_event(event);
+                }
             }
         }
     }
@@ -436,17 +472,16 @@ impl Maxima {
                     .cloud_sync
                     .obtain_lock(offer, CloudSyncLockMode::Write)
                     .await;
-                if let Err(err) = result {
-                    error!("Failed to obtain CloudSync write lock: {}", err);
-                } else {
-                    let lock = result.unwrap();
+                match result {
+                    Err(err) => error!("Failed to obtain CloudSync write lock: {}", err),
+                    Ok(lock) => {
+                        let result = lock.sync_files().await;
+                        if let Err(err) = result {
+                            error!("Failed to write to CloudSync: {}", err);
+                        }
 
-                    let result = lock.sync_files().await;
-                    if let Err(err) = result {
-                        error!("Failed to write to CloudSync: {}", err);
+                        lock.release().await.ok();
                     }
-
-                    lock.release().await.ok();
                 }
             }
         }

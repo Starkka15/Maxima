@@ -1,3 +1,8 @@
+use derive_getters::Getters;
+use lazy_static::lazy_static;
+use log::{debug, error, warn};
+use quick_xml::DeError;
+use regex::Regex;
 use std::{
     io::{ErrorKind, Read, Write},
     net::TcpStream,
@@ -5,21 +10,9 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-
-use anyhow::{bail, Result};
-
-use derive_getters::Getters;
-use lazy_static::lazy_static;
-use log::{debug, error, warn};
-use regex::Regex;
 use sysinfo::{Pid, PidExt, ProcessExt, System, SystemExt};
+use thiserror::Error;
 use tokio::sync::{MutexGuard, RwLock};
-
-use crate::{
-    core::{launch::ActiveGameContext, LockedMaxima, Maxima, MaximaEvent},
-    lsx::types::LSXRequestType,
-    util::simple_crypto::{simple_decrypt, simple_encrypt},
-};
 
 use super::{
     request::{
@@ -48,6 +41,35 @@ use super::{
         LSXResponse, LSX,
     },
 };
+use crate::{
+    core::{
+        auth::storage::TokenError, launch::ActiveGameContext, LockedMaxima, Maxima, MaximaEvent,
+    },
+    lsx::{request::LSXRequestError, types::LSXRequestType},
+    util::{
+        native::NativeError,
+        simple_crypto::{simple_decrypt, simple_encrypt},
+    },
+};
+
+#[derive(Error, Debug)]
+pub enum LSXConnectionError {
+    #[error(transparent)]
+    Xml(#[from] DeError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Request(#[from] LSXRequestError),
+    #[error(transparent)]
+    Native(#[from] NativeError),
+
+    #[error("LSX connection closed")]
+    Closed,
+    #[error("there is no active game context, LSX connection cannot be established")]
+    GameContext,
+    #[error("internal error in LSX connection: {0}")]
+    Internal(ErrorKind),
+}
 
 const CORE_SENDER: &str = "EALS";
 
@@ -107,11 +129,11 @@ impl ConnectionState {
         self.maxima.clone()
     }
 
-    pub async fn access_token(&mut self) -> Result<String> {
-        Ok(self.maxima().await.access_token().await?)
+    pub async fn access_token(&mut self) -> Result<String, TokenError> {
+        self.maxima().await.access_token().await
     }
 
-    pub fn queue_message(&mut self, message: LSX) -> Result<()> {
+    pub fn queue_message(&mut self, message: LSX) -> Result<(), LSXConnectionError> {
         let mut str = quick_xml::se::to_string(&message)?;
         debug!("Queuing LSX Message: {}", str);
 
@@ -125,7 +147,7 @@ impl ConnectionState {
     }
 }
 
-pub fn get_os_pid(context: &ActiveGameContext) -> Result<u32> {
+pub fn get_os_pid(context: &ActiveGameContext) -> Result<u32, NativeError> {
     let mut pid = None;
 
     let sys = System::new_all();
@@ -161,12 +183,12 @@ pub fn get_os_pid(context: &ActiveGameContext) -> Result<u32> {
 }
 
 #[cfg(target_os = "windows")]
-pub async fn get_wine_pid(_launch_id: &str, _name: &str) -> Result<u32> {
+pub async fn get_wine_pid(_launch_id: &str, _name: &str) -> Result<u32, NativeError> {
     Ok(0)
 }
 
 #[cfg(target_os = "linux")]
-pub async fn get_wine_pid(launch_id: &str, name: &str) -> Result<u32> {
+pub async fn get_wine_pid(launch_id: &str, name: &str) -> Result<u32, NativeError> {
     use crate::core::background_service::wine_get_pid;
 
     wine_get_pid(launch_id, name).await
@@ -179,21 +201,22 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub async fn new(maxima_arc: LockedMaxima, stream: TcpStream) -> Result<Self> {
-        stream.set_nodelay(true).unwrap();
-        stream.set_nonblocking(true).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
+    pub async fn new(
+        maxima_arc: LockedMaxima,
+        stream: TcpStream,
+    ) -> Result<Self, LSXConnectionError> {
+        stream.set_nodelay(true)?;
+        stream.set_nonblocking(true)?;
+        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
 
         let maxima: MutexGuard<'_, Maxima> = maxima_arc.lock().await;
-        let playing = maxima.playing();
-        if playing.is_none() {
-            stream.shutdown(std::net::Shutdown::Both)?;
-            bail!("There is no active game context, LSX connection cannot be established");
-        }
-
-        let context = playing.as_ref().unwrap();
+        let context: &ActiveGameContext = match maxima.playing() {
+            Some(context) => context,
+            None => {
+                stream.shutdown(std::net::Shutdown::Both)?;
+                return Err(LSXConnectionError::GameContext);
+            }
+        };
 
         // The PID system is mainly for Kyber injection
         let mut pid = get_os_pid(context);
@@ -208,9 +231,9 @@ impl Connection {
                             .replace('\\', "/"),
                     )
                     .file_name()
-                    .unwrap()
+                    .ok_or(NativeError::FileName)?
                     .to_str()
-                    .unwrap()
+                    .ok_or(NativeError::Stringify)?
                     .to_owned();
 
                     pid = get_wine_pid(&context.launch_id(), &filename).await;
@@ -252,7 +275,7 @@ impl Connection {
 
     // Initialization
 
-    pub async fn send_challenge(&mut self) -> Result<()> {
+    pub async fn send_challenge(&mut self) -> Result<(), LSXConnectionError> {
         let challenge = create_lsx_message(LSXMessageType::Event(LSXEvent {
             sender: CORE_SENDER.to_string(),
             value: LSXEventType::Challenge(LSXChallenge {
@@ -266,12 +289,12 @@ impl Connection {
         Ok(())
     }
 
-    pub async fn listen(&mut self) -> Result<()> {
+    pub async fn listen(&mut self) -> Result<(), LSXConnectionError> {
         let mut buffer = [0; 1024 * 8];
 
         let n = match self.stream.read(&mut buffer) {
             Ok(n) if n == 0 => {
-                bail!("Connection closed");
+                return Err(LSXConnectionError::Closed);
             }
             Ok(n) => n,
             Err(err) => {
@@ -279,8 +302,7 @@ impl Connection {
                 if kind == ErrorKind::WouldBlock {
                     return Ok(());
                 }
-
-                bail!("Internal error in LSX connection: {}", kind);
+                return Err(LSXConnectionError::Internal(kind));
             }
         };
 
@@ -304,7 +326,7 @@ impl Connection {
         Ok(())
     }
 
-    pub async fn process_queue(&mut self) -> Result<()> {
+    pub async fn process_queue(&mut self) -> Result<(), LSXConnectionError> {
         let mut state = self.state.write().await;
         for message in &state.queued_messages {
             if let Err(err) = self.stream.write(message.as_bytes()) {
@@ -322,7 +344,7 @@ impl Connection {
 
     // Message Processing
 
-    async fn process_message(&mut self, message: &str) -> Result<()> {
+    async fn process_message(&mut self, message: &str) -> Result<(), LSXConnectionError> {
         debug!("Received LSX Message: {}", message);
 
         let mut message = message.to_string();
@@ -331,7 +353,8 @@ impl Connection {
 
         let state = self.state.clone();
         tokio::spawn(async move {
-            let reply = match lsx_message.value {
+            let reply: Result<Option<LSXMessageType>, LSXConnectionError> = match lsx_message.value
+            {
                 LSXMessageType::Event(msg) => Connection::process_event_message(&state, msg).await,
                 LSXMessageType::Request(msg) => {
                     Connection::process_request_message(&state, msg).await
@@ -339,18 +362,17 @@ impl Connection {
                 LSXMessageType::Response(_) => unimplemented!(),
             };
 
-            if let Err(err) = reply {
-                error!("Failed to process LSX message: {}", err);
-                return;
-            }
+            let reply: Option<LSXMessageType> = match reply {
+                Ok(reply) => reply,
+                Err(err) => {
+                    error!("Failed to process LSX message: {}", err);
+                    return;
+                }
+            };
 
-            let reply = reply.unwrap();
-
-            if reply.is_some() {
+            if let Some(reply) = reply {
                 let mut state = state.write().await;
-                let result = state.queue_message(LSX {
-                    value: reply.unwrap(),
-                });
+                let result = state.queue_message(LSX { value: reply });
 
                 if let Err(err) = result {
                     error!("Failed to queue LSX message: {}", err);
@@ -370,14 +392,14 @@ impl Connection {
     async fn process_event_message(
         _: &LockedConnectionState,
         _: LSXEvent,
-    ) -> Result<Option<LSXMessageType>> {
+    ) -> Result<Option<LSXMessageType>, LSXConnectionError> {
         Ok(None)
     }
 
     async fn process_request_message(
         state: &LockedConnectionState,
         message: LSXRequest,
-    ) -> Result<Option<LSXMessageType>> {
+    ) -> Result<Option<LSXMessageType>, LSXConnectionError> {
         {
             let pid = *state.read().await.pid();
             state
@@ -415,14 +437,13 @@ impl Connection {
             SetDownloaderUtilization handle_set_downloader_util_request,
         );
 
-        if result.is_none() {
-            return Ok(None);
-        }
-
-        Ok(Some(LSXMessageType::Response(LSXResponse {
-            sender: message.recipient,
-            id: message.id,
-            value: result.unwrap(),
-        })))
+        Ok(match result {
+            Some(result) => Some(LSXMessageType::Response(LSXResponse {
+                sender: message.recipient,
+                id: message.id,
+                value: result,
+            })),
+            None => None,
+        })
     }
 }

@@ -1,27 +1,30 @@
+use aes::cipher::block_padding::UnpadError;
+use aes::cipher::{
+    block_padding::Pkcs7, generic_array::GenericArray, BlockDecryptMut, BlockEncryptMut, KeyIvInit,
+};
+use chrono::{DateTime, Duration, Utc};
+use log::{debug, warn};
+use std::string::FromUtf8Error;
 use std::{
     fs::create_dir_all,
     io::{Read, Write},
     path::PathBuf,
 };
-
-use aes::cipher::{
-    block_padding::Pkcs7, generic_array::GenericArray, BlockDecryptMut, BlockEncryptMut, KeyIvInit,
-};
-use anyhow::{bail, Result};
-use chrono::{DateTime, Duration, Utc};
-use log::{debug, warn};
 use tokio::fs::{self, File};
 
-use base64::{engine::general_purpose, Engine};
-
-use lazy_static::lazy_static;
-use regex::Regex;
-use reqwest::{Client, StatusCode};
-use serde::{Deserialize, Serialize};
+use base64::{engine::general_purpose, DecodeError, Engine};
 
 use crate::core::{auth::hardware::HardwareInfo, endpoints::API_PROXY_NOVAFUSION_LICENSES};
 #[cfg(unix)]
 use crate::unix::fs::case_insensitive_path;
+use crate::util::native::{NativeError, SafeParent, SafeStr};
+use lazy_static::lazy_static;
+use quick_xml::DeError;
+use regex::Regex;
+use reqwest::header::ToStrError;
+use reqwest::{Client, StatusCode};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 pub const OOA_CRYPTO_KEY: [u8; 16] = [
     65, 50, 114, 45, 208, 130, 239, 176, 220, 100, 87, 197, 118, 104, 202, 9,
@@ -66,6 +69,35 @@ pub enum OOAState {
     SignatureDecoded,
 }
 
+#[derive(Error, Debug)]
+pub enum LicenseError {
+    #[error(transparent)]
+    ChronoParse(#[from] chrono::ParseError),
+    #[error(transparent)]
+    Request(#[from] reqwest::Error),
+    #[error(transparent)]
+    ToStr(#[from] ToStrError),
+    #[error(transparent)]
+    Unpad(#[from] UnpadError),
+    #[error(transparent)]
+    Utf8(#[from] FromUtf8Error),
+    #[error(transparent)]
+    DeError(#[from] DeError),
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+    #[error(transparent)]
+    Native(#[from] NativeError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Pe(#[from] pelite::Error),
+    #[error(transparent)]
+    PeFind(#[from] pelite::resources::FindError),
+
+    #[error("license request failed: `{0}`")]
+    Http(String),
+}
+
 pub fn detect_ooa_state(game_path: PathBuf) -> OOAState {
     let core_dir = game_path.join("Core");
     if !core_dir.exists() {
@@ -82,7 +114,7 @@ pub fn detect_ooa_state(game_path: PathBuf) -> OOAState {
     OOAState::SignatureDecoded
 }
 
-pub async fn detect_ooa_version(game_path: PathBuf) -> Result<u32> {
+pub async fn detect_ooa_version(game_path: PathBuf) -> Result<u32, LicenseError> {
     #[cfg(unix)]
     use crate::unix::fs::case_insensitive_path;
     let activation_dll = game_path.join("Core/activation.dll");
@@ -140,7 +172,7 @@ pub enum LicenseAuth {
     Direct(String, String),
 }
 
-pub async fn needs_license_update(content_id: &str) -> Result<bool> {
+pub async fn needs_license_update(content_id: &str) -> Result<bool, LicenseError> {
     let path = get_license_dir()?.join(format!("{}.dlf", content_id));
     if !path.exists() {
         return Ok(true);
@@ -151,13 +183,13 @@ pub async fn needs_license_update(content_id: &str) -> Result<bool> {
         return Ok(true);
     }
 
-    let license = decrypt_license(&bytes.unwrap()[65..]);
+    let license = decrypt_license(&bytes?[65..]);
     if license.is_err() {
         warn!("Failed to decrypt game license when checking for update");
         return Ok(true);
     }
 
-    let license = license.unwrap();
+    let license = license?;
 
     // Not actually sure how long licenses last, two weeks is a guesstimate
     let date: DateTime<Utc> = license.start_time.parse()?;
@@ -168,9 +200,9 @@ pub async fn request_and_save_license(
     auth: &LicenseAuth,
     content_id: &str,
     mut game_path: PathBuf,
-) -> Result<()> {
+) -> Result<(), LicenseError> {
     if game_path.is_file() {
-        game_path = game_path.parent().unwrap().to_path_buf();
+        game_path = game_path.safe_parent()?.to_path_buf();
     }
 
     let state = detect_ooa_state(game_path.clone());
@@ -181,7 +213,7 @@ pub async fn request_and_save_license(
     let version = detect_ooa_version(game_path).await.unwrap_or(1);
     debug!("OOA version is {version}");
 
-    let hw_info = HardwareInfo::new(version)?;
+    let hw_info = HardwareInfo::new(version);
     let license = request_license(
         content_id,
         &hw_info.generate_hardware_hash(),
@@ -201,7 +233,7 @@ pub async fn request_license(
     auth: &LicenseAuth,
     request_token: Option<&str>,
     request_type: Option<&str>,
-) -> Result<License> {
+) -> Result<License, LicenseError> {
     let mut query = Vec::new();
     query.push(("contentId", content_id));
     query.push(("machineHash", machine_hash));
@@ -227,9 +259,11 @@ pub async fn request_license(
         }
     }
 
-    if request_token.is_some() {
-        query.push(("requestToken", request_token.unwrap()));
-        query.push(("requestType", request_type.unwrap()));
+    if let Some(request_token) = request_token {
+        query.push(("requestToken", request_token));
+    }
+    if let Some(request_type) = request_type {
+        query.push(("requestType", request_type));
     }
 
     let res = Client::new()
@@ -240,10 +274,14 @@ pub async fn request_license(
         .send()
         .await?;
     if res.status() != StatusCode::OK {
-        bail!("License request failed: {}", res.text().await?);
+        return Err(LicenseError::Http(res.text().await?));
     }
 
-    let signature = res.headers().get("x-signature").unwrap().to_owned();
+    let signature = res
+        .headers()
+        .get("x-signature")
+        .ok_or(LicenseError::Http("missing x-signature header".to_string()))?
+        .to_owned();
     let body: Vec<u8> = res.bytes().await?.to_vec();
 
     let mut license = decrypt_license(body.as_slice())?;
@@ -251,7 +289,7 @@ pub async fn request_license(
     Ok(license)
 }
 
-pub fn decrypt_license(data: &[u8]) -> Result<License> {
+pub fn decrypt_license(data: &[u8]) -> Result<License, LicenseError> {
     let key = GenericArray::from_slice(&OOA_CRYPTO_KEY);
     let iv = GenericArray::from_slice(&[0u8; 16]);
     let cipher = Aes128CbcDec::new(key, iv);
@@ -262,7 +300,7 @@ pub fn decrypt_license(data: &[u8]) -> Result<License> {
     Ok(quick_xml::de::from_str(&data_str)?)
 }
 
-pub fn encrypt_license(data: &str) -> Result<Vec<u8>> {
+pub fn encrypt_license(data: &str) -> Result<Vec<u8>, LicenseError> {
     let key = GenericArray::from_slice(&OOA_CRYPTO_KEY);
     let iv = GenericArray::from_slice(&[0u8; 16]);
 
@@ -270,7 +308,11 @@ pub fn encrypt_license(data: &str) -> Result<Vec<u8>> {
     Ok(cipher.encrypt_padded_vec_mut::<Pkcs7>(data.as_bytes()))
 }
 
-pub async fn save_license(license: &License, state: OOAState, path: PathBuf) -> Result<()> {
+pub async fn save_license(
+    license: &License,
+    state: OOAState,
+    path: PathBuf,
+) -> Result<(), LicenseError> {
     let mut data = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>".to_string();
     data.push_str(quick_xml::se::to_string(license)?.as_str());
 
@@ -295,7 +337,7 @@ pub async fn save_license(license: &License, state: OOAState, path: PathBuf) -> 
     Ok(())
 }
 
-pub async fn save_licenses(license: &License, state: OOAState) -> Result<()> {
+pub async fn save_licenses(license: &License, state: OOAState) -> Result<(), LicenseError> {
     let path = get_license_dir()?;
 
     debug!("Saving the license {license:#?}");
@@ -317,19 +359,19 @@ pub async fn save_licenses(license: &License, state: OOAState) -> Result<()> {
 }
 
 #[cfg(windows)]
-pub fn get_license_dir() -> Result<PathBuf> {
+pub fn get_license_dir() -> Result<PathBuf, NativeError> {
     let path = format!("C:/{}", LICENSE_PATH.to_string());
     create_dir_all(&path)?;
     Ok(PathBuf::from(path))
 }
 
 #[cfg(unix)]
-pub fn get_license_dir() -> Result<PathBuf> {
+pub fn get_license_dir() -> Result<PathBuf, NativeError> {
     use crate::unix::wine::wine_prefix_dir;
 
     let path = format!(
         "{}/drive_c/{}",
-        wine_prefix_dir()?.to_str().unwrap(),
+        wine_prefix_dir()?.safe_str()?,
         LICENSE_PATH.to_string()
     );
     create_dir_all(&path)?;

@@ -4,16 +4,16 @@ use crate::{
     },
     lsx::{
         connection::LockedConnectionState,
+        request::LSXRequestError,
         types::{LSXOffer, LSXQueryOffers, LSXQueryOffersResponse, LSXResponseType},
     },
     make_lsx_handler_response,
 };
-use anyhow::Result;
 
 pub async fn handle_query_offers_request(
     conn: LockedConnectionState,
     request: LSXQueryOffers,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     let mut rtn: Vec<LSXOffer> = Vec::new();
 
     let category = if let Some(category) = request.FilterCategories.first() {
@@ -33,7 +33,8 @@ pub async fn handle_query_offers_request(
                 .category_id(category)
                 .master_title_id(String::new())
                 .offer_ids(Vec::new())
-                .build()?,
+                .build()
+                .unwrap(),
         )
         .await?;
 

@@ -180,5 +180,5 @@ pub async fn login_flow() -> Result<TokenResponse> {
         bail!("Login failed: {}", token_res.err().unwrap().to_string());
     }
 
-    token_res
+    Ok(token_res?)
 }

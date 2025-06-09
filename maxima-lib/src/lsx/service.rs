@@ -1,15 +1,21 @@
-use std::time::Duration;
-use std::{io::ErrorKind, net::TcpListener};
-
-use anyhow::Result;
+use std::{io::ErrorKind, net::TcpListener, time::Duration};
 
 use log::{info, warn};
 use tokio::time::sleep;
 
-use crate::core::LockedMaxima;
-use crate::lsx::connection::Connection;
+use crate::lsx::connection::LSXConnectionError;
+use crate::{core::LockedMaxima, lsx::connection::Connection};
+use thiserror::Error;
 
-pub async fn start_server(port: u16, maxima: LockedMaxima) -> Result<()> {
+#[derive(Error, Debug)]
+pub enum LSXServerError {
+    #[error(transparent)]
+    Conn(#[from] LSXConnectionError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+pub async fn start_server(port: u16, maxima: LockedMaxima) -> Result<(), LSXServerError> {
     let addr = "127.0.0.1:".to_string() + port.to_string().as_str();
 
     let listener = TcpListener::bind(&addr)?;
@@ -48,8 +54,7 @@ pub async fn start_server(port: u16, maxima: LockedMaxima) -> Result<()> {
                     sleep(Duration::from_millis(20)).await;
                     continue;
                 }
-
-                panic!("Internal error in LSX server: {}", kind);
+                return Err(LSXServerError::Io(err));
             }
         };
 
@@ -61,8 +66,8 @@ pub async fn start_server(port: u16, maxima: LockedMaxima) -> Result<()> {
             continue;
         }
 
-        let mut conn = conn.unwrap();
-        conn.send_challenge().await.unwrap();
+        let mut conn = conn?;
+        conn.send_challenge().await?;
         connections.push(conn);
 
         let mut maxima = maxima.lock().await;

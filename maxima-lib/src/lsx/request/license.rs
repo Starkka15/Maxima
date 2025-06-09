@@ -1,10 +1,10 @@
-use anyhow::{bail, Result};
 use log::info;
 
 use crate::{
     core::{auth::hardware::HardwareInfo, launch::LaunchMode},
     lsx::{
         connection::LockedConnectionState,
+        request::LSXRequestError,
         types::{LSXRequestLicense, LSXRequestLicenseResponse, LSXResponseType},
     },
     make_lsx_handler_response,
@@ -14,7 +14,7 @@ use crate::{
 pub async fn handle_license_request(
     state: LockedConnectionState,
     request: LSXRequestLicense,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     info!("Requesting OOA License and Denuvo Token");
 
     let arc = state.write().await.maxima_arc();
@@ -35,7 +35,7 @@ pub async fn handle_license_request(
     };
 
     // TODO: how to get version
-    let hw_info = HardwareInfo::new(2)?;
+    let hw_info = HardwareInfo::new(2);
     let license = request_license(
         &content_id,
         &hw_info.generate_hardware_hash(),
@@ -46,7 +46,7 @@ pub async fn handle_license_request(
     .await?;
 
     if license.game_token.is_none() {
-        bail!("Failed to retrieve Denuvo token");
+        return Err(LSXRequestError::Denuvo);
     }
 
     info!("Successfully retrieved license tokens");

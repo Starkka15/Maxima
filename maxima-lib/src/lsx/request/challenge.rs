@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
 use log::{debug, info};
 
 use crate::{
     lsx::{
         connection::LockedConnectionState,
+        request::LSXRequestError,
         types::{LSXChallengeAccepted, LSXChallengeResponse, LSXResponseType},
     },
     make_lsx_handler_response,
@@ -13,10 +13,10 @@ use crate::{
 pub async fn handle_challenge_response(
     state: LockedConnectionState,
     message: LSXChallengeResponse,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     let valid = check_challenge_response(&message.attr_response, &state.read().await.challenge());
     if !valid {
-        bail!("Invalid challenge response");
+        return Err(LSXRequestError::InvalidChallengeResponse);
     }
 
     let accept_key = make_challenge_response(&message.attr_key);
@@ -24,7 +24,7 @@ pub async fn handle_challenge_response(
     let seed = match message.attr_version.as_str() {
         "2" => 0,
         "3" => ((accept_key_bytes[0] as u16) << 8) | (accept_key_bytes[1]) as u16,
-        _ => bail!("Unknown LSX encryption version!"),
+        _ => return Err(LSXRequestError::UnknownEncryption(message.attr_version)),
     };
 
     info!(

@@ -1,9 +1,8 @@
-use anyhow::{Ok, Result};
 use egui::Context;
 use std::sync::mpsc::Sender;
 
 use crate::{
-    bridge_thread::{InteractThreadGameDetailsResponse, MaximaLibResponse},
+    bridge_thread::{BackendError, InteractThreadGameDetailsResponse, MaximaLibResponse},
     util::markdown::html_to_easymark,
     GameDetails,
 };
@@ -20,7 +19,7 @@ pub async fn game_details_request(
     slug: String,
     channel: Sender<MaximaLibResponse>,
     ctx: &Context,
-) -> Result<()> {
+) -> Result<(), BackendError> {
     let maxima = maxima_arc.lock().await;
 
     let rq = maxima.service_layer().request(
@@ -28,7 +27,8 @@ pub async fn game_details_request(
         ServiceGameSystemRequirementsRequestBuilder::default()
             .slug(slug.clone())
             .locale(maxima.locale().short_str().to_owned())
-            .build()?,
+            .build()
+            .unwrap(),
     );
     let rq: ServiceGameSystemRequirements = rq.await?;
 
@@ -45,14 +45,14 @@ pub async fn game_details_request(
 
     let res = MaximaLibResponse::GameDetailsResponse(InteractThreadGameDetailsResponse {
         slug: slug.clone(),
-        response: Ok(GameDetails {
+        response: GameDetails {
             time: 0,
             achievements_unlocked: 0,
             achievements_total: 12,
             path: String::new(),
             system_requirements_min: min,
             system_requirements_rec: rec,
-        }),
+        },
     });
     let _ = channel.send(res);
     egui::Context::request_repaint(&ctx);

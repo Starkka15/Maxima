@@ -1,12 +1,9 @@
 #![allow(non_snake_case)]
 
-use std::path::PathBuf;
-
-use anyhow::{bail, Context, Result};
+use crate::{core::manifest::ManifestError, util::native::platform_path};
 use derive_getters::Getters;
 use serde::Deserialize;
-
-use crate::util::native::platform_path;
+use std::path::PathBuf;
 
 macro_rules! predip_type {
     (
@@ -97,16 +94,11 @@ fn bytes_to_string(bytes: Vec<u8>) -> Option<String> {
 }
 
 impl PreDiPManifest {
-    pub async fn read(path: &PathBuf) -> Result<Self> {
-        let bytes = tokio::fs::read(path)
-            .await
-            .context("Failed to read PreDiP manifest file")?;
-        let string = bytes_to_string(bytes);
-        if string.is_none() {
-            bail!("Failed to decode DiPManifest file. Weird encoding?");
-        }
+    pub async fn read(path: &PathBuf) -> Result<Self, ManifestError> {
+        let bytes = tokio::fs::read(path).await?;
+        let string = bytes_to_string(bytes).ok_or(ManifestError::Decode)?;
 
-        Ok(quick_xml::de::from_str(&string.unwrap())?)
+        Ok(quick_xml::de::from_str(&string)?)
     }
 
     pub fn version(&self) -> Option<String> {
@@ -114,7 +106,7 @@ impl PreDiPManifest {
     }
 
     #[cfg(unix)]
-    pub async fn run_touchup(&self, install_path: &PathBuf) -> Result<()> {
+    pub async fn run_touchup(&self, install_path: &PathBuf) -> Result<(), ManifestError> {
         use crate::{
             core::launch::mx_linux_setup,
             unix::{
@@ -125,8 +117,10 @@ impl PreDiPManifest {
 
         mx_linux_setup().await?;
 
-        let install_path = PathBuf::from(remove_trailing_slash(install_path.to_str().unwrap()));
-        let args = self.collect_touchup_args(&install_path);
+        let install_path = PathBuf::from(remove_trailing_slash(
+            install_path.to_str().ok_or(ManifestError::Decode)?,
+        ));
+        let args = self.collect_touchup_args(&install_path)?;
 
         let path = install_path.join(remove_leading_slash(&self.executable.file_path));
         let path = case_insensitive_path(path);
@@ -137,10 +131,11 @@ impl PreDiPManifest {
     }
 
     #[cfg(windows)]
-    pub async fn run_touchup(&self, install_path: &PathBuf) -> Result<()> {
+    pub async fn run_touchup(&self, install_path: &PathBuf) -> Result<(), ManifestError> {
+        use crate::util::native::NativeError;
         use tokio::process::Command;
 
-        let args = self.collect_touchup_args(install_path);
+        let args = self.collect_touchup_args(install_path)?;
         let path = install_path.join(&self.executable.file_path);
 
         let mut binding = Command::new(path);
@@ -148,26 +143,29 @@ impl PreDiPManifest {
 
         let status = child.spawn()?.wait().await?;
         if !status.success() {
-            bail!("Failed to run touchup: {}", status.code().unwrap());
+            return Err(ManifestError::Native(NativeError::Command(
+                status.code().unwrap_or(0),
+            )));
         }
 
         Ok(())
     }
 
-    fn collect_touchup_args(&self, install_path: &PathBuf) -> Vec<PathBuf> {
+    fn collect_touchup_args(&self, install_path: &PathBuf) -> Result<Vec<PathBuf>, ManifestError> {
         let mut args = Vec::new();
         for arg in self.executable.parameters.split(" ") {
             let arg = arg.replace("{locale}", "en_US").replace(
                 "\"{installLocation}\"",
                 platform_path(
-                    remove_trailing_backslash(install_path.to_str().unwrap()).replace("/", "\\"),
+                    remove_trailing_backslash(install_path.to_str().ok_or(ManifestError::Decode)?)
+                        .replace("/", "\\"),
                 )
                 .to_str()
-                .unwrap(),
+                .ok_or(ManifestError::Decode)?,
             );
 
             args.push(PathBuf::from(arg));
         }
-        args
+        Ok(args)
     }
 }

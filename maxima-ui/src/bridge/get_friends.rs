@@ -1,11 +1,10 @@
-use anyhow::{bail, Ok, Result};
 use egui::Context;
 use log::debug;
 use maxima::{core::LockedMaxima, rtm::client::BasicPresence};
 use std::sync::mpsc::Sender;
 
 use crate::{
-    bridge_thread::{InteractThreadFriendListResponse, MaximaLibResponse},
+    bridge_thread::{BackendError, InteractThreadFriendListResponse, MaximaLibResponse},
     ui_image::UIImageCacheLoaderCommand,
     views::friends_view::UIFriend,
 };
@@ -15,12 +14,12 @@ pub async fn get_friends_request(
     channel: Sender<MaximaLibResponse>,
     remote_provider_channel: Sender<UIImageCacheLoaderCommand>,
     ctx: &Context,
-) -> Result<()> {
+) -> Result<(), BackendError> {
     debug!("received request to load friends");
     let maxima = maxima_arc.lock().await;
     let logged_in = maxima.auth_storage().lock().await.current().is_some();
     if !logged_in {
-        bail!("Ignoring request to load friends, not logged in.");
+        return Err(BackendError::LoggedOut);
     }
 
     let friends = maxima.friends(0).await?;

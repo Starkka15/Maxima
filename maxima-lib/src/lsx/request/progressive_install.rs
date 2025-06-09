@@ -1,8 +1,7 @@
-use anyhow::Result;
-
 use crate::{
     lsx::{
         connection::LockedConnectionState,
+        request::LSXRequestError,
         types::{
             LSXAreChunksInstalled, LSXAreChunksInstalledResponse,
             LSXIsProgressiveInstallationAvailable, LSXIsProgressiveInstallationAvailableResponse,
@@ -15,7 +14,7 @@ use crate::{
 pub async fn handle_pi_availability_request(
     _: LockedConnectionState,
     _: LSXIsProgressiveInstallationAvailable,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     make_lsx_handler_response!(Response, IsProgressiveInstallationAvailableResponse, {
         attr_Available: false,
         attr_ItemId: "Origin.OFR.50.0001456".to_string(),
@@ -25,7 +24,7 @@ pub async fn handle_pi_availability_request(
 pub async fn handle_pi_installed_chunks_request(
     _: LockedConnectionState,
     request: LSXAreChunksInstalled,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     make_lsx_handler_response!(Response, AreChunksInstalledResponse, {
         attr_ItemId: "Origin.OFR.50.0001456".to_string(),
         attr_Installed: true,

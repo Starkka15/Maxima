@@ -8,7 +8,6 @@ use std::{
     process::{ExitStatus, Stdio},
 };
 
-use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use lazy_static::lazy_static;
 use log::{info, warn};
@@ -25,7 +24,8 @@ use xz2::read::XzDecoder;
 
 use crate::util::{
     github::{fetch_github_release, fetch_github_releases, github_download_asset, GithubRelease},
-    native::maxima_dir,
+    native::{maxima_dir, DownloadError, NativeError, SafeParent, SafeStr, WineError},
+    registry::RegistryError,
 };
 
 lazy_static! {
@@ -71,27 +71,27 @@ struct Versions {
 }
 
 /// Returns internal prtoton pfx path
-pub fn wine_prefix_dir() -> Result<PathBuf> {
+pub fn wine_prefix_dir() -> Result<PathBuf, NativeError> {
     Ok(maxima_dir()?.join("wine/prefix"))
 }
 
-pub fn proton_dir() -> Result<PathBuf> {
+pub fn proton_dir() -> Result<PathBuf, NativeError> {
     Ok(maxima_dir()?.join("wine/proton"))
 }
 
-pub fn wine_dir() -> Result<PathBuf> {
+pub fn wine_dir() -> Result<PathBuf, NativeError> {
     Ok(maxima_dir()?.join("wine"))
 }
 
-pub fn eac_dir() -> Result<PathBuf> {
+pub fn eac_dir() -> Result<PathBuf, NativeError> {
     Ok(maxima_dir()?.join("wine/eac_runtime"))
 }
 
-pub fn umu_bin() -> Result<PathBuf> {
+pub fn umu_bin() -> Result<PathBuf, NativeError> {
     Ok(maxima_dir()?.join("wine/umu/umu-run"))
 }
 
-fn versions() -> Result<Versions> {
+fn versions() -> Result<Versions, NativeError> {
     let file = maxima_dir()?.join(VERSION_FILE);
     if !file.exists() {
         return Ok(Versions::default());
@@ -101,13 +101,13 @@ fn versions() -> Result<Versions> {
     Ok(toml::from_str(&data).unwrap_or_default())
 }
 
-fn set_versions(versions: Versions) -> Result<()> {
+fn set_versions(versions: Versions) -> Result<(), NativeError> {
     let file = maxima_dir()?.join(VERSION_FILE);
     std::fs::write(file, toml::to_string(&versions)?)?;
     Ok(())
 }
 
-pub(crate) async fn check_wine_validity() -> Result<bool> {
+pub(crate) async fn check_wine_validity() -> Result<bool, NativeError> {
     if !proton_dir()?.exists() {
         return Ok(false);
     }
@@ -115,35 +115,41 @@ pub(crate) async fn check_wine_validity() -> Result<bool> {
     let version = versions()?.proton;
 
     let release = get_wine_release();
-    if release.is_err() {
+    if let Err(err) = release {
         if !version.is_empty() {
             warn!("Failed to check wine release, rate limited?");
             return Ok(true);
         }
 
-        bail!("Failed to check wine release: {}", release.err().unwrap());
+        return Err(NativeError::Wine(err));
     }
 
-    Ok(version == release.unwrap().tag_name)
+    Ok(version == release?.tag_name)
 }
 
-pub(crate) async fn get_lutris_runtimes() -> Result<Vec<LutrisRuntime>> {
+pub(crate) async fn get_lutris_runtimes() -> Result<Vec<LutrisRuntime>, WineError> {
     let client = reqwest::Client::builder()
         .user_agent("ArmchairDevelopers/Maxima")
-        .build()
-        .unwrap();
+        .build()?;
     let res = client.get("https://lutris.net/api/runtimes").send().await?;
     let res = res.error_for_status()?;
     let data = res.json().await?;
     Ok(data)
 }
 
-pub(crate) async fn check_runtime_validity(key: &str, runtimes: &[LutrisRuntime]) -> Result<bool> {
+pub(crate) async fn check_runtime_validity(
+    key: &str,
+    runtimes: &[LutrisRuntime],
+) -> Result<bool, NativeError> {
     let versions = versions()?;
     let version = match key {
         "umu" => &versions.umu,
         "eac_runtime" => &versions.eac_runtime,
-        _ => bail!("Runtime {key} is not implemented"),
+        _ => {
+            return Err(NativeError::Wine(WineError::UnimplementedRuntime(
+                key.to_string(),
+            )))
+        }
     };
     let path = wine_dir()?.join(key);
     if !path.exists() {
@@ -154,23 +160,39 @@ pub(crate) async fn check_runtime_validity(key: &str, runtimes: &[LutrisRuntime]
     Ok(runtime_version.is_some_and(|r| &r.created_at == version))
 }
 
-pub(crate) async fn install_runtime(key: &str, runtimes: &[LutrisRuntime]) -> Result<()> {
+pub(crate) async fn install_runtime(
+    key: &str,
+    runtimes: &[LutrisRuntime],
+) -> Result<(), NativeError> {
     info!("Downloading {key}");
-    let runtime = runtimes.iter().find(|r| r.name == key).unwrap();
+    let runtime = runtimes
+        .iter()
+        .find(|r| r.name == key)
+        .ok_or(NativeError::Wine(WineError::UnimplementedRuntime(
+            key.to_string(),
+        )))?;
     let mut versions = versions()?;
     let path = wine_dir()?.join(key);
     let runtime_ver = match key {
         "umu" => &mut versions.umu,
         "eac_runtime" => &mut versions.eac_runtime,
-        _ => bail!("Runtime {key} is not implemented"),
+        _ => {
+            return Err(NativeError::Wine(WineError::UnimplementedRuntime(
+                key.to_string(),
+            )))
+        }
     };
 
-    let res = ureq::get(&runtime.url)
+    let res = match ureq::get(&runtime.url)
         .set("User-Agent", "ArmchairDevelopers/Maxima")
-        .call()?;
+        .call()
+    {
+        Err(err) => return Err(NativeError::Download(DownloadError::Request1(err))),
+        Ok(res) => res,
+    };
 
     if res.status() != StatusCode::OK {
-        bail!("Failed to download {key} runtime");
+        return Err(NativeError::Download(DownloadError::Http(key.to_string())));
     }
 
     let mut body: Vec<u8> = vec![];
@@ -196,7 +218,7 @@ pub(crate) async fn install_runtime(key: &str, runtimes: &[LutrisRuntime]) -> Re
     set_versions(versions)
 }
 
-fn get_wine_release() -> Result<GithubRelease> {
+fn get_wine_release() -> Result<GithubRelease, WineError> {
     let releases = fetch_github_releases("GloriousEggroll", "proton-ge-custom")?;
 
     let mut release = None;
@@ -209,11 +231,7 @@ fn get_wine_release() -> Result<GithubRelease> {
         break;
     }
 
-    if release.is_none() {
-        bail!("Couldn't find suitable wine release");
-    }
-
-    Ok(release.unwrap())
+    release.ok_or(WineError::Fetch)
 }
 
 pub async fn run_wine_command<I: IntoIterator<Item = T>, T: AsRef<OsStr>>(
@@ -222,7 +240,7 @@ pub async fn run_wine_command<I: IntoIterator<Item = T>, T: AsRef<OsStr>>(
     cwd: Option<PathBuf>,
     want_output: bool,
     command_type: CommandType,
-) -> Result<String> {
+) -> Result<String, NativeError> {
     let proton_path = proton_dir()?;
     let proton_prefix_path = wine_prefix_dir()?;
     let eac_path = eac_dir()?;
@@ -267,42 +285,35 @@ pub async fn run_wine_command<I: IntoIterator<Item = T>, T: AsRef<OsStr>>(
     if want_output {
         let output = child
             .stdout(Stdio::piped())
-            .spawn()
-            .context("Failed to run wine command")?
+            .spawn()?
             .wait_with_output()
             .await?;
         output_str = String::from_utf8_lossy(&output.stdout).to_string();
         status = output.status;
     } else {
-        status = child
-            .spawn()
-            .context("Failed to run wine command")?
-            .wait()
-            .await?;
+        status = child.spawn()?.wait().await?;
     };
 
     if !status.success() {
-        bail!(
-            "Failed to run wine command: {} ({:?})",
-            output_str,
-            status.code()
-        );
+        return Err(NativeError::Wine(WineError::Command {
+            output: output_str,
+            exit: status,
+        }));
     }
 
     Ok(output_str.to_string())
 }
 
-pub(crate) async fn install_wine() -> Result<()> {
+pub(crate) async fn install_wine() -> Result<(), NativeError> {
     let release = get_wine_release()?;
-    let asset = release
+    let asset = match release
         .assets
         .iter()
-        .find(|x| PROTON_PATTERN.captures(&x.name).is_some());
-    if asset.is_none() {
-        bail!("Failed to find proton asset! the name pattern might be outdated, please make an issue at https://github.com/ArmchairDevelopers/Maxima/issues.");
-    }
-
-    let asset = asset.unwrap();
+        .find(|x| PROTON_PATTERN.captures(&x.name).is_some())
+    {
+        Some(asset) => asset,
+        None => return Err(NativeError::Wine(WineError::Fetch)),
+    };
 
     let dir = maxima_dir()?.join("downloads");
     create_dir_all(&dir)?;
@@ -316,7 +327,7 @@ pub(crate) async fn install_wine() -> Result<()> {
     set_versions(versions)?;
 
     if let Err(err) = remove_file(&path) {
-        log::warn!("Failed to delete {:?} - {:?}", path, err);
+        warn!("Failed to delete {:?} - {:?}", path, err);
     }
 
     let _ = run_wine_command("", None::<[&str; 0]>, None, false, CommandType::Run).await;
@@ -324,7 +335,7 @@ pub(crate) async fn install_wine() -> Result<()> {
     Ok(())
 }
 
-fn extract_wine(archive_path: &PathBuf) -> Result<()> {
+fn extract_wine(archive_path: &PathBuf) -> Result<(), NativeError> {
     info!("Extracting proton...");
 
     let dir = proton_dir()?;
@@ -340,13 +351,21 @@ fn extract_wine(archive_path: &PathBuf) -> Result<()> {
     extract_archive(dir, archive)
 }
 
-fn extract_archive<R: Read + Sized>(dir: PathBuf, mut archive: Archive<R>) -> Result<()> {
+fn extract_archive<R: Read + Sized>(
+    dir: PathBuf,
+    mut archive: Archive<R>,
+) -> Result<(), NativeError> {
     for entry in archive.entries()? {
         let mut entry = entry?;
         let entry_path = entry.path()?;
 
-        let destination_path =
-            dir.join(entry_path.strip_prefix(entry_path.components().next().unwrap())?);
+        let next = match entry_path.components().next() {
+            Some(next) => next,
+            None => {
+                return Err(NativeError::PathComponentNext(entry_path.clone().into()));
+            }
+        };
+        let destination_path = dir.join(entry_path.strip_prefix(next)?);
         if let Some(parent_dir) = destination_path.parent() {
             create_dir_all(parent_dir)?;
         }
@@ -357,7 +376,7 @@ fn extract_archive<R: Read + Sized>(dir: PathBuf, mut archive: Archive<R>) -> Re
     Ok(())
 }
 
-pub async fn setup_wine_registry() -> Result<()> {
+pub async fn setup_wine_registry() -> Result<(), NativeError> {
     let mut reg_content = "Windows Registry Editor Version 5.00\n\n".to_string();
     // This supports text values only at the moment
     // if you need a dword - implement it
@@ -394,24 +413,24 @@ pub async fn setup_wine_registry() -> Result<()> {
         }
     }
 
-    let path = maxima_dir().unwrap().join("temp").join("wine.reg");
-    let _ = tokio::fs::create_dir_all(path.parent().unwrap());
+    let path = maxima_dir()?.join("temp").join("wine.reg");
+    tokio::fs::create_dir_all(path.safe_parent()?).await?;
 
     {
         let mut reg_file = tokio::fs::File::create(&path).await?;
-        reg_file.write_all(reg_content.as_bytes()).await;
+        reg_file.write_all(reg_content.as_bytes()).await?;
     }
 
     run_wine_command(
         "regedit",
-        Some(vec![path.to_str().unwrap()]),
+        Some(vec![path.safe_str()?]),
         None,
         false,
         CommandType::Run,
     )
     .await?;
 
-    let _ = tokio::fs::remove_file(path).await;
+    tokio::fs::remove_file(path).await?;
 
     Ok(())
 }
@@ -456,13 +475,13 @@ async fn parse_wine_registry(file_path: &str) -> WineRegistry {
     registry_map.clone()
 }
 
-pub async fn parse_mx_wine_registry() -> WineRegistry {
-    let path = wine_prefix_dir().unwrap().join("system.reg");
+pub async fn parse_mx_wine_registry() -> Result<WineRegistry, NativeError> {
+    let path = wine_prefix_dir()?.join("system.reg");
     if !path.exists() {
-        return HashMap::new();
+        return Ok(HashMap::new());
     }
 
-    parse_wine_registry(path.to_str().unwrap()).await
+    Ok(parse_wine_registry(path.safe_str()?).await)
 }
 
 pub async fn invalidate_mx_wine_registry() {
@@ -480,8 +499,8 @@ fn normalize_key(key: &str) -> String {
     }
 }
 
-pub async fn get_mx_wine_registry_value(query_key: &str) -> Option<String> {
-    let registry_map = parse_mx_wine_registry().await;
+pub async fn get_mx_wine_registry_value(query_key: &str) -> Result<Option<String>, RegistryError> {
+    let registry_map = parse_mx_wine_registry().await?;
     let normalized_query_key = normalize_key(query_key);
 
     let value = if let Some(value) = registry_map.get(&normalized_query_key) {
@@ -492,5 +511,5 @@ pub async fn get_mx_wine_registry_value(query_key: &str) -> Option<String> {
         registry_map.get(&wow6432_query_key).cloned()
     };
 
-    value.map(|x| x.replace("Z:", "").replace("\\", "/"))
+    Ok(value.map(|x| x.replace("Z:", "").replace("\\", "/")))
 }

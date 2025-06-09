@@ -1,9 +1,8 @@
-use anyhow::Result;
-
 use crate::{
     core::ecommerce::request_entitlements,
     lsx::{
         connection::LockedConnectionState,
+        request::LSXRequestError,
         types::{
             LSXEntitlement, LSXQueryEntitlements, LSXQueryEntitlementsResponse, LSXResponseType,
         },
@@ -14,7 +13,7 @@ use crate::{
 pub async fn handle_query_entitlements_request(
     state: LockedConnectionState,
     request: LSXQueryEntitlements,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     let user_id = if request.attr_UserId != 0 {
         request.attr_UserId.to_string()
     } else {

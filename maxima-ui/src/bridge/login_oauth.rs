@@ -1,21 +1,20 @@
-use anyhow::{Ok, Result};
+use crate::bridge_thread::{BackendError, InteractThreadLoginResponse, MaximaLibResponse};
 use egui::Context;
 use maxima::{
     core::{
         auth::{context::AuthContext, login, nucleus_token_exchange},
+        service_layer::ServiceLayerError,
         LockedMaxima,
     },
     util::native::take_foreground_focus,
 };
 use std::sync::mpsc::Sender;
 
-use crate::bridge_thread::{InteractThreadLoginResponse, MaximaLibResponse};
-
 pub async fn login_oauth(
     maxima_arc: LockedMaxima,
     channel: Sender<MaximaLibResponse>,
     ctx: &Context,
-) -> Result<()> {
+) -> Result<(), BackendError> {
     let maxima = maxima_arc.lock().await;
 
     {
@@ -28,12 +27,12 @@ pub async fn login_oauth(
 
     let user = maxima.local_user().await?;
     let message = MaximaLibResponse::LoginResponse(Ok(InteractThreadLoginResponse {
-        you: user.player().as_ref().unwrap().to_owned(),
+        you: user.player().as_ref().ok_or(ServiceLayerError::MissingField)?.to_owned(),
     }));
 
     channel.send(message)?;
 
-    take_foreground_focus().unwrap();
+    take_foreground_focus()?;
     ctx.request_repaint();
     Ok(())
 }

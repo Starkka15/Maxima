@@ -1,9 +1,7 @@
-use anyhow::Result;
+use crate::core::{auth::storage::TokenError, endpoints::API_NUCLEUS_TOKENINFO};
 use derive_getters::Getters;
 use reqwest::Client;
 use serde::Deserialize;
-
-use crate::core::endpoints::API_NUCLEUS_TOKENINFO;
 
 #[derive(Debug, Deserialize, Getters)]
 pub struct NucleusTokenInfo {
@@ -19,7 +17,7 @@ pub struct NucleusTokenInfo {
 }
 
 impl NucleusTokenInfo {
-    pub async fn fetch(client: &Client, access_token: &str) -> Result<Self> {
+    pub async fn fetch(client: &Client, access_token: &str) -> Result<Self, TokenError> {
         let res = client
             .get(API_NUCLEUS_TOKENINFO)
             .query(&[("access_token", access_token)])

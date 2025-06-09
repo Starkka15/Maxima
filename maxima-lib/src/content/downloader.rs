@@ -1,6 +1,6 @@
 use std::{
     cmp,
-    io::{self, Seek, SeekFrom, Write},
+    io::{self, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     pin::Pin,
     prelude,
@@ -10,12 +10,15 @@ use std::{
 
 use crate::{
     content::{
-        zip::CompressionType,
+        manager::DownloaderError,
+        zip::{CompressionType, ZipFile, ZipFileEntry},
         zlib::{restore_zlib_state, write_zlib_state},
     },
-    util::{hash::hash_file_crc32, native::maxima_dir},
+    util::{
+        hash::hash_file_crc32,
+        native::{maxima_dir, NativeError, SafeParent, SafeStr},
+    },
 };
-use anyhow::{bail, Context, Result};
 use async_compression::tokio::write::DeflateDecoder;
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -24,27 +27,20 @@ use flate2::bufread::DeflateDecoder as BufreadDeflateDecoder;
 use futures::{Stream, StreamExt, TryStreamExt};
 use log::{debug, error, info, warn};
 use reqwest::Client;
-use std::io::{Cursor, Read};
 use strum_macros::Display;
-use tokio::io::AsyncReadExt;
+use thiserror::Error;
 use tokio::{
     fs::{create_dir, create_dir_all, File, OpenOptions},
-    io::{AsyncSeekExt, AsyncWrite, BufReader, BufWriter},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, BufReader, BufWriter},
     runtime::Handle,
 };
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
-use super::zip::{ZipFile, ZipFileEntry};
-
-fn zstate_path(id: &str, path: &str) -> PathBuf {
-    let mut path = maxima_dir()
-        .unwrap()
-        .join("temp/downloader")
-        .join(id)
-        .join(path);
+fn zstate_path(id: &str, path: &str) -> Result<PathBuf, DownloaderError> {
+    let mut path = maxima_dir()?.join("temp/downloader").join(id).join(path);
     path.set_extension("eazstate");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    path
+    std::fs::create_dir_all(path.safe_parent()?)?;
+    Ok(path)
 }
 
 #[async_trait]
@@ -52,7 +48,7 @@ trait DownloadDecoder: Send {
     fn save_state(&mut self, buf: &mut BytesMut);
     fn restore_state(&mut self, buf: &mut Bytes);
 
-    fn seek(&mut self, pos: SeekFrom);
+    fn seek(&mut self, pos: SeekFrom) -> Result<(), DownloaderError>;
 
     fn write_in_pos(&self) -> u64;
     fn write_out_pos(&self) -> u64;
@@ -88,13 +84,15 @@ impl DownloadDecoder for ZLibDeflateDecoder {
         restore_zlib_state(buf, zstream);
     }
 
-    fn seek(&mut self, pos: SeekFrom) {
+    fn seek(&mut self, pos: SeekFrom) -> Result<(), DownloaderError> {
         let mut decoder = self.decoder.lock().unwrap();
         let file = decoder.get_mut();
 
         let handle = Handle::current();
         let _ = handle.enter();
-        futures::executor::block_on(file.seek(pos)).unwrap();
+        futures::executor::block_on(file.seek(pos))?;
+
+        Ok(())
     }
 
     fn write_in_pos(&self) -> u64 {
@@ -141,12 +139,14 @@ impl DownloadDecoder for NoopDecoder {
         self.pos = buf.get_u64();
     }
 
-    fn seek(&mut self, pos: SeekFrom) {
+    fn seek(&mut self, pos: SeekFrom) -> Result<(), DownloaderError> {
         let mut file = self.writer.lock().unwrap();
 
         let handle = Handle::current();
         let _ = handle.enter();
-        futures::executor::block_on(file.seek(pos)).unwrap();
+        futures::executor::block_on(file.seek(pos))?;
+
+        Ok(())
     }
 
     fn write_in_pos(&self) -> u64 {
@@ -174,19 +174,22 @@ struct AsyncWriterWrapper<'a> {
 }
 
 impl<'a> AsyncWriterWrapper<'a> {
-    async fn new(id: String, path: String, decoder: &'a mut Box<dyn DownloadDecoder>) -> Self {
+    async fn new(
+        id: String,
+        path: String,
+        decoder: &'a mut Box<dyn DownloadDecoder>,
+    ) -> Result<Self, DownloaderError> {
         let inner = decoder.get_mut();
-        AsyncWriterWrapper {
+        Ok(AsyncWriterWrapper {
             id: id.to_owned(),
             path: path.to_owned(),
             zlib_state_file: std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
-                .open(zstate_path(&id, &path))
-                .unwrap(),
+                .open(zstate_path(&id, &path)?)?,
             decoder,
             inner,
-        }
+        })
     }
 }
 
@@ -227,13 +230,21 @@ impl<'a> AsyncWrite for AsyncWriterWrapper<'a> {
     }
 }
 
-#[derive(Debug, Display)]
+#[derive(Error, Debug)]
 pub enum DownloadError {
+    #[error("download failed ({0} bytes")]
     DownloadFailed(usize),
-    ChunkFailed,
+    #[error("failed to download chunk `{entry}`: {error}")]
+    ChunkDownload {
+        entry: String,
+        error: reqwest::Error,
+    },
+    #[error("failed to copy chunk `{entry}`: {error}")]
+    ChunkCopy {
+        entry: String,
+        error: std::io::Error,
+    },
 }
-
-impl std::error::Error for DownloadError {}
 
 #[derive(PartialEq, Debug)]
 enum EntryDownloadState {
@@ -278,19 +289,16 @@ impl<'a> EntryDownloadRequest<'a> {
         }
     }
 
-    async fn state(context: &DownloadContext, entry: &ZipFileEntry) -> EntryDownloadState {
+    async fn state(
+        context: &DownloadContext,
+        entry: &ZipFileEntry,
+    ) -> Result<EntryDownloadState, DownloaderError> {
         let path = context.path.join(entry.name());
 
-        let file_size = File::open(&path)
-            .await
-            .unwrap()
-            .metadata()
-            .await
-            .unwrap()
-            .len() as i64;
+        let file_size = File::open(&path).await?.metadata().await?.len() as i64;
 
         if file_size == 0 {
-            return EntryDownloadState::Fresh;
+            return Ok(EntryDownloadState::Fresh);
         }
 
         let entry_size = *entry.uncompressed_size();
@@ -299,10 +307,10 @@ impl<'a> EntryDownloadRequest<'a> {
         if !size_match {
             warn!("Size mismatch: {}/{}", entry_size, file_size);
             if file_size > entry_size {
-                return EntryDownloadState::Borked;
+                return Ok(EntryDownloadState::Borked);
             }
 
-            return EntryDownloadState::Borked;
+            return Ok(EntryDownloadState::Borked);
         }
 
         // We must be calculating the hash incorrectly or something
@@ -320,7 +328,7 @@ impl<'a> EntryDownloadRequest<'a> {
         //     return EntryDownloadState::Borked;
         // }
 
-        EntryDownloadState::Complete
+        Ok(EntryDownloadState::Complete)
     }
 
     async fn download(&mut self) -> Result<(), DownloadError> {
@@ -352,7 +360,7 @@ impl<'a> EntryDownloadRequest<'a> {
     }
 
     /// End is not inclusive
-    pub async fn download_range(&mut self, start: i64, end: i64) -> Result<(), DownloadError> {
+    pub async fn download_range(&mut self, start: i64, end: i64) -> Result<(), DownloaderError> {
         let offset = self.entry.data_offset();
         let range = format!("bytes={}-{}", offset + start as i64, offset + end - 1);
 
@@ -366,7 +374,10 @@ impl<'a> EntryDownloadRequest<'a> {
             Ok(res) => res,
             Err(err) => {
                 error!("Failed to download ({}): {}", self.entry.name(), err);
-                return Err(DownloadError::ChunkFailed);
+                return Err(DownloaderError::Download(DownloadError::ChunkDownload {
+                    entry: self.entry.name().clone(),
+                    error: err,
+                }));
             }
         };
 
@@ -384,13 +395,14 @@ impl<'a> EntryDownloadRequest<'a> {
             self.entry.name().to_owned(),
             &mut self.decoder,
         )
-        .await;
+        .await?;
 
-        let result = tokio::io::copy(&mut stream_reader, &mut wrapper)
-            .await
-            .context(self.entry.name().to_owned());
-        if result.is_err() {
-            return Err(DownloadError::ChunkFailed);
+        let result = tokio::io::copy(&mut stream_reader, &mut wrapper).await;
+        if let Err(err) = result {
+            return Err(DownloaderError::Download(DownloadError::ChunkCopy {
+                entry: self.entry.name().clone(),
+                error: err,
+            }));
         }
 
         Ok(())
@@ -407,13 +419,17 @@ pub struct ZipDownloader {
 }
 
 impl ZipDownloader {
-    pub async fn new<P: AsRef<Path>>(id: &str, zip_url: &str, path: P) -> Result<Self>
+    pub async fn new<P: AsRef<Path>>(
+        id: &str,
+        zip_url: &str,
+        path: P,
+    ) -> Result<Self, DownloaderError>
     where
         PathBuf: From<P>,
     {
         let path = PathBuf::from(path);
         if !path.is_absolute() {
-            bail!("Path is not absolute");
+            return Err(DownloaderError::PathNotAbsolute(path));
         }
 
         let manifest = ZipFile::fetch(zip_url).await?;
@@ -427,7 +443,11 @@ impl ZipDownloader {
         })
     }
 
-    pub async fn read_zip_entry_bytes(&self, entry: &ZipFileEntry, length: u64) -> Result<Bytes> {
+    pub async fn read_zip_entry_bytes(
+        &self,
+        entry: &ZipFileEntry,
+        length: u64,
+    ) -> Result<Bytes, DownloaderError> {
         let offset = entry.data_offset();
         let compressed_size = *entry.compressed_size();
 
@@ -443,7 +463,7 @@ impl ZipDownloader {
         if !response.status().is_success()
             && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
         {
-            bail!("Failed to download range: {}", response.status());
+            return Err(DownloaderError::Http(response.status()));
         }
 
         let compressed_data = response.bytes().await?;
@@ -453,7 +473,10 @@ impl ZipDownloader {
                 let available_length = std::cmp::min(length, entry_size);
 
                 if available_length > compressed_data.len() as u64 {
-                    bail!("Requested length exceeds entry size");
+                    return Err(DownloaderError::EntrySize {
+                        requested: available_length,
+                        entry: compressed_data.len(),
+                    });
                 }
 
                 Bytes::copy_from_slice(&compressed_data[..available_length as usize])
@@ -466,7 +489,9 @@ impl ZipDownloader {
 
                 Bytes::from(decompressed_data)
             }
-            _ => bail!("Unsupported compression type"),
+            any => {
+                return Err(DownloaderError::CompressionType(any.to_owned()));
+            }
         };
 
         Ok(decompressed_data)
@@ -476,12 +501,12 @@ impl ZipDownloader {
         &self,
         entry: &ZipFileEntry,
         callback: Option<BytesDownloadedCallback>,
-    ) -> Result<usize> {
+    ) -> Result<usize, DownloaderError> {
         let file_path = self.path.join(entry.name());
 
         if !file_path.exists() {
-            if !file_path.parent().unwrap().exists() {
-                create_dir_all(&file_path.parent().unwrap()).await?;
+            if !file_path.safe_parent()?.exists() {
+                create_dir_all(&file_path.safe_parent()?).await?;
             }
 
             if entry.name().ends_with("/") && !file_path.exists() {
@@ -513,7 +538,7 @@ impl ZipDownloader {
             path: self.path.clone(),
         };
 
-        let state = EntryDownloadRequest::state(&context, entry).await;
+        let state = EntryDownloadRequest::state(&context, entry).await?;
         if state == EntryDownloadState::Complete {
             if let Some(callback) = callback {
                 callback(*entry.compressed_size() as usize);
@@ -534,12 +559,12 @@ impl ZipDownloader {
         };
 
         if state == EntryDownloadState::Resumable {
-            let state_file = zstate_path(&self.id, &entry.name());
+            let state_file = zstate_path(&self.id, &entry.name())?;
             if state_file.exists() {
                 let mut buf = Bytes::from(tokio::fs::read(state_file).await?);
                 decoder.restore_state(&mut buf);
             } else {
-                tokio::fs::create_dir_all(state_file.parent().unwrap()).await?;
+                tokio::fs::create_dir_all(state_file.safe_parent()?).await?;
             }
         }
 

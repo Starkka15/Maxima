@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use std::io::Read;
 
-use anyhow::{bail, Result};
+use crate::util::native::DownloadError;
 use log::info;
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -20,7 +20,10 @@ pub struct GithubRelease {
     pub assets: Vec<GithubAsset>,
 }
 
-pub fn fetch_github_releases(author: &str, repository: &str) -> Result<Vec<GithubRelease>> {
+pub fn fetch_github_releases(
+    author: &str,
+    repository: &str,
+) -> Result<Vec<GithubRelease>, DownloadError> {
     let url = format!(
         "https://api.github.com/repos/{}/{}/releases",
         author, repository
@@ -30,7 +33,7 @@ pub fn fetch_github_releases(author: &str, repository: &str) -> Result<Vec<Githu
         .set("User-Agent", "ArmchairDevelopers/Maxima")
         .call()?;
     if res.status() != StatusCode::OK {
-        bail!("GitHub request failed: {}", res.into_string()?);
+        return Err(DownloadError::Http(res.into_string()?));
     }
 
     let text = res.into_string()?;
@@ -42,7 +45,7 @@ pub fn fetch_github_release(
     author: &str,
     repository: &str,
     version: &str,
-) -> Result<GithubRelease> {
+) -> Result<GithubRelease, DownloadError> {
     let url = format!(
         "https://api.github.com/repos/{}/{}/releases/{}",
         author, repository, version
@@ -52,7 +55,7 @@ pub fn fetch_github_release(
         .set("User-Agent", "ArmchairDevelopers/Maxima")
         .call()?;
     if res.status() != StatusCode::OK {
-        bail!("GitHub request failed: {}", res.into_string()?);
+        return Err(DownloadError::Http(res.into_string()?));
     }
 
     let text = res.into_string()?;
@@ -60,12 +63,12 @@ pub fn fetch_github_release(
     Ok(result)
 }
 
-pub fn github_download_asset(asset: &GithubAsset, path: &PathBuf) -> Result<()> {
+pub fn github_download_asset(asset: &GithubAsset, path: &PathBuf) -> Result<(), DownloadError> {
     info!("Downloading {}...", asset.name);
 
     let res = ureq::get(&asset.browser_download_url).call()?;
     if res.status() != StatusCode::OK {
-        bail!("GitHub request failed: {}", res.into_string()?);
+        return Err(DownloadError::Http(res.into_string()?));
     }
 
     let mut body: Vec<u8> = vec![];

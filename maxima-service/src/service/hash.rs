@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use maxima::util::native::NativeError;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs;
@@ -9,11 +9,11 @@ use winapi::um::processthreadsapi::OpenProcess;
 use winapi::um::psapi::GetModuleFileNameExW;
 use winapi::um::winnt::PROCESS_QUERY_INFORMATION;
 
-pub fn get_sha256_hash_of_pid(pid: u32) -> Result<[u8; 32]> {
+pub fn get_sha256_hash_of_pid(pid: u32) -> Result<[u8; 32], NativeError> {
     unsafe {
         let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
         if process_handle.is_null() {
-            bail!("Failed to open process.");
+            return Err(NativeError::CantFindProcess);
         }
 
         let mut buffer = [0u16; 4096];
@@ -25,7 +25,7 @@ pub fn get_sha256_hash_of_pid(pid: u32) -> Result<[u8; 32]> {
         );
         CloseHandle(process_handle);
         if result == 0 {
-            bail!("Failed to get module file name.");
+            return Err(NativeError::CantFindModuleFileName);
         }
 
         let path = OsString::from_wide(&buffer[..result as usize])

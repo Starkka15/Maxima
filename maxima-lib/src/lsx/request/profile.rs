@@ -1,12 +1,13 @@
-use anyhow::Result;
 use log::{debug, info};
 
 use crate::core::service_layer::{
-    ServiceFriends, ServiceGetMyFriendsRequestBuilder, SERVICE_REQUEST_GETMYFRIENDS,
+    ServiceFriends, ServiceGetMyFriendsRequestBuilder, ServiceLayerError,
+    SERVICE_REQUEST_GETMYFRIENDS,
 };
 use crate::{
     lsx::{
         connection::LockedConnectionState,
+        request::LSXRequestError,
         types::{
             LSXBlockedUser, LSXErrorSuccess, LSXFriend, LSXFriendState, LSXGetBlockList,
             LSXGetBlockListResponse, LSXGetPresence, LSXGetPresenceResponse, LSXGetProfile,
@@ -17,20 +18,23 @@ use crate::{
     },
     make_lsx_handler_response,
     rtm::client::{BasicPresence, RichPresenceBuilder},
-    util::native::platform_path,
+    util::native::{platform_path, NativeError, SafeStr},
 };
 
 pub async fn handle_profile_request(
     state: LockedConnectionState,
     _: LSXGetProfile,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     let arc = state.write().await.maxima_arc();
     let maxima = arc.lock().await;
 
     let user = maxima.local_user().await?;
     let path = platform_path(maxima.avatar_image(&user.id(), 208, 208).await?);
 
-    let player = user.player().as_ref().unwrap();
+    let player = user
+        .player()
+        .as_ref()
+        .unwrap_or(Err(ServiceLayerError::MissingField)?);
     let name = player.unique_name();
     debug!("Got profile for {} {:?}", &name, path);
 
@@ -42,7 +46,7 @@ pub async fn handle_profile_request(
        attr_Country: "US".to_string(),
        attr_UserId: user.id().parse::<u64>()?,
        attr_GeoCountry: "US".to_string(),
-       attr_AvatarId: path.to_str().unwrap().to_string(),
+       attr_AvatarId: path.safe_str()?.to_string(),
        attr_IsSubscriber: false,
        attr_IsSteamSubscriber: false,
        attr_PersonaId: player.psd().parse::<u64>()?,
@@ -54,7 +58,7 @@ pub async fn handle_profile_request(
 pub async fn handle_presence_request(
     _: LockedConnectionState,
     _: LSXGetPresence,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     make_lsx_handler_response!(Response, GetPresenceResponse, {
        attr_UserId: 1005663144213,
        attr_Presence: LSXPresence::Ingame,
@@ -72,14 +76,14 @@ pub async fn handle_presence_request(
 pub async fn handle_set_presence_request(
     state: LockedConnectionState,
     request: LSXSetPresence,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     info!(
         "Setting Presence to {:?}: {}",
         request.attr_Presence,
         request
             .attr_RichPresence
             .to_owned()
-            .or(Some("Unknown".to_string()))
+            .or(Some(String::new()))
             .unwrap()
     );
 
@@ -112,7 +116,7 @@ pub async fn handle_set_presence_request(
 pub async fn handle_query_presence_request(
     state: LockedConnectionState,
     request: LSXQueryPresence,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     let mut friends = Vec::new();
 
     let mut state = state.write().await;
@@ -120,12 +124,10 @@ pub async fn handle_query_presence_request(
     let presence_store = maxima.rtm().presence_store().lock().await;
 
     for user in request.Users {
-        let presence = presence_store.get(&user.to_string());
-        if presence.is_none() {
-            continue;
-        }
-
-        let presence = presence.unwrap();
+        let presence = match presence_store.get(&user.to_string()) {
+            Some(p) => p,
+            None => continue,
+        };
 
         let game = if let Some(game) = presence.game() {
             game.to_owned()
@@ -156,7 +158,7 @@ pub async fn handle_query_presence_request(
 pub async fn handle_query_friends_request(
     state: LockedConnectionState,
     _: LSXQueryFriends,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     let mut state = state.write().await;
     let mut maxima = state.maxima().await;
 
@@ -169,18 +171,14 @@ pub async fn handle_query_friends_request(
             continue;
         }
 
-        let mut presence = presence_store.get(ele.id());
-        if presence.is_none() {
-            presence = Some(
-                RichPresenceBuilder::default()
-                    .basic(BasicPresence::Offline)
-                    .status(String::new())
-                    .game(None)
-                    .build()?,
-            );
-        }
-
-        let presence = presence.unwrap();
+        let mut presence = presence_store.get(ele.id()).unwrap_or_else(|| {
+            RichPresenceBuilder::default()
+                .basic(BasicPresence::Offline)
+                .status(String::new())
+                .game(None)
+                .build()
+                .unwrap()
+        });
 
         let mut lsx_presence = match presence.basic() {
             BasicPresence::Unknown => LSXPresence::Unknown,
@@ -223,7 +221,7 @@ pub async fn handle_query_friends_request(
 pub async fn handle_get_block_list_request(
     state: LockedConnectionState,
     _: LSXGetBlockList,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     let mut list: Vec<LSXBlockedUser> = Vec::new();
 
     let mut maxima = state.write().await;
@@ -236,7 +234,8 @@ pub async fn handle_get_block_list_request(
                 .limit(100)
                 .offset(0)
                 .is_mutual_friends_enabled(false)
-                .build()?,
+                .build()
+                .unwrap(),
         )
         .await?;
 
@@ -254,7 +253,7 @@ pub async fn handle_get_block_list_request(
 pub async fn handle_query_image_request(
     state: LockedConnectionState,
     request: LSXQueryImage,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     let parts = request.attr_ImageId.split(":").collect::<Vec<_>>();
 
     let arc = state.write().await.maxima_arc();
@@ -271,7 +270,7 @@ pub async fn handle_query_image_request(
         attr_ImageId: request.attr_ImageId,
         attr_Width: request.attr_Width,
         attr_Height: request.attr_Height,
-        attr_ResourcePath: path.to_str().unwrap().to_string(),
+        attr_ResourcePath: path.safe_str()?.to_string(),
     });
 
     make_lsx_handler_response!(Response, QueryImageResponse, { attr_Result: 1, image: images, })

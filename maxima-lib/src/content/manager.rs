@@ -6,25 +6,30 @@ use std::{
     },
 };
 
-use anyhow::{bail, Result};
 use derive_builder::Builder;
 use derive_getters::Getters;
 use futures::StreamExt;
 use log::{debug, error, info};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio::{fs, sync::Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    content::{
+        downloader::{DownloadError, ZipDownloader},
+        zip::{self, CompressionType, ZipError, ZipFileEntry},
+        ContentService,
+    },
     core::{
         auth::storage::LockedAuthStorage,
-        manifest::{self, MANIFEST_RELATIVE_PATH},
+        manifest::{self, ManifestError, MANIFEST_RELATIVE_PATH},
+        service_layer::ServiceLayerError,
         MaximaEvent,
     },
-    util::native::maxima_dir,
+    util::native::{maxima_dir, NativeError},
 };
-
-use super::{downloader::ZipDownloader, zip::ZipFileEntry, ContentService};
 
 const QUEUE_FILE: &str = "download_queue.json";
 
@@ -44,8 +49,50 @@ pub struct DownloadQueue {
     completed: Vec<QueuedGame>,
 }
 
+#[derive(Error, Debug)]
+pub enum ContentManagerError {
+    #[error(transparent)]
+    Downloader(#[from] DownloaderError),
+    #[error(transparent)]
+    Native(#[from] NativeError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+
+    #[error("download in progress, you must cancel it before starting a new one")]
+    DownloadInProgress,
+}
+
+#[derive(Error, Debug)]
+pub enum DownloaderError {
+    #[error(transparent)]
+    ServiceLayer(#[from] ServiceLayerError),
+    #[error(transparent)]
+    Zip(#[from] ZipError),
+    #[error(transparent)]
+    Request(#[from] reqwest::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Download(#[from] DownloadError),
+    #[error(transparent)]
+    Native(#[from] NativeError),
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
+
+    #[error("path `{0}` is not absolute")]
+    PathNotAbsolute(PathBuf),
+    #[error("failed to download range: {0}")]
+    Http(StatusCode),
+    #[error("requested length ({requested}) exceeds entry size ({entry})")]
+    EntrySize { requested: u64, entry: usize },
+    #[error("unsupported compression type `{0:?}`")]
+    CompressionType(CompressionType),
+}
+
 impl DownloadQueue {
-    pub(crate) async fn load() -> Result<DownloadQueue> {
+    pub(crate) async fn load() -> Result<DownloadQueue, ContentManagerError> {
         let file = maxima_dir()?.join(QUEUE_FILE);
         if !file.exists() {
             return Ok(Self::default());
@@ -57,10 +104,10 @@ impl DownloadQueue {
             return Ok(Self::default());
         }
 
-        Ok(result.unwrap())
+        Ok(result?)
     }
 
-    pub(crate) async fn save(&self) -> Result<()> {
+    pub(crate) async fn save(&self) -> Result<(), ContentManagerError> {
         let file = maxima_dir()?.join(QUEUE_FILE);
         fs::write(file, serde_json::to_string(&self)?).await?;
         Ok(())
@@ -89,7 +136,10 @@ pub struct GameDownloader {
 }
 
 impl GameDownloader {
-    pub async fn new(content_service: &ContentService, game: &QueuedGame) -> Result<Self> {
+    pub async fn new(
+        content_service: &ContentService,
+        game: &QueuedGame,
+    ) -> Result<Self, DownloaderError> {
         let url = content_service
             .download_url(&game.offer_id, Some(&game.build_id))
             .await?;
@@ -129,7 +179,7 @@ impl GameDownloader {
             self.prepare_download_vars();
         let total_count = self.total_count;
         tokio::spawn(async move {
-            GameDownloader::start_downloads(
+            let dl = GameDownloader::start_downloads(
                 total_count,
                 downloader_arc,
                 entries,
@@ -138,6 +188,9 @@ impl GameDownloader {
                 notify,
             )
             .await;
+            if let Err(err) = dl {
+                error!("Error when downloading!: `{:?}", err)
+            }
         });
     }
 
@@ -166,7 +219,7 @@ impl GameDownloader {
         cancel_token: CancellationToken,
         completed_bytes: Arc<AtomicUsize>,
         notify: Arc<Notify>,
-    ) {
+    ) -> Result<(), DownloaderError> {
         let mut handles = Vec::with_capacity(total_count);
 
         for i in 0..total_count {
@@ -204,16 +257,15 @@ impl GameDownloader {
         let path = downloader_arc.path();
 
         info!("Files downloaded, running touchup...");
-        let manifest = manifest::read(path.join(MANIFEST_RELATIVE_PATH))
-            .await
-            .unwrap();
+        let manifest = manifest::read(path.join(MANIFEST_RELATIVE_PATH)).await?;
 
-        manifest.run_touchup(path).await.unwrap();
+        manifest.run_touchup(path).await?;
         info!("Installation finished!");
 
         completed_bytes.fetch_add(1, Ordering::SeqCst);
 
         notify.notify_one();
+        Ok(())
     }
 
     pub fn cancel(&self) {
@@ -255,7 +307,7 @@ pub struct ContentManager {
 }
 
 impl ContentManager {
-    pub async fn new(auth: LockedAuthStorage, _resume: bool) -> Result<Self> {
+    pub async fn new(auth: LockedAuthStorage, _resume: bool) -> Result<Self, ContentManagerError> {
         Ok(Self {
             queue: DownloadQueue::load().await?,
             service: ContentService::new(auth),
@@ -263,18 +315,18 @@ impl ContentManager {
         })
     }
 
-    pub async fn add_install(&mut self, game: QueuedGame) -> Result<()> {
+    pub async fn add_install(&mut self, game: QueuedGame) -> Result<(), ContentManagerError> {
         if self.queue.queued.is_empty() && self.queue.current == None && self.current.is_none() {
             self.install_now(game).await?;
         } else {
             self.queue.queued.push(game);
-            self.queue.save().await.unwrap();
+            self.queue.save().await?;
         }
 
         Ok(())
     }
 
-    pub async fn install_now(&mut self, game: QueuedGame) -> Result<()> {
+    pub async fn install_now(&mut self, game: QueuedGame) -> Result<(), ContentManagerError> {
         if let Some(current) = &self.current {
             current.cancel();
             self.current = None;
@@ -293,16 +345,13 @@ impl ContentManager {
         Ok(())
     }
 
-    async fn install_direct(&mut self, game: QueuedGame) -> Result<()> {
-        if let Some(current) = &self.current {
-            bail!(
-                "Download in progress - {}. You must cancel it before starting a new one",
-                current.offer_id
-            );
+    async fn install_direct(&mut self, game: QueuedGame) -> Result<(), ContentManagerError> {
+        if self.current.is_some() {
+            return Err(ContentManagerError::DownloadInProgress);
         }
 
         self.queue.current = Some(game.clone());
-        self.queue.save().await.unwrap();
+        self.queue.save().await?;
 
         let downloader = GameDownloader::new(&self.service, &game).await?;
         downloader.download();
@@ -310,7 +359,7 @@ impl ContentManager {
         Ok(())
     }
 
-    pub(crate) async fn update(&mut self) -> Result<Option<MaximaEvent>> {
+    pub(crate) async fn update(&mut self) -> Result<Option<MaximaEvent>, ContentManagerError> {
         let mut event = None;
 
         if let Some(current) = &self.current {

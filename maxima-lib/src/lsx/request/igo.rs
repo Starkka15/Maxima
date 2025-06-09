@@ -1,15 +1,15 @@
-use anyhow::Result;
 use log::info;
 
 use crate::lsx::{
     connection::LockedConnectionState,
+    request::LSXRequestError,
     types::{LSXResponseType, LSXShowIGOWindow},
 };
 
 pub async fn handle_show_igo_window_request(
     state: LockedConnectionState,
     request: LSXShowIGOWindow,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     info!("Got request to show user {}", request.target_id);
 
     let arc = state.write().await.maxima_arc();

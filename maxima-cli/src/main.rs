@@ -209,7 +209,7 @@ pub async fn login_flow(login_override: Option<String>) -> Result<TokenResponse>
         bail!("Login failed: {}", token_res.err().unwrap().to_string());
     }
 
-    token_res
+    Ok(token_res?)
 }
 
 async fn startup() -> Result<()> {
@@ -282,11 +282,18 @@ async fn startup() -> Result<()> {
             let offer_id = if login.is_none() {
                 let mut maxima = maxima_arc.lock().await;
                 let offer = maxima.mut_library().game_by_base_slug(&slug).await;
-                if offer.is_none() {
-                    bail!("No owned offer found for '{}'", slug);
+                // TODO: ideally this function should return an Error type, but this frontend makes that complicated
+                if let Err(err) = offer {
+                    bail!("Error fetching offer for slug `{}`: {}", slug, err);
+                } else {
+                    let offer = offer.unwrap();
+                    // TODO: could do a match here as well, same problem as above
+                    if offer.is_some() {
+                        offer.unwrap().offer_id().to_owned()
+                    } else {
+                        bail!("No owned offer found for '{}'", slug);
+                    }
                 }
-
-                offer.unwrap().offer_id().to_owned()
             } else {
                 slug
             };
@@ -352,7 +359,7 @@ async fn interactive_start_game(maxima_arc: LockedMaxima) -> Result<()> {
         let mut maxima = maxima_arc.lock().await;
 
         let mut owned_games = Vec::new();
-        for game in maxima.mut_library().games().await {
+        for game in maxima.mut_library().games().await? {
             if !game.base_offer().is_installed().await {
                 continue;
             }
@@ -380,7 +387,7 @@ async fn interactive_install_game(maxima_arc: LockedMaxima) -> Result<()> {
 
     let offer_id = {
         let mut owned_games = Vec::new();
-        for game in maxima.mut_library().games().await {
+        for game in maxima.mut_library().games().await? {
             if game.base_offer().is_installed().await {
                 continue;
             }
@@ -519,7 +526,7 @@ async fn generate_download_links(maxima_arc: LockedMaxima) -> Result<()> {
 
     let content_service = ContentService::new(maxima.auth_storage().clone());
 
-    let owned_games = maxima.mut_library().games().await;
+    let owned_games = maxima.mut_library().games().await?;
     let owned_games_strs = owned_games
         .iter()
         .map(|g| g.name())
@@ -564,7 +571,7 @@ async fn print_account_info(maxima_arc: LockedMaxima) -> Result<()> {
     let user = maxima.local_user().await?;
 
     info!("Access Token: {}", maxima.access_token().await?);
-    info!("PC Sign: {}", AuthContext::new()?.generate_pc_sign());
+    info!("PC Sign: {}", AuthContext::new()?.generate_pc_sign()?);
 
     let player = user.player().as_ref().unwrap();
     info!("Username: {}", player.unique_name());
@@ -733,7 +740,7 @@ async fn list_games(maxima_arc: LockedMaxima) -> Result<()> {
     let mut maxima = maxima_arc.lock().await;
 
     info!("Owned games:");
-    let titles = maxima.mut_library().games().await;
+    let titles = maxima.mut_library().games().await?;
 
     for title in titles {
         info!(
@@ -774,7 +781,7 @@ async fn do_cloud_sync(maxima_arc: LockedMaxima, game_slug: &str, write: bool) -
     let offer = maxima
         .mut_library()
         .game_by_base_slug(game_slug)
-        .await
+        .await?
         .unwrap()
         .clone();
 
@@ -793,7 +800,7 @@ async fn do_cloud_sync(maxima_arc: LockedMaxima, game_slug: &str, write: bool) -
         .await?;
     let res = lock.sync_files().await;
     lock.release().await?;
-    res.unwrap();
+    res?;
 
     info!("Done");
 

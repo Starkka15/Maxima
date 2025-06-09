@@ -1,5 +1,4 @@
-use anyhow::{bail, Result};
-use log::{info, debug};
+use log::{debug, info};
 use std::ffi::{CString, OsStr, OsString};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,15 +17,16 @@ use windows_service::service::{
 };
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-use is_elevated::is_elevated;
-
-use super::native::module_path;
+use super::BackgroundServiceControlError;
+use super::native::{module_path, NativeError, SafeStr};
 use super::registry::launch_bootstrap;
+use is_elevated::is_elevated;
 
 pub const SERVICE_NAME: &str = "MaximaBackgroundService";
 pub const SERVICE_DISPLAY_NAME: &str = "Maxima Background Service";
 
-pub fn register_service() -> Result<()> {
+
+pub fn register_service() -> Result<(), BackgroundServiceControlError> {
     let service_manager = service_manager(true)?;
 
     let service_info = ServiceInfo {
@@ -45,14 +45,15 @@ pub fn register_service() -> Result<()> {
     // Update the existing service, if it exists
     let existing_service = service_manager.open_service(
         OsString::from(SERVICE_NAME),
-        ServiceAccess::START | ServiceAccess::STOP |
-        ServiceAccess::CHANGE_CONFIG | ServiceAccess::QUERY_STATUS,
+        ServiceAccess::START
+            | ServiceAccess::STOP
+            | ServiceAccess::CHANGE_CONFIG
+            | ServiceAccess::QUERY_STATUS,
     );
 
-    if existing_service.is_ok() {
+    if let Ok(service) = existing_service {
         info!("Updating existing service...");
-        let service = existing_service.unwrap();
-        
+
         let state = service.query_status()?.current_state;
         if state == ServiceState::Running {
             let result = service.stop();
@@ -75,7 +76,7 @@ pub fn register_service() -> Result<()> {
     Ok(())
 }
 
-pub unsafe fn init_service_security() -> Result<()> {
+pub unsafe fn init_service_security() -> Result<(), BackgroundServiceControlError> {
     let hscm = OpenSCManagerA(
         std::ptr::null(),
         CString::new("ServicesActive")?.as_ptr(),
@@ -89,7 +90,7 @@ pub unsafe fn init_service_security() -> Result<()> {
     );
 
     if hservice.is_null() {
-        bail!("Failed to find service when configuring security");
+        return Err(BackgroundServiceControlError::Absent);
     }
 
     // Query the service object security
@@ -104,12 +105,10 @@ pub unsafe fn init_service_security() -> Result<()> {
 
     if result == 0 {
         // The initial call failed; check if the error was related to buffer size
-        let last_error = std::io::Error::last_os_error().raw_os_error().unwrap() as u32;
-        if last_error != winapi::shared::winerror::ERROR_INSUFFICIENT_BUFFER {
-            bail!(
-                "Unable to query service object security. Error: {}",
-                last_error
-            );
+        let last_error = std::io::Error::last_os_error();
+        let raw_error = (&last_error).raw_os_error().unwrap() as u32;
+        if raw_error != winapi::shared::winerror::ERROR_INSUFFICIENT_BUFFER {
+            return Err(BackgroundServiceControlError::ServiceObjectSecurity(last_error));
         }
     }
 
@@ -127,10 +126,9 @@ pub unsafe fn init_service_security() -> Result<()> {
     );
 
     if result == 0 {
-        bail!(
-            "Unable to query service object security. Error: {}",
-            std::io::Error::last_os_error()
-        );
+        return Err(BackgroundServiceControlError::ServiceObjectSecurity(
+            std::io::Error::last_os_error(),
+        ));
     }
 
     // Convert the security descriptor to a string
@@ -145,10 +143,9 @@ pub unsafe fn init_service_security() -> Result<()> {
     );
 
     if result == 0 {
-        bail!(
-            "Unable to convert security descriptor to string. Error: {}",
-            std::io::Error::last_os_error()
-        );
+        return Err(BackgroundServiceControlError::SecurityDescriptorToString(
+            std::io::Error::last_os_error(),
+        ));
     }
 
     let sddl = U16CString::from_ptr_str(sddl_string).to_string_lossy();
@@ -163,8 +160,7 @@ pub unsafe fn init_service_security() -> Result<()> {
     let mut amended_security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     let mut amended_security_descriptor_len: u32 = 0;
     let result = ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        U16CString::from_str(amended_sddl.as_str())
-            .unwrap()
+        U16CString::from_str(amended_sddl.as_str()).unwrap_or(Err(NativeError::Stringify)?)
             .as_ptr(),
         SDDL_REVISION_1.into(),
         &mut amended_security_descriptor,
@@ -172,10 +168,9 @@ pub unsafe fn init_service_security() -> Result<()> {
     );
 
     if result == 0 {
-        bail!(
-            "Unable to convert SDDL string to security descriptor. Error: {}",
-            std::io::Error::last_os_error()
-        );
+        return Err(BackgroundServiceControlError::StringToSecurityDescriptor(
+            std::io::Error::last_os_error(),
+        ));
     }
 
     // Set the service object security with the amended security descriptor
@@ -186,30 +181,29 @@ pub unsafe fn init_service_security() -> Result<()> {
     );
 
     if result == 0 {
-        bail!(
-            "Failed to set service security attributes. Error: {}",
-            std::io::Error::last_os_error()
-        );
+        return Err(BackgroundServiceControlError::SecurityAttributes(
+            std::io::Error::last_os_error(),
+        ));
     }
 
     Ok(())
 }
 
-pub fn is_service_valid() -> Result<bool> {
+pub fn is_service_valid() -> Result<bool, BackgroundServiceControlError> {
     let service_manager = service_manager(false)?;
 
     let result =
         service_manager.open_service(OsString::from(SERVICE_NAME), ServiceAccess::QUERY_CONFIG);
-    if result.is_err() {
-        return Ok(false);
-    }
+    let service = match result {
+        Ok(result) => result,
+        Err(_) => return Ok(false)
+    };
 
     debug!("Verifying service config");
 
-    let service = result.unwrap();
     let config = service.query_config()?;
     let config_path = PathBuf::from({
-        let path = config.executable_path.to_str().unwrap();
+        let path = config.executable_path.safe_str()?;
         if path.starts_with("\"") && path.ends_with("\"") {
             &path[1..path.len() - 1]
         } else {
@@ -229,7 +223,7 @@ pub fn is_service_valid() -> Result<bool> {
     Ok(true)
 }
 
-pub fn is_service_running() -> Result<bool> {
+pub fn is_service_running() -> Result<bool, BackgroundServiceControlError> {
     let service_manager = service_manager(false)?;
 
     let service =
@@ -239,16 +233,13 @@ pub fn is_service_running() -> Result<bool> {
     Ok(state == ServiceState::Running)
 }
 
-pub async fn start_service() -> Result<()> {
+pub async fn start_service() -> Result<(), BackgroundServiceControlError> {
     let service_manager = service_manager(false)?;
 
     let service_result =
-        service_manager.open_service(OsString::from(SERVICE_NAME), ServiceAccess::START);
-    if let Some(windows_service::Error::Winapi(code)) = service_result.as_ref().err() {
-        bail!("Failed to start background service! {}", code);
-    }
+        service_manager.open_service(OsString::from(SERVICE_NAME), ServiceAccess::START)?;
 
-    service_result.unwrap().start(&[OsStr::new("")])?;
+    service_result.start(&[OsStr::new("")])?;
 
     while !is_service_running()? {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -257,16 +248,13 @@ pub async fn start_service() -> Result<()> {
     Ok(())
 }
 
-pub async fn stop_service() -> Result<()> {
+pub async fn stop_service() -> Result<(), BackgroundServiceControlError> {
     let service_manager = service_manager(false)?;
 
     let service_result =
-        service_manager.open_service(OsString::from(SERVICE_NAME), ServiceAccess::STOP);
-    if let Some(windows_service::Error::Winapi(code)) = service_result.as_ref().err() {
-        bail!("Failed to stop background service! {}", code);
-    }
+        service_manager.open_service(OsString::from(SERVICE_NAME), ServiceAccess::STOP)?;
 
-    service_result.unwrap().stop()?;
+    service_result.stop()?;
 
     while is_service_running()? {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -275,7 +263,7 @@ pub async fn stop_service() -> Result<()> {
     Ok(())
 }
 
-pub fn register_service_user() -> Result<()> {
+pub fn register_service_user() -> Result<(), BackgroundServiceControlError> {
     if !is_elevated() {
         launch_bootstrap()?;
         return Ok(());
@@ -286,7 +274,7 @@ pub fn register_service_user() -> Result<()> {
     Ok(())
 }
 
-fn service_manager(create: bool) -> Result<ServiceManager> {
+fn service_manager(create: bool) -> Result<ServiceManager, BackgroundServiceControlError> {
     let mut manager_access = ServiceManagerAccess::CONNECT;
     if create {
         manager_access |= ServiceManagerAccess::CREATE_SERVICE;
@@ -298,6 +286,6 @@ fn service_manager(create: bool) -> Result<ServiceManager> {
     )?)
 }
 
-fn service_path() -> Result<PathBuf> {
-    Ok(module_path().with_file_name("maxima-service.exe"))
+fn service_path() -> Result<PathBuf, NativeError> {
+    Ok(module_path()?.with_file_name("maxima-service.exe"))
 }

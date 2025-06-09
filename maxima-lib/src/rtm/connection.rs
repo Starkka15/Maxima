@@ -6,7 +6,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use super::proto::{communication_v1, Communication, CommunicationV1};
+use super::RtmError;
 use log::{error, warn};
 use prost::{
     bytes::{Buf, BufMut, BytesMut},
@@ -21,8 +22,6 @@ use tokio::{
 };
 use tokio_rustls::TlsConnector;
 use webpki_roots::TLS_SERVER_ROOTS;
-
-use super::proto::{communication_v1, Communication, CommunicationV1};
 
 // TnT as far as I've heard means "Tools and Technology"
 pub const RTM_DOMAIN: &str = "rtm.tnt-ea.com";
@@ -142,16 +141,16 @@ impl RtmConnectionManager {
                                 }
 
                                 let buf = bytes.clone().freeze().slice(0..expected_size as usize);
-                                let msg = Communication::decode(buf).unwrap();
-                                let id = &msg.v1.as_ref().unwrap().request_id;
+                                let msg = Communication::decode(buf)?;
+                                let id = &msg.v1.as_ref().ok_or(RtmError::NoBody)?.request_id;
 
                                 if let Some(tx) =
                                     pending_responses.remove(id)
                                 {
                                     tx.send(msg).unwrap();
                                 } else if id.is_empty() {
-                                    if let Some(body) = &msg.v1.as_ref().unwrap().body {
-                                        update_presence_tx.send(body.clone()).await.unwrap();
+                                    if let Some(body) = &msg.v1.as_ref().ok_or(RtmError::NoBody)?.body {
+                                        update_presence_tx.send(body.clone()).await?;
                                     }
                                 }
 
@@ -176,10 +175,10 @@ impl RtmConnectionManager {
 
                         let mut buf = BytesMut::new();
                         buf.put_i32(communication.encoded_len() as i32);
-                        communication.encode(&mut buf).unwrap();
+                        communication.encode(&mut buf)?;
 
                         let frozen = buf.freeze();
-                        tls_stream.write_all(frozen.chunk()).await.unwrap();
+                        tls_stream.write_all(frozen.chunk()).await?;
 
                         if let Some(response_tx) = request.response_tx {
                             pending_responses.insert(request.id, response_tx);
@@ -195,7 +194,7 @@ impl RtmConnectionManager {
     pub async fn send_request(
         &mut self,
         message: communication_v1::Body,
-    ) -> Result<communication_v1::Body, io::Error> {
+    ) -> Result<communication_v1::Body, RtmError> {
         let (response_tx, response_rx) = oneshot::channel();
         let request_id = self.get_new_request_id();
 
@@ -205,22 +204,25 @@ impl RtmConnectionManager {
                 payload: message,
                 response_tx: Some(response_tx),
             })
-            .await
-            .unwrap();
+            .await?;
 
         match response_rx.await {
-            Ok(response) => Ok(response.v1.unwrap().body.unwrap()),
-            Err(_) => Err(io::Error::new(
+            Ok(response) => Ok(response
+                .v1
+                .ok_or(RtmError::NoBody)?
+                .body
+                .ok_or(RtmError::NoBody)?),
+            Err(_) => Err(RtmError::Io(io::Error::new(
                 ErrorKind::Other,
                 "Failed to receive response",
-            )),
+            ))),
         }
     }
 
     pub async fn send_and_forget_request(
         &mut self,
         message: communication_v1::Body,
-    ) -> Result<(), io::Error> {
+    ) -> Result<(), RtmError> {
         let request_id = self.get_new_request_id();
 
         self.request_tx
@@ -229,8 +231,7 @@ impl RtmConnectionManager {
                 payload: message,
                 response_tx: None,
             })
-            .await
-            .unwrap();
+            .await?;
 
         Ok(())
     }

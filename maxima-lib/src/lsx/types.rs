@@ -148,7 +148,7 @@ pub fn create_lsx_message(r#type: LSXMessageType) -> LSX {
 macro_rules! make_lsx_handler_response {
     ($reply_type:ty, $reply_name:ident, $reply_initializer:tt) => {
         paste::paste! {
-            anyhow::Ok(Some([<LSX $reply_type Type>]::$reply_name(
+            Ok(Some([<LSX $reply_type Type>]::$reply_name(
                 [<LSX $reply_name>] $reply_initializer
             )))
         }

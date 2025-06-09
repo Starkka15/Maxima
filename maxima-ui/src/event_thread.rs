@@ -1,7 +1,7 @@
-use anyhow::{Ok, Result};
 use egui::Context;
 use std::sync::mpsc::{Receiver, Sender};
 
+use crate::bridge_thread::BackendError;
 use log::info;
 use maxima::core::{
     service_layer::{
@@ -10,6 +10,7 @@ use maxima::core::{
     LockedMaxima,
 };
 
+// TODO(headassbtw): integrate this into the enum too (out of scope for the PR i wrote this in)
 pub struct EventThreadFriendStatusResponse {
     pub id: String,
     pub presence: maxima::rtm::client::RichPresence,
@@ -52,7 +53,7 @@ impl EventThread {
         rtm_responder: Sender<MaximaEventResponse>,
         ctx: &Context,
         maxima_arc: LockedMaxima,
-    ) -> Result<()> {
+    ) -> Result<(), BackendError> {
         let mut maxima = maxima_arc.lock().await;
 
         let friends: ServiceFriends = maxima
@@ -63,7 +64,8 @@ impl EventThread {
                     .offset(0)
                     .limit(100)
                     .is_mutual_friends_enabled(false)
-                    .build()?,
+                    .build()
+                    .unwrap(),
             )
             .await?;
 
@@ -84,12 +86,12 @@ impl EventThread {
             {
                 let store = maxima.rtm().presence_store().lock().await;
                 for entry in store.iter() {
-                    rtm_responder.send(MaximaEventResponse::FriendStatusResponse(
+                    let _ = rtm_responder.send(MaximaEventResponse::FriendStatusResponse(
                         EventThreadFriendStatusResponse {
                             id: entry.0.to_string(),
                             presence: entry.1,
                         },
-                    ))?;
+                    ));
                     // This can cause excessive repainting if it keeps updating friends we know about
                     egui::Context::request_repaint(&ctx);
                 }

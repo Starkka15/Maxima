@@ -1,6 +1,7 @@
 use crate::{
-    bridge_thread, views::downloads_view::QueuedDownload, BackendStallState, GameDetails,
-    GameDetailsWrapper, MaximaEguiApp,
+    bridge_thread::{self, BackendError},
+    views::downloads_view::QueuedDownload,
+    BackendStallState, GameDetails, GameDetailsWrapper, MaximaEguiApp,
 };
 use log::{error, info, warn};
 use std::sync::mpsc::TryRecvError;
@@ -8,15 +9,16 @@ use std::sync::mpsc::TryRecvError;
 pub fn frontend_processor(app: &mut MaximaEguiApp, ctx: &egui::Context) {
     puffin::profile_function!();
 
-    if app.critical_bg_thread_crashed {
+    if app.critical_error.is_some() {
         return;
     }
 
     'outer: loop {
         match app.backend.backend_listener.try_recv() {
             Ok(result) => {
+                use bridge_thread::MaximaLibResponse::*;
                 match result {
-                    bridge_thread::MaximaLibResponse::LoginResponse(res) => {
+                    LoginResponse(res) => {
                         if let Err(error) = &res {
                             warn!("Login failed. {}", error);
                             continue;
@@ -36,24 +38,16 @@ pub fn frontend_processor(app: &mut MaximaEguiApp, ctx: &egui::Context) {
                             .send(bridge_thread::MaximaLibRequest::GetFriendsRequest)
                             .unwrap();
                     }
-                    bridge_thread::MaximaLibResponse::LoginCacheEmpty => {
-                        app.backend_state = BackendStallState::UserNeedsToLogIn;
+                    LoginCacheEmpty => app.backend_state = BackendStallState::UserNeedsToLogIn,
+                    ServiceNeedsStarting => {
+                        app.backend_state = BackendStallState::UserNeedsToInstallService
                     }
-                    bridge_thread::MaximaLibResponse::ServiceNeedsStarting => {
-                        app.backend_state = BackendStallState::UserNeedsToInstallService;
-                    }
-                    bridge_thread::MaximaLibResponse::ServiceStarted => {
-                        app.backend_state = BackendStallState::Starting
-                    }
-                    bridge_thread::MaximaLibResponse::GameInfoResponse(res) => {
+                    ServiceStarted => app.backend_state = BackendStallState::Starting,
+                    GameInfoResponse(res) => {
                         app.games.insert(res.game.slug.clone(), res.game);
                     }
-                    bridge_thread::MaximaLibResponse::GameDetailsResponse(res) => {
-                        if res.response.is_err() {
-                            continue;
-                        }
-
-                        let response = res.response.unwrap();
+                    GameDetailsResponse(res) => {
+                        let response = res.response;
 
                         for (slug, game) in &mut app.games {
                             if !slug.eq(&res.slug) {
@@ -70,24 +64,15 @@ pub fn frontend_processor(app: &mut MaximaEguiApp, ctx: &egui::Context) {
                             });
                         }
                     }
-                    bridge_thread::MaximaLibResponse::FriendInfoResponse(res) => {
-                        app.friends.push(res.friend);
-                    }
-                    bridge_thread::MaximaLibResponse::InteractionThreadDiedResponse => {
-                        error!("interact thread died");
-                        app.critical_bg_thread_crashed = true;
-                    }
-                    bridge_thread::MaximaLibResponse::ActiveGameChanged(slug) => {
-                        app.playing_game = slug;
-                    }
-                    bridge_thread::MaximaLibResponse::LocateGameResponse(res) => {
+                    FriendInfoResponse(res) => app.friends.push(res.friend),
+                    CriticalError(err) => app.critical_error = Some(*err),
+                    NonFatalError(err) => app.nonfatal_errors.push(*err),
+                    ActiveGameChanged(slug) => app.playing_game = slug,
+                    LocateGameResponse(res) => {
                         app.installer_state.locate_response = Some(res);
                         app.installer_state.locating = false;
                     }
-                    bridge_thread::MaximaLibResponse::DownloadProgressChanged(
-                        offer_id,
-                        progress,
-                    ) => {
+                    DownloadProgressChanged(offer_id, progress) => {
                         if let Some(dl_ing) = app.installing_now.as_mut() {
                             if dl_ing.offer == offer_id {
                                 dl_ing.downloaded_bytes = progress.bytes;
@@ -95,10 +80,10 @@ pub fn frontend_processor(app: &mut MaximaEguiApp, ctx: &egui::Context) {
                             }
                         }
                     }
-                    bridge_thread::MaximaLibResponse::DownloadFinished(_) => {
+                    DownloadFinished(_) => {
                         // idk
                     }
-                    bridge_thread::MaximaLibResponse::DownloadQueueUpdate(current, queue) => {
+                    DownloadQueueUpdate(current, queue) => {
                         if let Some(current) = current {
                             if !app.installing_now.as_ref().is_some_and(|n| n.offer == current) {
                                 app.installing_now = Some(QueuedDownload {
@@ -152,7 +137,7 @@ pub fn frontend_processor(app: &mut MaximaEguiApp, ctx: &egui::Context) {
                 match variant {
                     TryRecvError::Empty => {}
                     TryRecvError::Disconnected => {
-                        app.critical_bg_thread_crashed = true;
+                        app.critical_error = Some(BackendError::ChannelDisconnected);
                     }
                 }
                 break 'outer;

@@ -1,41 +1,36 @@
 use actix_web::{error, http::header::ContentType, HttpResponse};
-use derive_more::{Display, Error};
 use reqwest::StatusCode;
+use thiserror::Error;
+use windows_service::service;
 
-#[derive(Debug, Display, Error)]
-pub enum ServiceError {
-    #[display(fmt = "internal error")]
-    InternalError,
+#[derive(Error, Debug)]
+pub enum ServerError {
+    #[error(transparent)]
+    Inject(#[from] dll_syringe::error::InjectError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Native(#[from] maxima::util::native::NativeError),
+    #[error(transparent)]
+    Service(#[from] windows_service::Error),
+
+    #[error("attempted to inject into invalid process")]
+    InvalidInjectionTarget,
 }
 
-impl error::ResponseError for ServiceError {
+impl error::ResponseError for ServerError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            ServerError::InvalidInjectionTarget => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
     fn error_response(&self) -> HttpResponse {
         HttpResponse::build(self.status_code())
             .insert_header(ContentType::html())
             .body(self.to_string())
-    }
-
-    fn status_code(&self) -> StatusCode {
-        match *self {
-            ServiceError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
-}
-
-impl From<std::io::Error> for ServiceError {
-    fn from(_: std::io::Error) -> Self {
-        ServiceError::InternalError
-    }
-}
-
-impl From<serde_json::Error> for ServiceError {
-    fn from(_: serde_json::Error) -> Self {
-        ServiceError::InternalError
-    }
-}
-
-impl From<anyhow::Error> for ServiceError {
-    fn from(_: anyhow::Error) -> Self {
-        ServiceError::InternalError
     }
 }

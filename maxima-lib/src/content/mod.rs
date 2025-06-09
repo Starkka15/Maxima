@@ -1,15 +1,13 @@
 use std::time::Duration;
 
-use anyhow::Result;
-
 use crate::core::{
     auth::storage::LockedAuthStorage,
     cache::DynamicCache,
     service_layer::{
         ServiceAvailableBuild, ServiceAvailableBuilds, ServiceAvailableBuildsBuilder,
         ServiceAvailableBuildsRequestBuilder, ServiceDownloadUrlMetadata,
-        ServiceDownloadUrlRequestBuilder, ServiceLayerClient, SERVICE_REQUEST_AVAILABLEBUILDS,
-        SERVICE_REQUEST_DOWNLOADURL,
+        ServiceDownloadUrlRequestBuilder, ServiceLayerClient, ServiceLayerError,
+        SERVICE_REQUEST_AVAILABLEBUILDS, SERVICE_REQUEST_DOWNLOADURL,
     },
 };
 
@@ -37,7 +35,10 @@ impl ContentService {
         }
     }
 
-    pub async fn available_builds(&self, offer_id: &str) -> Result<ServiceAvailableBuilds> {
+    pub async fn available_builds(
+        &self,
+        offer_id: &str,
+    ) -> Result<ServiceAvailableBuilds, ServiceLayerError> {
         let cache_key = "builds_".to_owned() + offer_id;
         if let Some(cached) = self.request_cache.get(&cache_key) {
             return Ok(cached);
@@ -64,7 +65,7 @@ impl ContentService {
         &self,
         offer_id: &str,
         build_id: Option<&str>,
-    ) -> Result<ServiceDownloadUrlMetadata> {
+    ) -> Result<ServiceDownloadUrlMetadata, ServiceLayerError> {
         let cache_key = "download_url_".to_owned() + offer_id + "_" + build_id.unwrap_or("live");
         if let Some(cached) = self.request_cache.get(&cache_key) {
             return Ok(cached);

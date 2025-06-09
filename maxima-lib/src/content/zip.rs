@@ -1,10 +1,12 @@
-use anyhow::{bail, Result};
 use bytebuffer::{ByteBuffer, Endian};
 use derive_getters::Getters;
 use encoding::{all::WINDOWS_1252, DecoderTrap, Encoding};
 use log::{debug, warn};
+use reqwest::header::ToStrError;
 use reqwest::Client;
 use std::cmp;
+use std::string::FromUtf8Error;
+use thiserror::Error;
 
 /// This module is based on https://users.cs.jmu.edu/buchhofp/forensics/formats/pkzip.html
 
@@ -20,6 +22,63 @@ const ZIP64_EOCD_FIXED_PART_SIZE: u32 = 56;
 const ZIP_FILE_HEADER_SIGNATURE: u32 = 0x02014b50;
 
 const MAX_BACKSCAN_OFFSET: usize = 6 * 1024 * 1024;
+
+#[derive(Error, Debug)]
+pub enum EOCDError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error("not enough space for end of central directory to be read, {required} is required, {0} is available", required = ZIP_EOCD_FIXED_PART_SIZE)]
+    NotEnoughSpace(usize),
+    #[error("invalid signature `{0:#10x}` (expected `{sig:#10x}`)", sig = ZIP_EOCD_SIGNATURE)]
+    Signature(u32),
+}
+
+#[derive(Error, Debug)]
+pub enum EntryError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Utf8(#[from] FromUtf8Error),
+
+    #[error("failed to decode file name")]
+    Decode,
+    #[error("invalid signature `{0:#10x}` (expected `{sig:#10x}`)", sig = ZIP_FILE_HEADER_SIGNATURE)]
+    Signature(u32),
+}
+
+#[derive(Error, Debug)]
+pub enum ZipError {
+    #[error(transparent)]
+    Request(#[from] reqwest::Error),
+    #[error(transparent)]
+    ToStr(#[from] ToStrError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Utf8(#[from] FromUtf8Error),
+    #[error(transparent)]
+    Eocd(#[from] EOCDError),
+
+    #[error("content-length > 8192")]
+    ContentTooLong,
+    #[error("failed to load central directory entry {idx} (out of {total}): {err}")]
+    CentralDirectory { idx: u64, total: u64, err: String },
+    #[error("failed to read end of central directory")]
+    CentralDirectoryEndGeneric,
+    #[error("failed to decode file name")]
+    Decode,
+    #[error("failed to find extra field {id} for zip entry {name}")]
+    ExtraField { id: u16, name: String },
+    #[error("not enough space for end of central directory to be read, {required} is required, {0} is available", required = ZIP_EOCD_FIXED_PART_SIZE)]
+    NotEnoughSpace(usize),
+    #[error("no content length found in response")]
+    NoContentLength,
+    #[error("requested read was too big (attempted {attempted}, limit is {max}")]
+    ReadTooBig { attempted: i64, max: i64 },
+    #[error("invalid signature {0:#10x}")]
+    Signature(u32),
+}
 
 fn signature_scan_rev(data: &[u8], signature: u32) -> Option<usize> {
     let signature_bytes = signature.to_le_bytes();
@@ -68,12 +127,12 @@ pub struct ZipFileEntry {
 }
 
 impl ZipFileEntry {
-    pub fn parse(data: &mut ByteBuffer) -> Result<ZipFileEntry> {
+    pub fn parse(data: &mut ByteBuffer) -> Result<ZipFileEntry, EntryError> {
         let mut entry = Self::default();
 
         let signature = data.read_u32()?;
         if signature != ZIP_FILE_HEADER_SIGNATURE {
-            bail!("Invalid zip file entry signature: {:#10x}", signature);
+            return Err(EntryError::Signature(signature));
         }
 
         data.read_u16()?; // Version
@@ -108,12 +167,7 @@ impl ZipFileEntry {
         } else {
             match WINDOWS_1252.decode(&name_bytes, DecoderTrap::Strict) {
                 Ok(s) => s,
-                Err(e) => {
-                    bail!(
-                        "Failed to decode file name with Windows-1252 encoding: {}",
-                        e
-                    );
-                }
+                Err(_) => return Err(EntryError::Decode),
             }
         };
         entry.extra_field = data.read_bytes(extra_field_len as usize)?;
@@ -140,7 +194,7 @@ impl ZipFileEntry {
         Ok(entry)
     }
 
-    fn extra_field(&self, id: u16) -> Result<Vec<u8>> {
+    fn extra_field(&self, id: u16) -> Result<Vec<u8>, ZipError> {
         let mut data = ByteBuffer::from_vec(self.extra_field.clone());
         data.set_endian(Endian::LittleEndian);
 
@@ -163,11 +217,10 @@ impl ZipFileEntry {
             }
         }
 
-        bail!(
-            "Failed to find extra field {} for zip entry {}",
+        Err(ZipError::ExtraField {
             id,
-            self.name
-        );
+            name: self.name.clone(),
+        })
     }
 }
 
@@ -188,14 +241,14 @@ struct EndOfCentralDirectory {
 }
 
 impl EndOfCentralDirectory {
-    pub fn parse(&mut self, data: &mut ByteBuffer) -> Result<()> {
+    pub fn parse(&mut self, data: &mut ByteBuffer) -> Result<(), EOCDError> {
         if data.len() - data.get_rpos() < ZIP_EOCD_FIXED_PART_SIZE as usize {
-            bail!("Not enough space for end of central directory to be read");
+            return Err(EOCDError::NotEnoughSpace(data.len() - data.get_rpos()));
         }
 
         let signature = data.read_u32()?;
         if signature as u32 != ZIP_EOCD_SIGNATURE {
-            bail!("Invalid signature: {}", signature);
+            return Err(EOCDError::Signature(signature));
         }
 
         self.disk_number = data.read_u16()? as u32;
@@ -212,14 +265,14 @@ impl EndOfCentralDirectory {
         Ok(())
     }
 
-    pub fn parse64(&mut self, data: &mut ByteBuffer) -> Result<()> {
+    pub fn parse64(&mut self, data: &mut ByteBuffer) -> Result<(), ZipError> {
         if data.len() - data.get_rpos() < ZIP64_EOCD_FIXED_PART_SIZE as usize {
-            bail!("Not enough space for end of central directory to be read");
+            return Err(ZipError::NotEnoughSpace(data.len() - data.get_rpos()));
         }
 
         let signature = data.read_u32()?;
         if signature as u32 != ZIP64_EOCD_SIGNATURE {
-            bail!("Invalid signature: {}", signature);
+            return Err(ZipError::Signature(signature));
         }
 
         let size_of_record = data.read_i64()?;
@@ -243,17 +296,14 @@ impl EndOfCentralDirectory {
 }
 
 impl ZipFile {
-    pub async fn fetch(url: &str) -> Result<Self> {
+    pub async fn fetch(url: &str) -> Result<Self, ZipError> {
         let client = Client::new();
 
         let response = client.head(url).send().await?;
-        let content_length = response.headers().get("content-length");
-        if content_length.is_none() {
-            bail!("No content length found in response");
-        }
-
-        let content_length = content_length
-            .unwrap()
+        let content_length = response
+            .headers()
+            .get("content-length")
+            .ok_or(ZipError::NoContentLength)?
             .to_str()?
             .parse::<i64>()
             .unwrap_or(0);
@@ -261,7 +311,7 @@ impl ZipFile {
         let mut data: Vec<u8> = Vec::with_capacity(MAX_BACKSCAN_OFFSET);
         let mut offset = content_length - 8 * 1024;
         if offset < 0 {
-            bail!("Something went wrong while requesting a zip manifest");
+            return Err(ZipError::ContentTooLong);
         }
 
         let mut zip = Self::default();
@@ -282,46 +332,41 @@ impl ZipFile {
 
             offset = zip.load(&mut ByteBuffer::from_vec(data.clone()), content_length)?;
             if offset > content_length {
-                bail!("Requested read was too big");
+                return Err(ZipError::ReadTooBig {
+                    attempted: offset,
+                    max: content_length,
+                });
             }
         }
 
         Ok(zip)
     }
 
-    fn load(&mut self, data: &mut ByteBuffer, total_size: i64) -> Result<i64> {
+    fn load(&mut self, data: &mut ByteBuffer, total_size: i64) -> Result<i64, ZipError> {
         data.set_endian(Endian::LittleEndian);
 
-        let pos = signature_scan_rev(data.as_bytes(), ZIP_EOCD_SIGNATURE);
-        if pos.is_none() {
+        if let Some(pos) = signature_scan_rev(data.as_bytes(), ZIP_EOCD_SIGNATURE) {
+            data.set_rpos(pos);
+        } else {
             let amt = cmp::min(total_size - data.len() as i64, 1024);
             return Ok(total_size - data.len() as i64 - amt);
         }
 
-        data.set_rpos(pos.unwrap());
-
         let mut eocd = EndOfCentralDirectory::default();
-        let result = eocd.parse(data);
-        if result.is_err() {
-            bail!(
-                "Failed to read end of central directory: {}",
-                result.err().unwrap()
-            );
-        }
+        eocd.parse(data)?;
 
         // Check if we're Zip64
         if eocd.cd_offset == ZIP64_SIGNATURE {
-            let pos = signature_scan_rev(data.as_bytes(), ZIP64_EOCD_LOCATOR_SIGNATURE);
-            if pos.is_none() {
+            if let Some(pos) = signature_scan_rev(data.as_bytes(), ZIP64_EOCD_LOCATOR_SIGNATURE) {
+                data.set_rpos(pos);
+            } else {
                 let amt = cmp::min(total_size - data.len() as i64, 1024);
                 return Ok(total_size - data.len() as i64 - amt);
             }
 
-            data.set_rpos(pos.unwrap());
-
             let signature = data.read_u32()?;
             if signature != ZIP64_EOCD_LOCATOR_SIGNATURE {
-                bail!("Invalid Zip64 end of central directory signature");
+                return Err(ZipError::Signature(signature));
             }
 
             data.read_u32()?; // Disk that contains EOCD
@@ -341,7 +386,7 @@ impl ZipFile {
         }
 
         if eocd.cd_offset < 0 || eocd.cd_offset == ZIP64_SIGNATURE {
-            bail!("Failed to read end of central directory");
+            return Err(ZipError::CentralDirectoryEndGeneric);
         }
 
         if data.len() < (total_size - eocd.cd_offset) as usize {
@@ -365,31 +410,31 @@ impl ZipFile {
         &mut self,
         data: &mut ByteBuffer,
         eocd: EndOfCentralDirectory,
-    ) -> Result<()> {
+    ) -> Result<(), ZipError> {
         for i in 0..eocd.total_entries {
-            let result = ZipFileEntry::parse(data);
-            if let Some(err) = result.as_ref().err() {
-                bail!(
-                    "Failed to load central directory entry {} (out of {}): {}",
-                    i,
-                    eocd.total_entries,
-                    err
-                );
-            }
+            let entry = match ZipFileEntry::parse(data) {
+                Err(err) => {
+                    return Err(ZipError::CentralDirectory {
+                        idx: i,
+                        total: eocd.total_entries,
+                        err: format!("{:?}", err).to_string(),
+                    })
+                }
+                Ok(e) => e,
+            };
 
-            let entry = result.unwrap();
             self.entries.push(entry.clone());
 
             if i == 0 {
                 continue;
             }
 
-            let prev = self.entries.get_mut(i as usize - 1);
-            if prev.is_none() {
+            let prev = if let Some(prev) = self.entries.get_mut(i as usize - 1) {
+                prev
+            } else {
                 continue;
-            }
+            };
 
-            let prev = prev.unwrap();
             if prev.disk_number_start != entry.disk_number_start {
                 warn!("Data offset could not be calculated");
                 continue;

@@ -1,8 +1,8 @@
 #[cfg(windows)]
 extern crate winapi;
 
-use anyhow::{bail, Result};
 use std::path::PathBuf;
+use thiserror::Error;
 
 #[cfg(windows)]
 use std::ptr;
@@ -35,7 +35,7 @@ use std::{collections::HashMap, env, fs};
 #[cfg(unix)]
 use crate::unix::fs::case_insensitive_path;
 
-use super::native::module_path;
+use super::native::{module_path, NativeError, SafeParent, SafeStr};
 
 #[cfg(target_pointer_width = "64")]
 pub const REG_ARCH_PATH: &str = "SOFTWARE\\WOW6432Node";
@@ -44,34 +44,66 @@ pub const REG_ARCH_PATH: &str = "SOFTWARE";
 
 pub const REG_EAX32_PATH: &str = "SOFTWARE\\Electronic Arts\\EA Desktop";
 
+#[derive(Error, Debug)]
+pub enum RegistryError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Native(#[from] NativeError),
+
+    #[error("registry key `{0}` not found")]
+    Key(String),
+    #[error("failed to get `{value}` of registry key `{key}`")]
+    Value { value: String, key: String },
+    #[error("install key is invalid")]
+    InvalidInstallKey,
+    #[error("invalid stored client path")]
+    InvalidStoredClientPath,
+    #[error("invalid qrc protocol")]
+    InvalidQrcProtocol,
+
+    #[cfg(target_os = "linux")]
+    #[error("xdg-mime command is not available. Please install xdg-utils")]
+    XdgMime,
+    #[cfg(target_os = "linux")]
+    #[error("Failed to set MIME type association for {type}: {error}")]
+    MimeSet { r#type: String, error: String },
+    #[cfg(target_os = "linux")]
+    #[error("failed to query mime status")]
+    XdgQueryFailed,
+    #[cfg(target_os = "linux")]
+    #[error("QRC protocol is not registered")]
+    QrcUnregistered,
+}
+
 #[cfg(windows)]
-pub fn check_registry_validity() -> Result<()> {
+pub fn check_registry_validity() -> Result<(), RegistryError> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let origin = hklm.open_subkey(format!("{}\\Origin", REG_ARCH_PATH))?;
 
     let path: String = origin.get_value("ClientPath")?;
-    let valid = path == bootstrap_path().to_str().unwrap();
+    let valid = path == bootstrap_path()?.safe_str()?;
     if !valid {
-        bail!("Invalid stored client path");
+        return Err(RegistryError::InvalidStoredClientPath);
     }
 
     let eax32 = hklm.open_subkey(REG_EAX32_PATH)?;
     let install_succesful: String = eax32.get_value("InstallSuccessful")?;
     if install_succesful != "true" {
-        bail!("Install key is invalid");
+        return Err(RegistryError::InvalidInstallKey);
     }
 
     let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
     let qrc = hkcr.open_subkey("qrc");
     if qrc.is_err() {
-        bail!("Invalid qrc protocol");
+        return Err(RegistryError::InvalidQrcProtocol);
     }
 
     Ok(())
 }
 
 #[cfg(windows)]
-async fn read_reg_key(path: &str) -> Option<String> {
+async fn read_reg_key(path: &str) -> Result<Option<String>, RegistryError> {
     if let (Some(hkey_segment), Some(value_segment)) = (path.find('\\'), path.rfind('\\')) {
         let sub_key = &path[(hkey_segment + 1)..value_segment];
         let value_name = &path[(value_segment + 1)..];
@@ -88,7 +120,7 @@ async fn read_reg_key(path: &str) -> Option<String> {
                 &mut handle,
             ) != 0
             {
-                return None;
+                return Err(RegistryError::Key(sub_key.to_string()));
             }
 
             let dw_type = ptr::null_mut();
@@ -104,12 +136,18 @@ async fn read_reg_key(path: &str) -> Option<String> {
             ) != 0
             {
                 RegCloseKey(handle);
-                return None;
+                return Err(RegistryError::Value {
+                    value: value_name.to_string(),
+                    key: sub_key.to_string(),
+                });
             }
 
             if dw_size <= 0 {
                 RegCloseKey(handle);
-                return None;
+                return Err(RegistryError::Value {
+                    value: value_name.to_string(),
+                    key: sub_key.to_string(),
+                });
             }
 
             let mut buf: Vec<u16> = vec![0; dw_size as usize / 2];
@@ -123,72 +161,73 @@ async fn read_reg_key(path: &str) -> Option<String> {
             ) != 0
             {
                 RegCloseKey(handle);
-                return None;
+                return Err(RegistryError::Value {
+                    value: value_name.to_string(),
+                    key: sub_key.to_string(),
+                });
             }
 
             RegCloseKey(handle);
-            return Some(String::from_utf16_lossy(&buf[..buf.len() - 1]));
+            return Ok(Some(String::from_utf16_lossy(&buf[..buf.len() - 1])));
         }
     }
 
-    None
+    Ok(None)
 }
 
 #[cfg(unix)]
-async fn read_reg_key(path: &str) -> Option<String> {
+async fn read_reg_key(path: &str) -> Result<Option<String>, RegistryError> {
     use crate::unix::wine::get_mx_wine_registry_value;
-    get_mx_wine_registry_value(path).await
+    Ok(get_mx_wine_registry_value(path).await?)
 }
 
-pub async fn parse_registry_path(key: &str) -> PathBuf {
+pub async fn parse_registry_path(key: &str) -> Result<PathBuf, RegistryError> {
     let mut parts = key
         .split(|c| c == '[' || c == ']')
         .filter(|s| !s.is_empty());
 
     let path = if let (Some(first), Some(second)) = (parts.next(), parts.next()) {
-        let path = read_reg_key(first).await;
-        if path.is_none() {
-            return PathBuf::from(key.to_owned());
-        }
+        let path = match read_reg_key(first).await? {
+            Some(path) => path.replace("\\", "/").replace("//", "/"),
+            None => return Ok(PathBuf::from(key.to_owned())),
+        };
 
-        let path = path.unwrap().replace("\\", "/").replace("//", "/");
         let second = second.replace("\\", "/");
         let second = second.strip_prefix("/").unwrap_or(&second);
 
-        return [path, second.to_owned()].iter().collect();
+        return Ok([path, second.to_owned()].iter().collect());
     } else {
         PathBuf::from(key.to_owned())
     };
 
     #[cfg(unix)]
     let path = case_insensitive_path(path);
-    path
+    Ok(path)
 }
 
-pub async fn parse_partial_registry_path(key: &str) -> PathBuf {
+pub async fn parse_partial_registry_path(key: &str) -> Result<PathBuf, RegistryError> {
     let mut parts = key
         .split(|c| c == '[' || c == ']')
         .filter(|s| !s.is_empty());
 
     let path = if let (Some(first), Some(_second)) = (parts.next(), parts.next()) {
-        let path = read_reg_key(first).await;
-        if path.is_none() {
-            return PathBuf::from(key.to_owned());
-        }
+        let path = match read_reg_key(first).await? {
+            Some(path) => path.replace("\\", "/"),
+            None => return Ok(PathBuf::from(key.to_owned())),
+        };
 
-        let path = path.unwrap().replace("\\", "/");
-        return PathBuf::from(path.to_owned());
+        return Ok(PathBuf::from(path.to_owned()));
     } else {
         PathBuf::from(key.to_owned())
     };
 
     #[cfg(unix)]
     let path = case_insensitive_path(path);
-    path
+    Ok(path)
 }
 
 #[cfg(windows)]
-pub fn read_game_path(name: &str) -> Result<PathBuf> {
+pub fn read_game_path(name: &str) -> Result<PathBuf, RegistryError> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
 
     dbg!(name);
@@ -198,25 +237,27 @@ pub fn read_game_path(name: &str) -> Result<PathBuf> {
         key = hklm.open_subkey(format!("SOFTWARE\\WOW6432Node\\EA Games\\{}", name));
     }
 
-    if key.is_err() {
-        bail!("Failed to find game path!");
-    }
+    let key = match key {
+        Ok(key) => key,
+        Err(_) => return Err(RegistryError::Key(format!("SOFTWARE\\EA Games\\{}", name))),
+    };
 
-    let path: String = key.unwrap().get_value("Install Dir")?;
+    let path: String = key.get_value("Install Dir")?;
     Ok(PathBuf::from(path))
 }
 
 #[cfg(windows)]
-pub fn bootstrap_path() -> PathBuf {
-    module_path().parent().unwrap().join("maxima-bootstrap.exe")
+pub fn bootstrap_path() -> std::result::Result<PathBuf, NativeError> {
+    Ok(module_path()?.safe_parent()?.join("maxima-bootstrap.exe"))
 }
 
 #[cfg(windows)]
-pub fn launch_bootstrap() -> Result<()> {
-    let path = bootstrap_path();
+pub fn launch_bootstrap() -> Result<(), NativeError> {
+    let path = bootstrap_path()?;
 
     let verb = "runas";
-    let file = path.to_str().unwrap();
+    let file = path.safe_str()?;
+    let file1 = file.to_string();
     let parameters = "";
 
     let verb = verb.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
@@ -237,7 +278,7 @@ pub fn launch_bootstrap() -> Result<()> {
 
         let err = GetLastError();
         if err == ERROR_CANCELLED {
-            bail!("Failed to elevate process");
+            return Err(NativeError::Elevation(file1));
         }
     }
 
@@ -245,12 +286,12 @@ pub fn launch_bootstrap() -> Result<()> {
 }
 
 #[cfg(windows)]
-pub fn set_up_registry() -> Result<()> {
+pub fn set_up_registry() -> Result<(), RegistryError> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let (origin, _) =
         hklm.create_subkey_with_flags(format!("{}\\Origin", REG_ARCH_PATH), KEY_WRITE)?;
 
-    let bootstrap_path = &bootstrap_path().to_str().unwrap().to_string();
+    let bootstrap_path = &bootstrap_path()?.safe_str()?.to_string();
     origin.set_value("ClientPath", bootstrap_path)?;
 
     let (eax_32, _) = hklm.create_subkey_with_flags(REG_EAX32_PATH, KEY_WRITE)?;
@@ -272,7 +313,11 @@ pub fn set_up_registry() -> Result<()> {
 }
 
 #[cfg(windows)]
-fn register_custom_protocol(protocol: &str, name: &str, executable: &str) -> Result<()> {
+fn register_custom_protocol(
+    protocol: &str,
+    name: &str,
+    executable: &str,
+) -> Result<(), RegistryError> {
     let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
     let (protocol, _) = hkcr.create_subkey_with_flags(protocol, KEY_WRITE)?;
 
@@ -286,8 +331,8 @@ fn register_custom_protocol(protocol: &str, name: &str, executable: &str) -> Res
 }
 
 #[cfg(target_os = "linux")]
-pub fn set_up_registry() -> Result<()> {
-    let bootstrap_path = &bootstrap_path().to_str().unwrap().to_string();
+pub fn set_up_registry() -> Result<(), RegistryError> {
+    let bootstrap_path = &bootstrap_path()?.safe_str()?.to_string();
 
     // Hijack Qt's protocol for our login redirection
     register_custom_protocol("qrc", "Maxima Launcher", bootstrap_path)?;
@@ -316,7 +361,11 @@ pub fn set_up_registry() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn register_custom_protocol(protocol: &str, name: &str, executable: &str) -> Result<()> {
+fn register_custom_protocol(
+    protocol: &str,
+    name: &str,
+    executable: &str,
+) -> Result<(), RegistryError> {
     if env::var("MAXIMA_PACKAGED").is_ok_and(|var| var == "1") {
         return Ok(());
     }
@@ -337,13 +386,9 @@ fn register_custom_protocol(protocol: &str, name: &str, executable: &str) -> Res
     }
 
     let maxima_dir = maxima_dir()?;
-    let home = maxima_dir.parent().unwrap();
+    let home = maxima_dir.safe_parent()?;
     let desktop_file_name = format!("maxima-{}.desktop", protocol);
-    let desktop_file_path = format!(
-        "{}/applications/{}",
-        home.to_str().unwrap(),
-        desktop_file_name
-    );
+    let desktop_file_path = format!("{}/applications/{}", home.safe_str()?, desktop_file_name);
     fs::write(desktop_file_path, desktop_file)?;
 
     set_mime_type(
@@ -355,12 +400,12 @@ fn register_custom_protocol(protocol: &str, name: &str, executable: &str) -> Res
 }
 
 #[cfg(target_os = "linux")]
-fn set_mime_type(mime_type: &str, desktop_file_path: &str) -> Result<()> {
+fn set_mime_type(mime_type: &str, desktop_file_path: &str) -> Result<(), RegistryError> {
     use std::process::Command;
 
     let xdg_mime_check = Command::new("xdg-mime").arg("--version").output();
     if xdg_mime_check.is_err() {
-        bail!("xdg-mime command is not available. Please install xdg-utils.");
+        return Err(RegistryError::XdgMime);
     }
 
     let output = Command::new("xdg-mime")
@@ -370,42 +415,40 @@ fn set_mime_type(mime_type: &str, desktop_file_path: &str) -> Result<()> {
         .output()?;
 
     if !output.status.success() {
-        bail!(
-            "Failed to set MIME type association for {}: {}",
-            mime_type,
-            String::from_utf8_lossy(&output.stderr)
-        );
+        return Err(RegistryError::MimeSet {
+            r#type: mime_type.to_string(),
+            error: String::from_utf8_lossy(&output.stderr).to_string(),
+        });
     }
 
     Ok(())
 }
 
 #[cfg(unix)]
-pub fn check_registry_validity() -> Result<()> {
+pub fn check_registry_validity() -> Result<(), RegistryError> {
     if env::var("MAXIMA_DISABLE_QRC").is_ok() {
         return Ok(());
     }
 
     if !verify_protocol_handler("qrc")? {
-        bail!("Protocol is not registered");
+        return Err(RegistryError::QrcUnregistered);
     }
 
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn verify_protocol_handler(protocol: &str) -> Result<bool> {
+fn verify_protocol_handler(protocol: &str) -> Result<bool, RegistryError> {
     use std::process::Command;
 
     let output = Command::new("xdg-mime")
         .arg("query")
         .arg("default")
         .arg(format!("x-scheme-handler/{}", protocol))
-        .output()
-        .expect("Failed to execute xdg-mime");
+        .output()?;
 
     if !output.status.success() {
-        bail!("Failed to query mime status");
+        return Err(RegistryError::XdgQueryFailed);
     }
 
     let output_str = String::from_utf8_lossy(&output.stdout);
@@ -430,29 +473,28 @@ fn verify_protocol_handler(protocol: &str) -> Result<bool> {
 }
 
 #[cfg(unix)]
-pub fn read_game_path(_name: &str) -> Result<PathBuf> {
+pub fn read_game_path(_name: &str) -> Result<PathBuf, RegistryError> {
     todo!("Cannot read game path on unix");
 }
 
 #[cfg(target_os = "linux")]
-pub fn bootstrap_path() -> PathBuf {
-    module_path().parent().unwrap().join("maxima-bootstrap")
+pub fn bootstrap_path() -> Result<PathBuf, NativeError> {
+    Ok(module_path()?.safe_parent()?.join("maxima-bootstrap"))
 }
 
 #[cfg(target_os = "macos")]
-pub fn bootstrap_path() -> PathBuf {
-    module_path()
-        .parent()
-        .unwrap()
+pub fn bootstrap_path() -> Result<PathBuf, NativeError> {
+    Ok(module_path()?
+        .safe_parent()?
         .join("bundle")
         .join("osx")
         .join("MaximaBootstrap.app")
         .join("Contents")
         .join("MacOS")
-        .join("maxima-bootstrap")
+        .join("maxima-bootstrap"))
 }
 
 #[cfg(unix)]
-pub fn launch_bootstrap() -> Result<()> {
+pub fn launch_bootstrap() -> Result<(), RegistryError> {
     todo!()
 }

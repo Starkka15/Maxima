@@ -3,23 +3,45 @@
 //extern crate windows_service;
 
 use std::env::current_exe;
+use std::error::Error;
+use std::string::FromUtf8Error;
+use thiserror::Error;
 use tokio::process::Command;
-
-use anyhow::{bail, Result};
 
 use base64::{engine::general_purpose, Engine};
 use maxima::core::launch::BootstrapLaunchArgs;
-use url::Url;
-
+use maxima::util::native::NativeError;
 #[cfg(windows)]
 use maxima::util::service::{is_service_valid, register_service};
+use maxima::util::BackgroundServiceControlError;
+use url::Url;
 
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[derive(Error, Debug)]
+pub(crate) enum RunError {
+    #[error(transparent)]
+    BackgroundService(#[from] BackgroundServiceControlError),
+    #[error(transparent)]
+    Base64(#[from] base64::DecodeError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Native(#[from] NativeError),
+    #[error(transparent)]
+    ParseUrl(#[from] url::ParseError),
+    #[error(transparent)]
+    ParseUtf8(#[from] FromUtf8Error),
+    #[error(transparent)]
+    Reqwest(#[from] reqwest::Error),
+}
+
 #[cfg(not(target_os = "macos"))]
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), RunError> {
     let _ = handle_launch_args().await?;
 
     Ok(())
@@ -42,7 +64,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handle_launch_args() -> Result<bool> {
+async fn handle_launch_args() -> Result<bool, RunError> {
     let mut args: Vec<String> = std::env::args().collect();
     args.remove(0);
 
@@ -60,7 +82,7 @@ async fn handle_launch_args() -> Result<bool> {
                     e.to_string()
                 };
 
-                error_str + "\n" + &e.backtrace().to_string()
+                error_str
             })
             .err()
             .unwrap_or("Success".to_string());
@@ -74,7 +96,7 @@ async fn handle_launch_args() -> Result<bool> {
 }
 
 #[cfg(windows)]
-fn service_setup() -> Result<()> {
+fn service_setup() -> Result<(), BackgroundServiceControlError> {
     if is_service_valid()? {
         return Ok(());
     }
@@ -85,21 +107,22 @@ fn service_setup() -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn service_setup() -> Result<()> {
+fn service_setup() -> Result<(), BackgroundServiceControlError> {
     Ok(())
 }
 
 #[cfg(windows)]
-async fn platform_launch(args: BootstrapLaunchArgs) -> Result<()> {
+async fn platform_launch(args: BootstrapLaunchArgs) -> Result<(), NativeError> {
     let mut binding = Command::new(args.path);
     let child = binding.args(args.args);
 
     let status = child.spawn()?.wait().await?;
-    bail!("{}", status.code().unwrap());
+    // bail!("{}", status.code().unwrap());
+    Ok(())
 }
 
 #[cfg(unix)]
-async fn platform_launch(args: BootstrapLaunchArgs) -> Result<()> {
+async fn platform_launch(args: BootstrapLaunchArgs) -> Result<(), NativeError> {
     use maxima::unix::wine::run_wine_command;
     use maxima::unix::wine::CommandType;
 
@@ -115,7 +138,7 @@ async fn platform_launch(args: BootstrapLaunchArgs) -> Result<()> {
     Ok(())
 }
 
-async fn run(args: &[String]) -> Result<bool> {
+async fn run(args: &[String]) -> Result<bool, RunError> {
     let len = args.len();
     if len == 1 {
         let arg = &args[0];
@@ -125,8 +148,7 @@ async fn run(args: &[String]) -> Result<bool> {
         }
 
         if arg.starts_with("link2ea") {
-            // TODO
-            bail!("link2ea not yet implemented!");
+            todo!();
         }
 
         if arg.starts_with("origin2") {

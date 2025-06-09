@@ -1,45 +1,79 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
+use super::{
+    auth::storage::LockedAuthStorage, endpoints::API_CLOUDSYNC, launch::LaunchMode,
+    library::OwnedOffer,
 };
-
-use anyhow::{bail, Context, Result};
+use crate::util::native::{NativeError, SafeParent, SafeStr};
 use derive_getters::Getters;
 use futures::StreamExt;
 use log::debug;
 use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    path::{Path, PathBuf},
+};
+use thiserror::Error;
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
 };
 
-use super::{auth::storage::LockedAuthStorage, endpoints::API_CLOUDSYNC, library::OwnedOffer};
-
 const AUTH_HEADER: &str = "X-Origin-AuthToken";
 const LOCK_HEADER: &str = "X-Origin-Sync-Lock";
+
+#[derive(Error, Debug)]
+pub enum CloudSyncError {
+    #[error(transparent)]
+    Auth(#[from] crate::core::auth::storage::AuthError),
+    #[error(transparent)]
+    Request(#[from] reqwest::Error),
+    #[error(transparent)]
+    Token(#[from] crate::core::auth::storage::TokenError),
+    #[error(transparent)]
+    Xml(#[from] quick_xml::de::DeError),
+    #[error(transparent)]
+    Glob(#[from] glob::GlobError),
+    #[error(transparent)]
+    Pattern(#[from] glob::PatternError),
+    #[error(transparent)]
+    ToStr(#[from] reqwest::header::ToStrError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Native(#[from] NativeError),
+    #[error(transparent)]
+    Library(#[from] crate::core::library::LibraryError),
+
+    #[error("failed to acquire {0:?}")]
+    LockAcquire(CloudSyncLockMode),
+    #[error("`{0}` has no cloudsync configuration")]
+    NoConfig(String),
+    #[error("cannot cloudsync when logged out")]
+    NotSignedIn,
+}
 
 pub enum CloudSyncLockMode {
     Read,
     Write,
 }
 
-impl CloudSyncLockMode {
-    pub fn key(&self) -> &'static str {
+impl Debug for CloudSyncLockMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CloudSyncLockMode::Read => "readlock",
-            CloudSyncLockMode::Write => "writelock",
+            CloudSyncLockMode::Read => write!(f, "readlock"),
+            CloudSyncLockMode::Write => write!(f, "writelock"),
         }
     }
 }
 
-async fn acquire_auth(auth: &LockedAuthStorage) -> Result<(String, String)> {
+async fn acquire_auth(auth: &LockedAuthStorage) -> Result<(String, String), CloudSyncError> {
     let mut auth = auth.lock().await;
 
     let token = auth.access_token().await?;
     let user_id = auth.user_id().await?;
     if token.is_none() || user_id.is_none() {
-        bail!("You are not signed in");
+        return Err(CloudSyncError::NotSignedIn);
     }
 
     let token = token.unwrap();
@@ -49,39 +83,38 @@ async fn acquire_auth(auth: &LockedAuthStorage) -> Result<(String, String)> {
 }
 
 #[cfg(windows)]
-fn home_dir() -> PathBuf {
-    PathBuf::from(match std::env::var_os("USERPROFILE") {
-        Some(user_profile) => user_profile,
-        None => "C:\\Users\\Public".into(),
-    })
+fn home_dir() -> Result<PathBuf, NativeError> {
+    Ok(PathBuf::from(
+        std::env::var_os("USERPROFILE").unwrap_or_else(|| "C:\\Users\\Public".into()),
+    ))
 }
 
 #[cfg(unix)]
-fn home_dir() -> PathBuf {
+fn home_dir() -> Result<PathBuf, NativeError> {
     use crate::unix::wine::wine_prefix_dir;
-    wine_prefix_dir().unwrap().join("drive_c/users/steamuser")
+    Ok(wine_prefix_dir()?.join("drive_c/users/steamuser"))
 }
 
-fn substitute_paths<P: AsRef<str>>(path: P) -> PathBuf {
+fn substitute_paths<P: AsRef<str>>(path: P) -> Result<PathBuf, NativeError> {
     let mut result = PathBuf::new();
     let path_str = path.as_ref();
 
     if path_str.contains("%Documents%") {
-        let path = home_dir().join("Documents");
+        let path = home_dir()?.join("Documents");
         result.push(path_str.replace("%Documents%", path.to_str().unwrap_or_default()));
     } else if path_str.contains("%SavedGames%") {
-        let path = home_dir().join("Saved Games");
+        let path = home_dir()?.join("Saved Games");
         result.push(path_str.replace("%SavedGames%", path.to_str().unwrap_or_default()));
     } else {
         result.push(path_str);
     }
 
-    result
+    Ok(result)
 }
 
-fn unsubstitute_paths<P: AsRef<Path>>(path: P) -> String {
+fn unsubstitute_paths<P: AsRef<Path>>(path: P) -> Result<String, NativeError> {
     let path = path.as_ref();
-    let home = home_dir();
+    let home = home_dir()?;
 
     let documents_path = home.join("Documents");
     let saved_games_path = home.join("Saved Games");
@@ -89,18 +122,18 @@ fn unsubstitute_paths<P: AsRef<Path>>(path: P) -> String {
     let path_str = path.to_str().unwrap_or_default().to_string();
 
     if path_str.contains(documents_path.to_str().unwrap_or_default()) {
-        path_str.replace(documents_path.to_str().unwrap_or_default(), "%Documents%")
+        Ok(path_str.replace(documents_path.to_str().unwrap_or_default(), "%Documents%"))
     } else if path_str.contains(saved_games_path.to_str().unwrap_or_default()) {
-        path_str.replace(
+        Ok(path_str.replace(
             saved_games_path.to_str().unwrap_or_default(),
             "%SavedGames%",
-        )
+        ))
     } else {
-        path_str
+        Ok(path_str)
     }
 }
 
-async fn calc_file_md5(file: File) -> Result<String> {
+async fn calc_file_md5(file: File) -> Result<String, CloudSyncError> {
     let len = file.metadata().await?.len();
 
     let buf_len = len.min(1_000_000) as usize;
@@ -108,7 +141,7 @@ async fn calc_file_md5(file: File) -> Result<String> {
     let mut context = md5::Context::new();
 
     loop {
-        let part = buf.fill_buf().await.unwrap();
+        let part = buf.fill_buf().await?;
         if part.is_empty() {
             break;
         }
@@ -141,7 +174,7 @@ impl<'a> CloudSyncLock<'a> {
         lock: String,
         mode: CloudSyncLockMode,
         allowed_files: Vec<PathBuf>,
-    ) -> Result<Self> {
+    ) -> Result<Self, CloudSyncError> {
         let res = client.get(manifest_url).send().await?;
 
         let manifest: CloudSyncManifest = {
@@ -156,14 +189,11 @@ impl<'a> CloudSyncLock<'a> {
                 None
             };
 
-            if manifest.is_none() {
-                manifest = Some(CloudSyncManifest {
-                    attr_xmlns: String::new(),
-                    file: Vec::new(),
-                });
-            }
+            let mut manifest = manifest.unwrap_or_else(|| CloudSyncManifest {
+                attr_xmlns: String::new(),
+                file: Vec::new(),
+            });
 
-            let mut manifest = manifest.unwrap();
             manifest.attr_xmlns = "http://origin.com/cloudsaves/manifest".to_owned();
             manifest
         };
@@ -178,7 +208,7 @@ impl<'a> CloudSyncLock<'a> {
         })
     }
 
-    pub async fn release(&self) -> Result<()> {
+    pub async fn release(&self) -> Result<(), CloudSyncError> {
         let (token, user_id) = acquire_auth(self.auth).await?;
 
         let res = self
@@ -191,26 +221,26 @@ impl<'a> CloudSyncLock<'a> {
 
         res.text().await?;
 
-        debug!("Released CloudSync {} {}", self.mode.key(), self.lock);
+        debug!("Released CloudSync {:?} {}", self.mode, self.lock);
         Ok(())
     }
 
     /// The file syncing functions are some real hastily written code at the moment.
     /// Lots of stuff could be better and merged between them. TODO: Clean it up.
-    pub async fn sync_files(&self) -> Result<()> {
+    pub async fn sync_files(&self) -> Result<(), CloudSyncError> {
         Ok(match self.mode {
             CloudSyncLockMode::Read => self.sync_read_files().await,
             CloudSyncLockMode::Write => self.sync_write_files().await,
         }?)
     }
 
-    async fn sync_read_files(&self) -> Result<()> {
+    async fn sync_read_files(&self) -> Result<(), CloudSyncError> {
         let mut value = CloudSyncRequests::default();
 
         let mut paths = HashMap::new();
         for i in 0..self.manifest.file.len() {
             let local_path = &self.manifest.file[i].local_name;
-            let path = substitute_paths(local_path);
+            let path = substitute_paths(local_path)?;
 
             let file = OpenOptions::new().read(true).open(path.clone()).await;
 
@@ -267,7 +297,7 @@ impl<'a> CloudSyncLock<'a> {
                 path, self.manifest.file[i].attr_size
             );
 
-            tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+            tokio::fs::create_dir_all(path.safe_parent()?).await?;
             let mut file = OpenOptions::new()
                 .write(true)
                 .create(true)
@@ -284,7 +314,7 @@ impl<'a> CloudSyncLock<'a> {
         Ok(())
     }
 
-    async fn sync_write_files(&self) -> Result<()> {
+    async fn sync_write_files(&self) -> Result<(), CloudSyncError> {
         let mut auth_reqs = CloudSyncRequests::default();
 
         enum WriteData {
@@ -293,7 +323,7 @@ impl<'a> CloudSyncLock<'a> {
         }
 
         impl WriteData {
-            pub async fn file_key(&self) -> Result<String> {
+            pub async fn file_key(&self) -> Result<String, CloudSyncError> {
                 Ok(match self {
                     WriteData::File(_name, file, hash) => {
                         format!("{}-{}", file.metadata().await?.len(), hash)
@@ -324,7 +354,7 @@ impl<'a> CloudSyncLock<'a> {
                 continue;
             }
 
-            let name = unsubstitute_paths(&path);
+            let name = unsubstitute_paths(&path)?;
             let write_data = WriteData::File(name, file, md5);
 
             auth_reqs.request.push(CloudSyncRequest {
@@ -405,7 +435,7 @@ impl<'a> CloudSyncLock<'a> {
             };
 
             req = req.header("Content-Length", length);
-            req.send().await.context(name)?.error_for_status()?;
+            req.send().await?.error_for_status()?;
 
             debug!(
                 "Uploaded CloudSync file [{:?}, {} bytes]",
@@ -426,11 +456,7 @@ impl CloudSyncClient {
     pub fn new(auth: LockedAuthStorage) -> Self {
         Self {
             auth,
-            client: ClientBuilder::default()
-                .gzip(true)
-                .build()
-                .context("Failed to build CloudSync HTTP client")
-                .unwrap(),
+            client: ClientBuilder::default().gzip(true).build().unwrap(),
         }
     }
 
@@ -438,7 +464,7 @@ impl CloudSyncClient {
         &self,
         offer: &OwnedOffer,
         mode: CloudSyncLockMode,
-    ) -> Result<CloudSyncLock> {
+    ) -> Result<CloudSyncLock, CloudSyncError> {
         let id = format!(
             "{}_{}",
             offer.offer().primary_master_title_id(),
@@ -449,8 +475,8 @@ impl CloudSyncClient {
         if let Some(config) = offer.offer().cloud_save_configuration_override() {
             let criteria: CloudSyncSaveFileCriteria = quick_xml::de::from_str(config)?;
             for include in criteria.include {
-                let path = substitute_paths(include.value);
-                let paths = glob::glob(path.to_str().unwrap())?;
+                let path = substitute_paths(include.value)?;
+                let paths = glob::glob(path.safe_str()?)?;
                 for path in paths {
                     let path = path?;
                     if path.is_dir() {
@@ -461,10 +487,7 @@ impl CloudSyncClient {
                 }
             }
         } else {
-            bail!(
-                "No cloud save configuration for {}",
-                offer.offer().display_name()
-            );
+            return Err(CloudSyncError::NoConfig(offer.offer_id().clone()));
         }
 
         Ok(self.obtain_lock_raw(&id, mode, allowed_files).await?)
@@ -475,28 +498,22 @@ impl CloudSyncClient {
         id: &str,
         mode: CloudSyncLockMode,
         allowed_files: Vec<PathBuf>,
-    ) -> Result<CloudSyncLock> {
+    ) -> Result<CloudSyncLock, CloudSyncError> {
         let (token, user_id) = acquire_auth(&self.auth).await?;
 
         let res = self
             .client
-            .post(format!(
-                "{}/{}/{}/{}",
-                API_CLOUDSYNC,
-                mode.key(),
-                user_id,
-                id
-            ))
+            .post(format!("{}/{:?}/{}/{}", API_CLOUDSYNC, mode, user_id, id))
             .header(AUTH_HEADER, token)
             .send()
             .await?;
-        let lock = res.headers().get("x-origin-sync-lock");
-        if lock.is_none() {
-            bail!("Failed to acquire {}", mode.key());
-        }
-
-        let lock = lock.unwrap().to_str()?.to_owned();
-        debug!("Obtained CloudSync {}: {}", mode.key(), lock);
+        let lock = match res.headers().get("x-origin-sync-lock") {
+            Some(lock) => lock.to_str()?.to_owned(),
+            None => {
+                return Err(CloudSyncError::LockAcquire(mode));
+            }
+        };
+        debug!("Obtained CloudSync {:?}: {}", mode, lock);
 
         let text = res.text().await?;
         let sync: CloudSyncSync = quick_xml::de::from_str(&text)?;
@@ -519,16 +536,16 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn read_files() -> Result<()> {
+    async fn read_files() -> Result<(), CloudSyncError> {
         let auth = AuthStorage::load()?;
         if !auth.lock().await.logged_in().await? {
-            bail!("Test cannot run when logged out");
+            return Err(CloudSyncError::NotSignedIn);
         }
 
         let mut library = GameLibrary::new(auth.clone()).await;
         let offer = library
             .game_by_base_slug("star-wars-battlefront-2")
-            .await
+            .await?
             .unwrap();
 
         println!("Got offer");
@@ -542,16 +559,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_files() -> Result<()> {
+    async fn write_files() -> Result<(), CloudSyncError> {
         let auth = AuthStorage::load()?;
         if !auth.lock().await.logged_in().await? {
-            bail!("Test cannot run when logged out");
+            return Err(CloudSyncError::NotSignedIn);
         }
 
         let mut library = GameLibrary::new(auth.clone()).await;
         let offer = library
             .game_by_base_slug("star-wars-battlefront-2")
-            .await
+            .await?
             .unwrap();
 
         println!("Got offer");
@@ -561,7 +578,7 @@ mod tests {
         let lock = client.obtain_lock(offer, CloudSyncLockMode::Write).await?;
         let res = lock.sync_write_files().await;
         lock.release().await?;
-        res.unwrap();
+        res?;
         Ok(())
     }
 }

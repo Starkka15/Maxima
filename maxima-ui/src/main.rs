@@ -28,9 +28,8 @@ use eframe::egui_glow;
 use egui_extras::{Size, StripBuilder};
 use egui_glow::glow;
 
-use bridge_thread::{BridgeThread, InteractThreadLocateGameResponse};
-
 use app_bg_renderer::AppBgRenderer;
+use bridge_thread::{BackendError, BridgeThread, InteractThreadLocateGameResponse};
 use game_view_bg_renderer::GameViewBgRenderer;
 use renderers::{app_bg_renderer, game_view_bg_renderer};
 use translation_manager::{positional_replace, TranslationManager};
@@ -292,7 +291,9 @@ pub struct MaximaEguiApp {
     /// Translations
     locale: TranslationManager,
     /// If a core thread has crashed and made the UI unstable
-    critical_bg_thread_crashed: bool,
+    critical_error: Option<BackendError>,
+    /// If a backend function has failed that the user should be aware of, but UI is still functional
+    nonfatal_errors: Vec<BackendError>,
     /// Backend
     backend: BridgeThread,
     /// what the backend doin?
@@ -475,7 +476,8 @@ impl MaximaEguiApp {
             app_bg_renderer: AppBgRenderer::new(cc),
             img_cache,
             locale: TranslationManager::new(&settings.language),
-            critical_bg_thread_crashed: false,
+            critical_error: None,
+            nonfatal_errors: Vec::new(),
             backend: BridgeThread::new(&cc.egui_ctx, remote_provider_channel), //please don't fucking break
             backend_state: BackendStallState::Starting,
             playing_game: None,
@@ -1027,7 +1029,7 @@ impl eframe::App for MaximaEguiApp {
         event_processor::frontend_processor(self, ctx);
 
         custom_window_frame(
-            !self.critical_bg_thread_crashed,
+            self.critical_error.is_none(),
             self.locale.localization.errors.critical_thread_crashed.clone(),
             ctx,
             frame,

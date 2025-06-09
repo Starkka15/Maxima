@@ -10,7 +10,6 @@ tokio = { version = "1.28.2", features = [ "full", "rt", "rt-multi-thread", "tim
 serde = { version = "1.0.164", features = [ "derive" ] }
 serde_json = "1.0.97"
 paste = "1.0.12"
-anyhow = "1.0.71"
 reqwest = { version = "0.11.18", features = ["stream", "rustls-tls"], default-features = false }
 base64 = "0.21.2"
 log = "0.4.19"
@@ -21,6 +20,7 @@ actix-web = "4.8.0"
 sha2 = "0.10.7"
 derive_more = "0.99.17"
 hex = "0.4.3"
+thiserror = "2.0.12"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = [ "memoryapi", "handleapi", "synchapi", "wincon", "consoleapi" ] }

@@ -1,10 +1,14 @@
-use anyhow::{bail, Ok, Result};
+use crate::{
+    bridge_thread::{BackendError, InteractThreadGameListResponse, MaximaLibResponse},
+    ui_image::UIImageCacheLoaderCommand,
+    GameDetailsWrapper, GameInfo, GameVersionInfo,
+};
 use egui::Context;
-use log::{debug, info};
+use log::{debug, error, info};
 use maxima::{
     core::{
         service_layer::{
-            ServiceGame, ServiceGameHubCollection, ServiceGameImagesRequestBuilder,
+            ServiceGame, ServiceGameHub, ServiceGameHubCollection, ServiceGameImagesRequestBuilder,
             ServiceHeroBackgroundImageRequestBuilder, ServiceLayerClient,
             SERVICE_REQUEST_GAMEIMAGES, SERVICE_REQUEST_GETHEROBACKGROUNDIMAGE,
         },
@@ -14,23 +18,18 @@ use maxima::{
 };
 use std::{fs, sync::mpsc::Sender};
 
-use crate::{
-    bridge_thread::{InteractThreadGameListResponse, MaximaLibResponse},
-    ui_image::UIImageCacheLoaderCommand,
-    GameDetailsWrapper, GameInfo, GameVersionInfo,
-};
-
 fn get_preferred_bg_hero(heroes: &Option<ServiceGameHubCollection>) -> Option<String> {
-    if heroes.is_none() {
-        return None;
-    }
+    let heroes = match heroes {
+        Some(h) => h.items().get(0),
+        None => return None,
+    };
 
-    let bg = heroes.as_ref().unwrap().items().get(0);
-    if bg.is_none() {
-        return None;
-    }
-
-    let bg = bg.as_ref().unwrap().hero_background();
+    let bg = match heroes {
+        Some(bg) => bg.hero_background(),
+        None => {
+            return None;
+        }
+    };
 
     if let Some(img) = bg.aspect_16x9_image() {
         return Some(img.path().clone());
@@ -48,18 +47,20 @@ fn get_preferred_bg_hero(heroes: &Option<ServiceGameHubCollection>) -> Option<St
 }
 
 async fn get_preferred_hero_image(images: &Option<ServiceGame>) -> Option<String> {
-    if images.is_none() {
-        return None;
-    }
+    let key_art = match images {
+        Some(images) => images.key_art(),
+        None => {
+            return None;
+        }
+    };
 
-    let key_art = images.as_ref().unwrap().key_art();
-    if key_art.is_none() {
-        return None;
-    }
+    let key_art = match key_art {
+        Some(key_art) => key_art,
+        None => {
+            return None;
+        }
+    };
 
-    let key_art = key_art.as_ref().unwrap();
-
-    debug!("{:?}", key_art);
     if let Some(img) = key_art.aspect_10x3_image() {
         return Some(img.path().clone());
     }
@@ -76,21 +77,24 @@ async fn get_preferred_hero_image(images: &Option<ServiceGame>) -> Option<String
 }
 
 fn get_logo_image(images: &Option<ServiceGame>) -> Option<String> {
-    if images.is_none() {
-        return None;
-    }
+    let logo_set = match images {
+        Some(images) => images.primary_logo(),
+        None => {
+            return None;
+        }
+    };
 
-    let logo_set = images.as_ref().unwrap().primary_logo();
-    if logo_set.is_none() {
-        return None;
-    }
+    let largest_logo = match logo_set {
+        Some(logo) => logo.largest_image(),
+        None => {
+            return None;
+        }
+    };
 
-    let largest_logo = logo_set.as_ref().unwrap().largest_image();
-    if largest_logo.is_none() {
-        return None;
+    match largest_logo {
+        Some(logo) => Some(logo.path().clone()),
+        None => None,
     }
-
-    Some(largest_logo.as_ref().unwrap().path().to_string())
 }
 
 async fn handle_images(
@@ -101,7 +105,7 @@ async fn handle_images(
     has_background: bool,
     channel: Sender<UIImageCacheLoaderCommand>,
     service_layer: ServiceLayerClient,
-) -> Result<()> {
+) -> Result<(), BackendError> {
     debug!("handling image downloads for {}", &slug);
     let images_0 = if has_hero && has_logo {
         None
@@ -140,12 +144,10 @@ async fn handle_images(
 
     if !has_hero {
         if let Some(hero) = get_preferred_hero_image(&images_0).await {
-            channel
-                .send(UIImageCacheLoaderCommand::ProvideRemote(
-                    crate::ui_image::UIImageType::Hero(slug.clone()),
-                    hero,
-                ))
-                .unwrap()
+            channel.send(UIImageCacheLoaderCommand::ProvideRemote(
+                crate::ui_image::UIImageType::Hero(slug.clone()),
+                hero,
+            ))?
         }
     }
 
@@ -172,12 +174,10 @@ async fn handle_images(
 
     if !has_background {
         if let Some(background_image) = get_preferred_bg_hero(&images_1) {
-            channel
-                .send(UIImageCacheLoaderCommand::ProvideRemote(
-                    crate::ui_image::UIImageType::Background(slug),
-                    background_image,
-                ))
-                .unwrap()
+            channel.send(UIImageCacheLoaderCommand::ProvideRemote(
+                crate::ui_image::UIImageType::Background(slug),
+                background_image,
+            ))?
         }
     }
 
@@ -189,21 +189,17 @@ pub async fn get_games_request(
     channel: Sender<MaximaLibResponse>,
     channel1: Sender<UIImageCacheLoaderCommand>,
     ctx: &Context,
-) -> Result<()> {
+) -> Result<(), BackendError> {
     debug!("received request to load games");
     let mut maxima = maxima_arc.lock().await;
     let service_layer = maxima.service_layer().clone();
     let locale = maxima.locale().short_str().to_owned();
     let logged_in = maxima.auth_storage().lock().await.current().is_some();
     if !logged_in {
-        bail!("Ignoring request to load games, not logged in.");
+        return Err(BackendError::LoggedOut);
     }
 
-    let owned_games = maxima.mut_library().games().await;
-
-    if owned_games.len() <= 0 {
-        return Ok(());
-    }
+    let owned_games = maxima.mut_library().games().await?;
 
     for game in owned_games {
         let slug = game.base_offer().slug().clone();
@@ -216,12 +212,11 @@ pub async fn get_games_request(
             downloads.iter().find(|item| item.download_type() == "LIVE").unwrap()
         };
 
-        let version =
-            if let std::result::Result::Ok(version) = game.base_offer().installed_version().await {
-                version
-            } else {
-                "Unknown".to_owned()
-            };
+        let version = if let Ok(version) = game.base_offer().installed_version().await {
+            version
+        } else {
+            "Unknown".to_owned()
+        };
 
         let game_info = GameInfo {
             slug: slug.clone(),
@@ -250,9 +245,9 @@ pub async fn get_games_request(
         });
         channel.send(res)?;
 
-        let bg = maxima_dir().unwrap().join("cache/ui/images/").join(&slug).join("background.jpg");
-        let game_hero = maxima_dir().unwrap().join("cache/ui/images/").join(&slug).join("hero.jpg");
-        let game_logo = maxima_dir().unwrap().join("cache/ui/images/").join(&slug).join("logo.png");
+        let bg = maxima_dir()?.join("cache/ui/images/").join(&slug).join("background.jpg");
+        let game_hero = maxima_dir()?.join("cache/ui/images/").join(&slug).join("hero.jpg");
+        let game_logo = maxima_dir()?.join("cache/ui/images/").join(&slug).join("logo.png");
         let has_hero = fs::metadata(&game_hero).is_ok();
         let has_logo = fs::metadata(&game_logo).is_ok();
         let has_background = fs::metadata(&bg).is_ok();

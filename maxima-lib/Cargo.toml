@@ -25,7 +25,6 @@ serde = { version = "1.0.164", features = ["derive"] }
 serde_json = "1.0.97"
 quick-xml = { version = "0.30.0", features = ["serialize"] }
 paste = "1.0.12"
-anyhow = "1.0.71"
 hex = "0.4.3"
 lazy_static = "1.4.0"
 reqwest = { version = "0.11.18", features = ["stream", "rustls-tls", "gzip", "json"], default-features = false }
@@ -73,6 +72,9 @@ crc32fast = "1.4.2"
 async-recursion = "1.1.1"
 pelite = "0.10.0"
 gethostname = "0.5.0"
+thiserror = "2.0.12"
+url = "2.5.2"
+http = "0.2.12"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = [

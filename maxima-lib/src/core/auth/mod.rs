@@ -5,24 +5,24 @@ pub mod pc_sign;
 pub mod storage;
 pub mod token_info;
 
-use anyhow::{bail, Result};
-use context::AuthContext;
-use derive_getters::Getters;
-use reqwest::{redirect, Client, Url};
-use serde::Deserialize;
-
 use super::{
     clients::{JUNO_PC_CLIENT_ID, JUNO_PC_CLIENT_SECRET},
     endpoints::API_NUCLEUS_TOKEN,
 };
+use crate::core::auth::storage::{AuthError, TokenError};
+use context::AuthContext;
+use derive_getters::Getters;
+use reqwest::{redirect, Client, Url};
+use serde::Deserialize;
+use thiserror::Error;
 
 pub async fn nucleus_auth_exchange<'a>(
     auth_context: &AuthContext<'a>,
     client_id: &str,
     mut response_type: &str,
-) -> Result<String> {
+) -> Result<String, AuthError> {
     if auth_context.access_token().is_none() {
-        bail!("To execute an auth exchange you must provide an access token in the auth context");
+        return Err(AuthError::NoToken);
     }
 
     let url: String = auth_context.nucleus_auth_url(client_id, response_type)?;
@@ -33,20 +33,19 @@ pub async fn nucleus_auth_exchange<'a>(
     let res = client.get(url).send().await?.error_for_status()?;
 
     if !res.status().is_redirection() {
-        bail!("Failed to get auth code");
+        return Err(AuthError::InvalidRedirect(None));
     }
 
     let mut redirect_url = res
         .headers()
         .get("location")
-        .unwrap()
-        .to_str()
-        .unwrap()
+        .ok_or(AuthError::Header("location".to_string()))?
+        .to_str()?
         .to_owned();
 
     // Failed, the user either has 2fa enabled or something went wrong
     if redirect_url.starts_with("https://signin.ea.com") {
-        bail!("Auth exchange failed: {}", redirect_url);
+        return Err(AuthError::InvalidRedirect(Some(redirect_url.to_string())));
     }
 
     // The Url crate doesn't like custom protocols :(
@@ -62,14 +61,32 @@ pub async fn nucleus_auth_exchange<'a>(
         url.query()
     };
 
-    let query = querystring::querify(query.unwrap());
+    let query = querystring::querify(query.ok_or(AuthError::Query)?);
 
     if response_type == "token" {
         response_type = "access_token";
     }
 
-    let token = query.iter().find(|(x, _)| *x == response_type).unwrap().1;
+    let token = query
+        .iter()
+        .find(|(x, _)| *x == response_type)
+        .ok_or(AuthError::Query)?
+        .1;
     Ok(token.to_owned())
+}
+
+#[derive(Error, Debug)]
+pub enum TokenRefreshError {
+    #[error(transparent)]
+    Request(#[from] reqwest::Error),
+    #[error(transparent)]
+    Deserialization(#[from] serde_json::Error),
+
+    #[error("token `{refresh_token}` could not be refreshed: {error}")]
+    API {
+        error: String,
+        refresh_token: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Getters)]
@@ -80,12 +97,14 @@ pub struct TokenResponse {
     refresh_token: Option<String>,
 }
 
-pub async fn nucleus_token_exchange(auth_context: &AuthContext<'_>) -> Result<TokenResponse> {
+pub async fn nucleus_token_exchange(
+    auth_context: &AuthContext<'_>,
+) -> Result<TokenResponse, TokenError> {
     assert!(auth_context.code().is_some());
 
     let query = vec![
         ("grant_type", "authorization_code"),
-        ("code", &auth_context.code().unwrap()),
+        ("code", &auth_context.code().ok_or(TokenError::Absent)?),
         ("code_verifier", &auth_context.code_verifier()),
         ("client_id", JUNO_PC_CLIENT_ID),
         ("client_secret", JUNO_PC_CLIENT_SECRET),
@@ -101,18 +120,16 @@ pub async fn nucleus_token_exchange(auth_context: &AuthContext<'_>) -> Result<To
     let status = res.status();
     let text = res.text().await?;
     if status.is_client_error() || status.is_server_error() {
-        bail!(
-            "Token exchange failed with code {}: {}",
-            auth_context.code().unwrap(),
-            text
-        );
+        return Err(TokenError::Exchange(text));
     }
 
     let response: TokenResponse = serde_json::from_str(&text)?;
     Ok(response)
 }
 
-pub async fn nucleus_connect_token_refresh(refresh_token: &str) -> Result<TokenResponse> {
+pub async fn nucleus_connect_token_refresh(
+    refresh_token: &str,
+) -> Result<TokenResponse, TokenRefreshError> {
     let query = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
@@ -128,7 +145,10 @@ pub async fn nucleus_connect_token_refresh(refresh_token: &str) -> Result<TokenR
     let status = res.status();
     let text = res.text().await?;
     if status.is_client_error() || status.is_server_error() {
-        bail!("Token refresh failed with code {}: {}", refresh_token, text);
+        return Err(TokenRefreshError::API {
+            error: text,
+            refresh_token: refresh_token.to_owned(),
+        });
     }
 
     let response: TokenResponse = serde_json::from_str(&text)?;

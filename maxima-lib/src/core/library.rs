@@ -1,25 +1,50 @@
-use std::{collections::HashMap, path::PathBuf};
-
-use anyhow::{bail, Result};
-use derive_getters::Getters;
-
-use crate::util::registry::{parse_partial_registry_path, parse_registry_path};
-
-#[cfg(unix)]
-use crate::unix::fs::case_insensitive_path;
-
 use super::{
     auth::storage::LockedAuthStorage,
     locale::Locale,
-    manifest::{self, GameManifest, MANIFEST_RELATIVE_PATH},
+    manifest::{self, GameManifest, ManifestError, MANIFEST_RELATIVE_PATH},
     service_layer::{
         ServiceGameProductType, ServiceGetLegacyCatalogDefsRequestBuilder,
         ServiceGetPreloadedOwnedGamesRequest, ServiceGetPreloadedOwnedGamesRequestBuilder,
-        ServiceLayerClient, ServiceLegacyOffer, ServicePlatform, ServiceStorefront, ServiceUser,
+        ServiceGetPreloadedOwnedGamesRequestBuilderError, ServiceLayerClient, ServiceLayerError,
+        ServiceLegacyOffer, ServicePlatform, ServiceStorefront, ServiceUser,
         ServiceUserGameProduct, SERVICE_REQUEST_GETLEGACYCATALOGDEFS,
         SERVICE_REQUEST_GETPRELOADEDOWNEDGAMES,
     },
 };
+#[cfg(unix)]
+use crate::unix::fs::case_insensitive_path;
+use crate::util::native::{NativeError, SafeStr};
+use crate::util::registry::{parse_partial_registry_path, parse_registry_path, RegistryError};
+use derive_getters::Getters;
+use std::{collections::HashMap, path::PathBuf, time::SystemTimeError};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum LibraryError {
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
+    #[error(transparent)]
+    ServiceGetPreloadedOwnedGamesRequestBuilderError(
+        #[from] ServiceGetPreloadedOwnedGamesRequestBuilderError,
+    ),
+    #[error(transparent)]
+    Native(#[from] NativeError),
+    #[error(transparent)]
+    Registry(#[from] RegistryError),
+    #[error(transparent)]
+    ServiceLayer(#[from] ServiceLayerError),
+    #[error(transparent)]
+    Time(#[from] SystemTimeError),
+
+    #[error("`{0}` has no manifest found")]
+    NoManifest(String),
+    #[error("`{0}` was not installed")]
+    NotInstalled(String),
+    #[error("`{0}`'s execute path was not found")]
+    NoPath(String),
+    #[error("`{0}`'s version info is unavailable")]
+    NoVersion(String),
+}
 
 #[derive(Clone, Getters)]
 pub struct OwnedOffer {
@@ -30,8 +55,15 @@ pub struct OwnedOffer {
 
 impl OwnedOffer {
     pub async fn is_installed(&self) -> bool {
-        let path =
-            parse_registry_path(&self.offer.install_check_override().as_ref().unwrap()).await;
+        // I would love to throw an error here but that's just not feasible.
+        // If you can't grab the path it may as well not be installed.
+        let Some(path) = &self.offer.install_check_override().as_ref() else {
+            return false;
+        };
+        let path = match parse_registry_path(path).await {
+            Ok(path) => path,
+            Err(_) => return false,
+        };
         // If it wasn't replaced...
         if path.starts_with("[") {
             return false;
@@ -41,83 +73,85 @@ impl OwnedOffer {
         path.exists()
     }
 
-    pub async fn install_check_path(&self) -> String {
-        parse_registry_path(&self.offer.install_check_override().as_ref().unwrap())
-            .await
-            .to_str()
-            .unwrap()
-            .to_owned()
+    pub async fn install_check_path(&self) -> Result<String, ManifestError> {
+        Ok(parse_registry_path(
+            &self
+                .offer
+                .install_check_override()
+                .as_ref()
+                .ok_or(ManifestError::NoInstallPath(self.slug.clone()))?,
+        )
+        .await?
+        .safe_str()?
+        .to_owned())
     }
 
-    pub async fn execute_path(&self, trial: bool) -> Result<PathBuf> {
-        let manifest = self.local_manifest().await;
-        if manifest.is_none() {
-            bail!("No manifest found for {}", self.slug);
-        }
-
-        let path = if let Some(path) = manifest.unwrap().execute_path(trial) {
-            path
-        } else if !self
-            .offer
-            .execute_path_override()
-            .as_ref()
-            .unwrap()
-            .is_empty()
-        {
-            parse_registry_path(&self.offer.execute_path_override().as_ref().unwrap())
-                .await
-                .to_str()
-                .unwrap()
-                .to_owned()
-        } else {
-            bail!("No execute path found");
+    pub async fn execute_path(&self, trial: bool) -> Result<PathBuf, LibraryError> {
+        let manifest = match self.local_manifest().await? {
+            Some(manifest) => manifest,
+            None => return Err(LibraryError::NoManifest(self.slug.clone())),
         };
 
-        Ok(parse_registry_path(&path).await)
+        let path = if let Some(path) = manifest.execute_path(trial) {
+            &Some(path)
+        } else {
+            self.offer.execute_path_override()
+        };
+
+        if let Some(path) = path {
+            Ok(parse_registry_path(path).await?)
+        } else {
+            Err(LibraryError::NoPath(self.slug.clone()))
+        }
     }
 
-    pub async fn installed_version(&self) -> Result<String> {
+    pub async fn installed_version(&self) -> Result<String, LibraryError> {
         if !self.is_installed().await {
-            bail!("Not installed")
+            return Err(LibraryError::NotInstalled(self.slug.clone()));
         }
 
-        let manifest = self.local_manifest().await;
-        if manifest.is_none() {
-            bail!("No manifest found for {}", self.slug);
-        }
+        let manifest = match self.local_manifest().await? {
+            Some(manifest) => manifest,
+            None => return Err(LibraryError::NoManifest(self.slug.clone())),
+        };
 
-        if let Some(version) = manifest.unwrap().version() {
+        if let Some(version) = manifest.version() {
             Ok(version)
         } else {
-            bail!("No version found for {}", self.slug)
+            Err(LibraryError::NoVersion(self.slug.clone()))
         }
     }
 
-    pub async fn local_manifest(&self) -> Option<Box<dyn GameManifest>> {
+    pub async fn local_manifest(&self) -> Result<Option<Box<dyn GameManifest>>, ManifestError> {
         let path = if self
             .offer
             .install_check_override()
             .as_ref()
-            .unwrap()
+            .ok_or(ManifestError::NoInstallPath(self.slug.clone()))?
             .contains("installerdata.xml")
         {
-            let ic_path = PathBuf::from(self.install_check_path().await);
+            let ic_path = PathBuf::from(self.install_check_path().await?);
             #[cfg(unix)]
             let ic_path = case_insensitive_path(ic_path);
             ic_path
         } else {
             let path = PathBuf::from(
-                parse_partial_registry_path(&self.offer.install_check_override().as_ref().unwrap())
-                    .await
-                    .to_str()
-                    .unwrap()
-                    .to_owned(),
+                parse_partial_registry_path(
+                    &self
+                        .offer
+                        .install_check_override()
+                        .as_ref()
+                        .ok_or(ManifestError::NoInstallPath(self.slug.clone()))?,
+                )
+                .await?
+                .safe_str()?
+                .to_owned(),
             );
 
             path.join(MANIFEST_RELATIVE_PATH)
         };
 
-        Some(manifest::read(path).await.unwrap())
+        Ok(Some(manifest::read(path).await?))
     }
 
     pub fn offer_id(&self) -> &String {
@@ -176,15 +210,18 @@ fn group_offers(products: Vec<OwnedOffer>) -> Vec<OwnedTitle> {
             true
         })();
 
-        if slug.is_none() && full_game {
-            base_products.insert(product.slug.clone(), product.clone());
-        } else if slug.is_none() && !full_game {
-            // Do nothing with this offer I suppose? It doesn't appear very useful.
-        } else {
-            product_map
-                .entry(slug.clone().unwrap())
-                .or_insert_with(Vec::new)
-                .push(product);
+        if full_game {
+            match slug {
+                Some(slug) => {
+                    product_map
+                        .entry(slug.clone())
+                        .or_insert_with(Vec::new)
+                        .push(product);
+                }
+                None => {
+                    base_products.insert(product.slug.clone(), product.clone());
+                }
+            }
         }
     }
 
@@ -207,15 +244,17 @@ impl OwnedTitle {
     }
 
     pub fn name(&self) -> String {
-        self.base_offer
+        match self
+            .base_offer
             .product
             .product()
             .base_item()
             .title()
             .as_ref()
-            .unwrap()
-            .to_owned()
-            .replace("\n", "")
+        {
+            Some(title) => title.replace("\n", "").to_owned(),
+            None => "Unknown".to_owned(),
+        }
     }
 
     pub fn base_game(&self) -> Option<OwnedOffer> {
@@ -266,50 +305,69 @@ impl GameLibrary {
         }
     }
 
-    pub async fn games(&mut self) -> &Vec<OwnedTitle> {
-        self.update_if_needed().await;
-        &self.library
+    pub async fn games(&mut self) -> Result<&Vec<OwnedTitle>, LibraryError> {
+        self.update_if_needed().await?;
+        Ok(&self.library)
     }
 
-    pub async fn title_by_base_offer(&mut self, offer_id: &str) -> Option<&OwnedTitle> {
-        self.update_if_needed().await;
-        self.library
+    pub async fn title_by_base_offer(
+        &mut self,
+        offer_id: &str,
+    ) -> Result<Option<&OwnedTitle>, LibraryError> {
+        self.update_if_needed().await?;
+        Ok(self
+            .library
+            .iter()
+            .find(|x| x.base_offer.offer.offer_id() == offer_id))
+    }
+
+    pub async fn game_by_base_offer(
+        &mut self,
+        offer_id: &str,
+    ) -> Result<Option<&OwnedOffer>, LibraryError> {
+        self.update_if_needed().await?;
+        Ok(self
+            .library
             .iter()
             .find(|x| x.base_offer.offer.offer_id() == offer_id)
+            .map(|x| &x.base_offer))
     }
 
-    pub async fn game_by_base_offer(&mut self, offer_id: &str) -> Option<&OwnedOffer> {
-        self.update_if_needed().await;
-        self.library
-            .iter()
-            .find(|x| x.base_offer.offer.offer_id() == offer_id)
-            .map(|x| &x.base_offer)
-    }
-
-    pub async fn game_by_base_slug(&mut self, slug: &str) -> Option<&OwnedOffer> {
-        self.update_if_needed().await;
-        self.library
+    pub async fn game_by_base_slug(
+        &mut self,
+        slug: &str,
+    ) -> Result<Option<&OwnedOffer>, LibraryError> {
+        self.update_if_needed().await?;
+        Ok(self
+            .library
             .iter()
             .find(|x| x.base_offer.product.product().game_slug() == slug)
-            .map(|x| &x.base_offer)
+            .map(|x| &x.base_offer))
     }
 
-    async fn update_if_needed(&mut self) {
+    async fn update_if_needed(&mut self) -> Result<(), LibraryError> {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
 
         if now - self.last_request > 1200 {
-            self.request_owned_games().await;
+            self.request_owned_games().await?;
         }
+
+        Ok(())
     }
 
-    async fn request_owned_games(&mut self) {
-        self.request_page_concurrent(Locale::EnUs, 1).await.unwrap();
+    async fn request_owned_games(&mut self) -> Result<(), LibraryError> {
+        self.request_page_concurrent(Locale::EnUs, 1).await?;
+
+        Ok(())
     }
 
-    async fn request_page_concurrent(&mut self, locale: Locale, page: u32) -> Result<()> {
+    async fn request_page_concurrent(
+        &mut self,
+        locale: Locale,
+        page: u32,
+    ) -> Result<(), LibraryError> {
         let responses: Vec<ServiceUserGameProduct> = {
             let request = GameLibrary::library_request(
                 &locale,
@@ -321,9 +379,12 @@ impl GameLibrary {
             let user: ServiceUser = self
                 .service_layer
                 .request(SERVICE_REQUEST_GETPRELOADEDOWNEDGAMES, request)
-                .await
-                .unwrap();
-            user.owned_game_products().as_ref().unwrap().items().clone()
+                .await?;
+            user.owned_game_products()
+                .as_ref()
+                .ok_or(ServiceLayerError::MissingField)?
+                .items()
+                .clone()
         };
 
         let offer_ids = responses
@@ -341,19 +402,23 @@ impl GameLibrary {
                     .build()
                     .unwrap(),
             )
-            .await
-            .unwrap();
+            .await?;
 
         let mut offers: Vec<OwnedOffer> = Vec::new();
         for product in responses {
+            let def = match defs
+                .iter()
+                .find(|x| x.offer_id() == product.origin_offer_id())
+            {
+                None => {
+                    continue;
+                }
+                Some(def) => def.clone(),
+            };
             offers.push(OwnedOffer {
                 slug: product.product().game_slug().to_owned(),
                 product: product.clone(),
-                offer: defs
-                    .iter()
-                    .find(|x| x.offer_id() == product.origin_offer_id())
-                    .unwrap()
-                    .clone(),
+                offer: def,
             });
         }
 
@@ -361,8 +426,7 @@ impl GameLibrary {
         titles.sort_by(|a, b| a.name().to_lowercase().cmp(&b.name().to_lowercase()));
 
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
 
         self.library = titles;
@@ -375,7 +439,7 @@ impl GameLibrary {
         r#type: ServiceGameProductType,
         entitlement_enabled: bool,
         page: u32,
-    ) -> Result<ServiceGetPreloadedOwnedGamesRequest> {
+    ) -> Result<ServiceGetPreloadedOwnedGamesRequest, LibraryError> {
         Ok(ServiceGetPreloadedOwnedGamesRequestBuilder::default()
             .is_mac(false)
             .locale(locale.to_owned())

@@ -4,6 +4,7 @@ use hex::ToHex;
 use regex::Regex;
 use ring::digest::SHA1_FOR_LEGACY_USE_ONLY;
 use std::arch::x86_64::CpuidResult;
+use thiserror::Error;
 
 #[derive(Debug)]
 pub struct CpuDetails {
@@ -44,9 +45,15 @@ pub struct HardwareInfo {
     pub hostname: String,
 }
 
+#[derive(Error, Debug)]
+pub enum HardwareHashError {
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
 impl HardwareInfo {
     #[cfg(windows)]
-    pub fn new(version: u32) -> anyhow::Result<Self> {
+    pub fn new(version: u32) -> Self {
         use std::collections::HashMap;
 
         use log::warn;
@@ -79,7 +86,7 @@ impl HardwareInfo {
                 "WMI call failed, using dummy hardware info. Please report this! {:?}",
                 wmi_data.err().unwrap()
             );
-            return Ok(Self::default());
+            return Self::default();
         }
 
         let (os_data, bios_data, board_data, gpu_data, disk_data) = *wmi_data.unwrap();
@@ -124,7 +131,7 @@ impl HardwareInfo {
         let cpu_details = Self::get_cpu_details();
         let hostname = gethostname().to_string_lossy().to_string();
 
-        Ok(Self {
+        Self {
             version,
             bios_manufacturer: bios_manufacturer.to_owned(),
             bios_sn: bios_sn.to_owned(),
@@ -138,11 +145,11 @@ impl HardwareInfo {
             mac,
             cpu_details,
             hostname,
-        })
+        }
     }
 
     #[cfg(target_os = "linux")]
-    pub fn new(version: u32) -> anyhow::Result<Self> {
+    pub fn new(version: u32) -> Self {
         use std::{fs, path::Path, process::Command};
 
         let board_manufacturer = match fs::read_to_string("/sys/class/dmi/id/board_vendor") {
@@ -221,7 +228,7 @@ impl HardwareInfo {
         let cpu_details = Self::get_cpu_details();
         let hostname = gethostname().to_string_lossy().to_string();
 
-        Ok(Self {
+        Self {
             version,
             bios_manufacturer,
             bios_sn,
@@ -235,11 +242,11 @@ impl HardwareInfo {
             mac,
             cpu_details,
             hostname,
-        })
+        }
     }
 
     #[cfg(target_os = "macos")]
-    pub fn new(version: u32) -> anyhow::Result<Self> {
+    pub fn new(version: u32) -> Self {
         use std::process::Command;
 
         use smbioslib::{
@@ -307,7 +314,7 @@ impl HardwareInfo {
         let cpu_details = Self::get_cpu_details();
         let hostname = gethostname().to_string_lossy().to_string();
 
-        Ok(Self {
+        Self {
             version,
             bios_manufacturer,
             bios_sn,
@@ -320,7 +327,7 @@ impl HardwareInfo {
             volume_sn: String::from("43000000"),
             mac,
             cpu_details,
-        })
+        }
     }
 
     pub fn get_gpu_id(&self) -> u32 {
@@ -375,7 +382,7 @@ impl HardwareInfo {
         }
     }
 
-    pub fn generate_mid(&self) -> anyhow::Result<String> {
+    pub fn generate_mid(&self) -> Result<String, HardwareHashError> {
         let mut buffer = String::new();
         buffer += &self.board_manufacturer;
         buffer += &self.board_sn;

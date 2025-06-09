@@ -8,20 +8,59 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use anyhow::{bail, Result};
-
 use crate::{
-    core::cloudsync::CloudSyncLockMode,
-    ooa::{needs_license_update, request_and_save_license, LicenseAuth},
-    util::{registry::bootstrap_path, simple_crypto},
+    core::{
+        auth::storage::TokenError, cloudsync::CloudSyncError, cloudsync::CloudSyncLockMode,
+        library::LibraryError, library::OwnedOffer, service_layer::ServiceLayerError, Maxima,
+    },
+    ooa::{needs_license_update, request_and_save_license, LicenseAuth, LicenseError},
+    util::{
+        native::{NativeError, SafeParent, SafeStr},
+        registry::bootstrap_path,
+        simple_crypto,
+    },
 };
+use thiserror::Error;
 
 #[cfg(unix)]
 use crate::unix::fs::case_insensitive_path;
 
 use serde::{Deserialize, Serialize};
 
-use super::{library::OwnedOffer, Maxima};
+#[derive(Error, Debug)]
+pub enum LaunchError {
+    #[error(transparent)]
+    CloudSync(#[from] CloudSyncError),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Library(#[from] LibraryError),
+    #[error(transparent)]
+    License(#[from] LicenseError),
+    #[error(transparent)]
+    Native(#[from] NativeError),
+    #[error(transparent)]
+    ServiceLayer(#[from] ServiceLayerError),
+    #[error(transparent)]
+    Token(#[from] TokenError),
+
+    #[error("no offer was found for id `{0}`")]
+    NoOfferFound(String),
+    #[error("offline mode is not yet supported")]
+    Offline,
+    #[error("game path must be specified when launching in OnlineOffline mode")]
+    GamePathOffline,
+    #[error("game path not found")]
+    GamePath,
+    #[error("`{0}` is not installed")]
+    NotInstalled(String),
+    #[error("bootstrap was not found! Please re-install maxima")]
+    BootstrapMissing,
+    #[error(
+        "content ID (`{0}`) was specified as an offer ID when launching in OnlineOffline mode"
+    )]
+    ContentIdAsOfferId(String),
+}
 
 pub enum StartupStage {
     Launch,
@@ -116,31 +155,30 @@ pub async fn start_game(
     mode: LaunchMode,
     game_path_override: Option<String>,
     mut game_args: Vec<String>,
-) -> Result<()> {
+) -> Result<(), LaunchError> {
     let mut maxima = maxima_arc.lock().await;
     info!("Initiating game launch with {}...", mode);
 
     if let LaunchMode::OnlineOffline(ref content_id, _, _) = mode {
         if game_path_override.is_none() {
-            bail!("Game path must be specified when launching in OnlineOffline mode");
+            return Err(LaunchError::GamePathOffline);
         }
 
         if content_id.starts_with("Origin.OFR") {
-            bail!("Content ID was specified as an offer ID when launching in OnlineOffline mode");
+            return Err(LaunchError::ContentIdAsOfferId(content_id.clone()));
         }
     }
 
     let (content_id, online_offline, offer, access_token) =
         if let LaunchMode::Online(ref offer_id) = mode {
             let access_token = &maxima.access_token().await?;
-            let offer = maxima.mut_library().game_by_base_offer(offer_id).await;
-            if offer.is_none() {
-                bail!("Offer not found");
-            }
+            let offer = match maxima.mut_library().game_by_base_offer(offer_id).await? {
+                Some(offer) => offer,
+                None => return Err(LaunchError::NoOfferFound(offer_id.clone())),
+            };
 
-            let offer = offer.unwrap();
             if !offer.is_installed().await {
-                bail!("Game is not installed");
+                return Err(LaunchError::NotInstalled(offer.offer_id().clone()));
             }
 
             let content_id = offer.offer().content_id().to_owned();
@@ -154,22 +192,25 @@ pub async fn start_game(
         } else if let LaunchMode::OnlineOffline(ref content_id, _, _) = mode {
             (content_id.to_owned(), true, None, String::new())
         } else {
-            bail!("Offline mode is not yet supported");
+            return Err(LaunchError::Offline);
         };
 
     // Need to move this into Maxima and have a "current game" system
-    let path = if game_path_override.is_some() {
-        PathBuf::from(game_path_override.as_ref().unwrap())
+    let path = if let Some(game_path_override) = game_path_override {
+        PathBuf::from(&game_path_override)
     } else if !online_offline {
-        offer.as_ref().unwrap().execute_path(false).await?
+        match offer {
+            Some(ref offer) => offer.execute_path(false).await?.clone(),
+            None => return Err(LaunchError::NoOfferFound("Unknown".to_string())),
+        }
     } else {
-        bail!("Game path not found");
+        return Err(LaunchError::GamePath);
     };
 
-    let dir = path.parent().unwrap().to_str().unwrap();
+    let dir = path.safe_parent()?.safe_str()?;
     #[cfg(unix)]
     let path = case_insensitive_path(path.clone());
-    let path = path.to_str().unwrap();
+    let path = path.safe_str()?;
     info!("Game path: {}", path);
 
     #[cfg(unix)]
@@ -202,7 +243,7 @@ pub async fn start_game(
                 if let Err(err) = result {
                     error!("Failed to obtain CloudSync read lock: {}", err);
                 } else {
-                    let lock = result.unwrap();
+                    let lock = result?;
 
                     let result = lock.sync_files().await;
                     if let Err(err) = result {
@@ -226,7 +267,11 @@ pub async fn start_game(
         game_args.append(&mut parse_arguments(args.as_str()));
     }
 
-    let mut child = Command::new(bootstrap_path());
+    if !bootstrap_path()?.exists() {
+        return Err(LaunchError::BootstrapMissing);
+    }
+
+    let mut child = Command::new(bootstrap_path()?);
     child.arg("launch");
 
     let bootstrap_args = BootstrapLaunchArgs {
@@ -234,14 +279,14 @@ pub async fn start_game(
         args: game_args,
     };
 
-    let b64 = general_purpose::STANDARD.encode(serde_json::to_string(&bootstrap_args).unwrap());
+    let b64 = general_purpose::STANDARD.encode(serde_json::to_string(&bootstrap_args)?);
     child.arg(b64);
 
     let user = maxima.local_user().await?;
     let launch_id = Uuid::new_v4().to_string();
 
     child
-        .current_dir(PathBuf::from(path).parent().unwrap())
+        .current_dir(PathBuf::from(path).safe_parent()?)
         .env("MXLaunchId", launch_id.to_owned())
         .env("EAAuthCode", "unavailable")
         .env("EAEgsProxyIpcPort", "0")
@@ -253,7 +298,10 @@ pub async fn start_game(
         .env("EALaunchCode", "")
         .env(
             "EALaunchEAID",
-            user.player().as_ref().unwrap().display_name(),
+            user.player()
+                .as_ref()
+                .ok_or(ServiceLayerError::MissingField)?
+                .display_name(),
         )
         .env("EALaunchEnv", "production")
         .env("EALaunchOfflineMode", "false")
@@ -300,7 +348,7 @@ pub async fn start_game(
 }
 
 #[cfg(unix)]
-pub async fn mx_linux_setup() -> Result<()> {
+pub async fn mx_linux_setup() -> Result<(), NativeError> {
     use crate::unix::wine::{
         check_runtime_validity, check_wine_validity, get_lutris_runtimes, install_runtime,
         install_wine, setup_wine_registry,

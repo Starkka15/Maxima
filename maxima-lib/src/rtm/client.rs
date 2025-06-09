@@ -1,18 +1,12 @@
 use std::{io, sync::Arc, time::Duration};
 
-use anyhow::{anyhow, Result};
 use core::future::Future;
 use derive_builder::Builder;
 use derive_getters::Getters;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
-
-use crate::{
-    core::auth::storage::LockedAuthStorage,
-    rtm::proto::{LoginRequestV3, PlatformV1, PresenceSubscribeV1, PresenceV1, UserType},
-};
 
 use super::{
     connection::RtmConnectionManager,
@@ -20,6 +14,11 @@ use super::{
         communication_v1, success_v1, BasicPresenceType, HeartbeatV1, LoginV3Response, Player,
         PresenceUpdateV1, RichPresenceType, RichPresenceV1, SessionCleanupV1,
     },
+    RtmError,
+};
+use crate::{
+    core::auth::storage::{AuthError, LockedAuthStorage, TokenError},
+    rtm::proto::{LoginRequestV3, PlatformV1, PresenceSubscribeV1, PresenceV1, UserType},
 };
 
 macro_rules! send_and_forget_rtm_request {
@@ -32,14 +31,19 @@ macro_rules! send_rtm_request {
     ($connection_manager: expr, $request_body_name: ident, $comm_name: ident, $response_body_name: ident, $response_comm_name: ident, $comm_initializer:tt) => {
         {
             fn _rtm_transform(
-                fut: impl Future<Output = Result<communication_v1::Body, std::io::Error>> + Send,
-            ) -> impl Future<Output = Option<$response_comm_name>> + Send {
+                fut: impl Future<Output = Result<communication_v1::Body, RtmError>> + Send,
+            ) -> impl Future<Output = Result<$response_comm_name, RtmError>> + Send {
                 async move {
-                    match fut.await {
-                        Ok(communication_v1::Body::Success(success)) => match success.body.unwrap() {
-                            success_v1::Body::$response_body_name(data) => Some(data),
-                        },
-                        _ => None,
+                    match fut.await? {
+                        communication_v1::Body::Success(success) => match success.body {
+                            Some(body) => match body {
+                                success_v1::Body::$response_body_name(data) => Ok(data),
+                                any => Err(RtmError::InvalidResponse(any)),
+                            },
+                            None => Err(RtmError::NoBody),
+                        }
+                        communication_v1::Body::Error(err) => Err(RtmError::V1(err)),
+                        any => Err(RtmError::InvalidVariant(any)),
                     }
                 }
             }
@@ -82,7 +86,7 @@ pub struct RichPresence {
 }
 
 impl RichPresence {
-    pub fn from(presence: &PresenceV1) -> Result<Self> {
+    pub fn from(presence: &PresenceV1) -> Self {
         let basic = match presence.basic_presence_type() {
             BasicPresenceType::Offline => BasicPresence::Offline,
             BasicPresenceType::Dnd => BasicPresence::Dnd,
@@ -95,7 +99,7 @@ impl RichPresence {
         let custom_data: CustomRichPresenceData =
             serde_json::from_str(&rich.custom_rich_presence_data).unwrap_or_default();
 
-        Ok(Self {
+        Self {
             basic,
             status: rich.game,
             game: if !custom_data.game_product_id.is_empty() {
@@ -103,7 +107,7 @@ impl RichPresence {
             } else {
                 None
             },
-        })
+        }
     }
 }
 
@@ -143,7 +147,11 @@ impl RtmClient {
             loop {
                 match receiver_tx.recv().await {
                     Some(body) => {
-                        RtmClient::process_update(body, cloned_presence_store.clone()).await
+                        if let Err(err) =
+                            RtmClient::process_update(body, cloned_presence_store.clone()).await
+                        {
+                            error!("Failed to process update: {}", err);
+                        }
                     }
                     None => break,
                 };
@@ -153,51 +161,52 @@ impl RtmClient {
         client
     }
 
-    async fn process_update(body: communication_v1::Body, presence_store: LockedRtmPresenceStore) {
+    async fn process_update(
+        body: communication_v1::Body,
+        presence_store: LockedRtmPresenceStore,
+    ) -> Result<(), RtmError> {
         match body {
             communication_v1::Body::Presence(presence) => {
                 if presence.client_version.is_none() {
-                    return;
+                    return Ok(());
                 }
 
-                let res = serde_json::from_str(presence.client_version.as_ref().unwrap());
-                if res.is_err() {
-                    return;
-                }
+                let res: ClientVersion = serde_json::from_str(
+                    presence
+                        .client_version
+                        .as_ref()
+                        .ok_or(RtmError::InvalidClientVersion)?,
+                )?;
 
-                let res: ClientVersion = res.unwrap();
                 if res.client_type != "Client" && res.client_type != "LegacyClient" {
-                    return;
+                    return Ok(());
                 }
 
                 let rich = RichPresence::from(&presence);
-                if rich.is_err() {
-                    return;
+
+                if let Some(player) = presence.player.as_ref() {
+                    let id = player.player_id.to_owned();
+                    presence_store.lock().await.insert(id.to_owned(), rich);
+
+                    debug!("Updated {}'s presence", id);
+                } else {
+                    error!("Could not update player's presence (no player ID)!")
                 }
 
-                let id = presence.player.as_ref().unwrap().player_id.to_owned();
-                presence_store
-                    .lock()
-                    .await
-                    .insert(id.to_owned(), rich.unwrap());
-
-                debug!("Updated {}'s presence", id);
+                Ok(())
             }
-            _ => {
-                warn!("Got unhandled RPC update {:?}", body);
-            }
+            _ => Err(RtmError::UnhandledUpdate(body)),
         }
     }
 
-    pub async fn login(&mut self) -> Result<()> {
+    pub async fn login(&mut self) -> Result<(), RtmError> {
         let token = self
             .auth
             .lock()
             .await
             .access_token()
-            .await
-            .unwrap()
-            .unwrap()
+            .await?
+            .ok_or(AuthError::NoAuthCode)?
             .to_owned();
 
         let version = format!(
@@ -223,7 +232,7 @@ impl RtmClient {
             client_version: serde_json::to_string(&client_version)?,
             session_key: None,
             force_disconnect_session_key: None,
-        }).await.ok_or(anyhow!("RTM login failed"))?;
+        }).await?;
 
         for ele in res.connected_sessions {
             let platform = PlatformV1::try_from(ele.platform)?;
@@ -243,7 +252,7 @@ impl RtmClient {
         basic_presence: BasicPresence,
         status: &str,
         offer_id: &str,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<(), RtmError> {
         info!("Updating RTM presence to '{}'", status);
 
         let rpc_data = CustomRichPresenceData {
@@ -279,21 +288,21 @@ impl RtmClient {
     }
 
     /// Subscribe to a list of user IDs' presences
-    pub async fn subscribe(&mut self, players: &Vec<String>) -> Result<(), io::Error> {
+    pub async fn subscribe(&mut self, players: &Vec<String>) -> Result<(), RtmError> {
         send_and_forget_rtm_request!(self.conn_man, PresenceSubscribe, PresenceSubscribeV1, {
             players: players.iter().map(|id| Player{ player_id: id.to_owned(), product_id: String::from("origin"), }).collect()
         })
         .await
     }
 
-    pub async fn session_cleanup(&mut self, session_key: &str) -> Result<(), io::Error> {
+    pub async fn session_cleanup(&mut self, session_key: &str) -> Result<(), RtmError> {
         send_and_forget_rtm_request!(self.conn_man, SessionCleanupV1, SessionCleanupV1, {
             session_key: session_key.to_owned()
         })
         .await
     }
 
-    pub async fn heartbeat(&mut self) -> Result<(), io::Error> {
+    pub async fn heartbeat(&mut self) -> Result<(), RtmError> {
         send_and_forget_rtm_request!(self.conn_man, Heartbeat, HeartbeatV1, {}).await
     }
 }

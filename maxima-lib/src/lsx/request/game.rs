@@ -1,5 +1,3 @@
-use anyhow::Result;
-
 const LANGUAGES: &str =
     "ar_SA,de_DE,en_US,es_ES,es_MX,fr_FR,it_IT,ja_JP,ko_KR,pl_PL,pt_BR,ru_RU,zh_CN,zh_TW";
 //const LANGUAGES: &str = "de_DE,en_US,es_ES,es_MX,fr_FR,it_IT,ja_JP,pl_PL,pt_BR,ru_RU,zh_TW";
@@ -8,6 +6,7 @@ const LANGUAGES: &str =
 use crate::{
     lsx::{
         connection::LockedConnectionState,
+        request::LSXRequestError,
         types::{
             LSXGameInfoId, LSXGetAllGameInfo, LSXGetAllGameInfoResponse, LSXGetGameInfo,
             LSXGetGameInfoResponse, LSXResponseType,
@@ -19,7 +18,7 @@ use crate::{
 pub async fn handle_game_info_request(
     _: LockedConnectionState,
     request: LSXGetGameInfo,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     let game_info = match request.attr_GameInfoId {
         LSXGameInfoId::FreeTrial => "false".to_string(),
         LSXGameInfoId::Languages => LANGUAGES.to_string(),
@@ -36,7 +35,7 @@ pub async fn handle_game_info_request(
 pub async fn handle_all_game_info_request(
     _: LockedConnectionState,
     _: LSXGetAllGameInfo,
-) -> Result<Option<LSXResponseType>> {
+) -> Result<Option<LSXResponseType>, LSXRequestError> {
     make_lsx_handler_response!(Response, GetAllGameInfoResponse, {
         attr_FullGamePurchased: true,
         attr_FullGameReleased: true,

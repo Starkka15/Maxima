@@ -1,21 +1,21 @@
+use crate::{bridge_thread::BackendError, GameInfo, GameSettings};
 use log::{debug, error, info};
+use maxima::core::launch::LaunchError;
 use maxima::core::{
     launch::{self, LaunchMode},
     LockedMaxima,
 };
 
-use crate::{GameInfo, GameSettings};
-
 pub async fn start_game_request(
     maxima_arc: LockedMaxima,
     game_info: GameInfo,
     game_settings: Option<GameSettings>,
-) {
+) -> Result<(), LaunchError> {
     let maxima = maxima_arc.lock().await;
     let logged_in = maxima.auth_storage().lock().await.current().is_some();
     if !logged_in {
         info!("Ignoring request to start game, not logged in.");
-        return;
+        return Ok(()); // TODO(headassbtw): look into if it's worth properly reporting this
     }
 
     debug!("got request to start game {:?}", game_info.offer);
@@ -35,14 +35,11 @@ pub async fn start_game_request(
     };
 
     drop(maxima);
-    let result = launch::start_game(
+    launch::start_game(
         maxima_arc.clone(),
         LaunchMode::Online(game_info.offer),
         exe_override,
         args,
     )
-    .await;
-    if result.is_err() {
-        error!("Failed to start game! Reason: {}", result.err().unwrap());
-    }
+    .await
 }

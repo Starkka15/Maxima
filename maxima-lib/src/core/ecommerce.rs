@@ -1,17 +1,27 @@
 #![allow(non_snake_case)]
 
-use anyhow::{bail, Result};
 use reqwest::{Client, StatusCode};
 
-use serde::{Deserialize, Serialize};
-
 use super::endpoints::API_ECOMMERCE;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ECommerceError {
+    #[error(transparent)]
+    Request(#[from] reqwest::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+
+    #[error("ECommerce request failed: {0}")]
+    Http(String),
+}
 
 pub async fn request_entitlements(
     access_token: &str,
     user_id: &str,
     group_name: Option<&str>,
-) -> Result<Vec<CommerceEntitlement>> {
+) -> Result<Vec<CommerceEntitlement>, ECommerceError> {
     let mut query = Vec::new();
 
     if let Some(group_name) = group_name {
@@ -26,7 +36,7 @@ pub async fn request_entitlements(
         .send()
         .await?;
     if res.status() != StatusCode::OK {
-        bail!("Ecommerce request failed: {}", res.text().await?);
+        return Err(ECommerceError::Http(res.text().await?));
     }
 
     let text = res.text().await?;
@@ -38,14 +48,14 @@ pub async fn request_offer_data(
     access_token: &str,
     offer: &str,
     locale: &str,
-) -> Result<CommerceOffer> {
+) -> Result<CommerceOffer, ECommerceError> {
     let res = Client::new()
         .get(&format!("{}/public/{}/{}", API_ECOMMERCE, offer, locale))
         .header("AuthToken", access_token)
         .send()
         .await?;
     if res.status() != StatusCode::OK {
-        bail!("Ecommerce request failed: {}", res.text().await?);
+        return Err(ECommerceError::Http(res.text().await?));
     }
 
     let text = res.text().await?;

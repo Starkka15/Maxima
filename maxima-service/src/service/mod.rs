@@ -1,10 +1,9 @@
 use std::fs::File;
 
 use actix_web::{get, post, web, HttpResponse, Responder};
-use anyhow::Result;
 use dll_syringe::process::OwnedProcess;
 use dll_syringe::Syringe;
-use log::{info, warn};
+use log::info;
 use maxima::util::registry::set_up_registry;
 use maxima::util::service::SERVICE_NAME;
 use std::ffi::OsString;
@@ -21,12 +20,12 @@ use windows_service::{
     service_dispatcher,
 };
 
-use maxima::core::background_service::{ServiceLibraryInjectionRequest, BACKGROUND_SERVICE_PORT};
-
-use crate::service::error::ServiceError;
+use crate::service::error::ServerError;
 use crate::service::hash::get_sha256_hash_of_pid;
+use maxima::core::background_service::{ServiceLibraryInjectionRequest, BACKGROUND_SERVICE_PORT};
+use maxima::util::native::SafeParent;
 
-mod error;
+pub(crate) mod error;
 mod hash;
 
 define_windows_service!(ffi_service_main, service_main);
@@ -43,7 +42,7 @@ fn bootstrap_service(_arguments: Vec<OsString>) -> windows_service::Result<()> {
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop | ServiceControl::Interrogate => {
-                shutdown_tx.send(()).unwrap();
+                let _ = shutdown_tx.send(());
                 ServiceControlHandlerResult::NoError
             }
             _ => ServiceControlHandlerResult::NotImplemented,
@@ -83,9 +82,8 @@ fn bootstrap_service(_arguments: Vec<OsString>) -> windows_service::Result<()> {
 #[get("/set_up_registry")]
 async fn req_set_up_registry() -> impl Responder {
     info!("Setting up registry");
-    let result = set_up_registry();
-    if result.is_err() {
-        return format!("Error: {}", result.err().unwrap());
+    if let Err(err) = set_up_registry() {
+        return format!("Error: {}", err);
     }
 
     format!("Done")
@@ -95,36 +93,32 @@ async fn req_set_up_registry() -> impl Responder {
 // but it isn't a great user experience to have to install two windows services.
 // We'll eventually find a better workaround and move this somewhere else.
 #[post("/inject_library")]
-async fn req_inject_library(body: web::Bytes) -> Result<HttpResponse, ServiceError> {
+async fn req_inject_library(body: web::Bytes) -> Result<HttpResponse, self::ServerError> {
     info!("Injecting...");
 
     let req: ServiceLibraryInjectionRequest = serde_json::from_slice(&body)?;
     let process = OwnedProcess::from_pid(req.pid)?;
 
-    let hash_result = get_sha256_hash_of_pid(req.pid);
-    if hash_result.is_err() {
-        return Err(ServiceError::InternalError);
-    }
+    let hash_result = get_sha256_hash_of_pid(req.pid)?;
 
     // Ensure we're only injecting into STAR WARS Battlefront 2. Ideally we would check
     // the hash of the dll as well, but there isn't a great way to do that since there
     // are multiple release channels and dev builds.
-    if hex::encode(hash_result.unwrap())
+    if hex::encode(hash_result)
         != "7880e40d79e981b064baaf06f10785601222c6e227a656b70112c24b1f82e2ce"
     {
-        warn!("Attempted to inject into invalid process!");
-        return Err(ServiceError::InternalError);
+        return Err(self::ServerError::InvalidInjectionTarget);
     }
 
     let syringe = Syringe::for_process(process);
-    syringe.inject(req.path).unwrap();
+    syringe.inject(req.path)?;
 
     Ok(HttpResponse::Ok().body("Injected"))
 }
 
-fn run_service(shutdown_rx: Receiver<()>) -> Result<()> {
+fn run_service(shutdown_rx: Receiver<()>) -> Result<(), self::ServerError> {
     let log_path = Path::new("C:/ProgramData/Maxima/Logs/MaximaBackgroundService.log");
-    std::fs::create_dir_all(log_path.parent().unwrap())?;
+    std::fs::create_dir_all(log_path.safe_parent()?)?;
     let log_file = File::create(log_path)?;
 
     structured_logger::Builder::new()
@@ -134,19 +128,24 @@ fn run_service(shutdown_rx: Receiver<()>) -> Result<()> {
     info!("Started Background Service");
 
     thread::spawn(|| {
-        actix_web::rt::System::new().block_on(async {
-            use actix_web::{App, HttpServer};
+        actix_web::rt::System::new()
+            .block_on(async || -> std::io::Result<()> {
+                use actix_web::{App, HttpServer};
 
-            let _ = HttpServer::new(|| {
-                App::new()
-                    .service(req_set_up_registry)
-                    .service(req_inject_library)
-            })
-            .bind(("127.0.0.1", BACKGROUND_SERVICE_PORT))
-            .unwrap()
-            .run()
-            .await;
-        });
+                let _ = HttpServer::new(|| {
+                    App::new()
+                        .service(req_set_up_registry)
+                        .service(req_inject_library)
+                })
+                .bind(("127.0.0.1", BACKGROUND_SERVICE_PORT))?
+                .run()
+                .await;
+                Ok(())
+            }())
+            .expect(&format!(
+                "Failed to bind to 127.0.0.1:{}",
+                BACKGROUND_SERVICE_PORT
+            ));
     });
 
     let _ = shutdown_rx.recv();
@@ -154,7 +153,7 @@ fn run_service(shutdown_rx: Receiver<()>) -> Result<()> {
     Ok(())
 }
 
-pub fn start_service() -> Result<()> {
+pub fn start_service() -> Result<(), self::ServerError> {
     service_dispatcher::start("MaximaBackgroundService", ffi_service_main)?;
     Ok(())
 }
