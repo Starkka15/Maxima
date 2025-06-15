@@ -34,7 +34,7 @@ pub async fn handle_profile_request(
     let player = user
         .player()
         .as_ref()
-        .unwrap_or(Err(ServiceLayerError::MissingField)?);
+        .ok_or(ServiceLayerError::MissingField)?;
     let name = player.unique_name();
     debug!("Got profile for {} {:?}", &name, path);
 

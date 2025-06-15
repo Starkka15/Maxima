@@ -30,13 +30,13 @@ pub async fn begin_oauth_login_flow<'a>(context: &mut AuthContext<'a>) -> Result
             None => continue,
         };
 
-        let path_and_query = captures.get(2).unwrap_or(Err(AuthError::Query)?).as_str();
+        let path_and_query = captures.get(2).ok_or(AuthError::Query)?.as_str();
         if path_and_query.starts_with("/auth") {
             let query = path_and_query
                 .split_once("?")
                 .map(|(_, qs)| qs.trim())
                 .map(querystring::querify)
-                .unwrap_or(Err(AuthError::Query)?);
+                .ok_or(AuthError::Query)?;
 
             for query in query {
                 if query.0 == "code" {
