@@ -50,6 +50,9 @@ pub enum RegistryError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Native(#[from] NativeError),
+    #[cfg(windows)]
+    #[error(transparent)]
+    WidestringContainsNul(#[from] widestring::error::ContainsNul<u16>),
 
     #[error("registry key `{0}` not found")]
     Key(String),

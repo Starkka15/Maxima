@@ -105,9 +105,6 @@ pub enum NativeError {
     StripPrefix(#[from] std::path::StripPrefixError),
     #[error(transparent)]
     ParseInt(#[from] ParseIntError),
-    #[cfg(windows)]
-    #[error(transparent)]
-    WidestringContainsNul(#[from] widestring::error::ContainsNul<u16>),
 
     #[error("missing `{0}` environment variable")]
     MissingEnvironmentVariable(String),
