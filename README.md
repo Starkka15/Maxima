@@ -3,11 +3,11 @@
 ![Logo](images/1500x500.jpg)
 
 > [!WARNING]
-> Maxima is in beta. Parts of it may not be fully stable, and we're actively fixing bugs and adding features. Please create an [issue](https://github.com/ArmchairDevelopers/Maxima/issues) if you notice strange behavior.
+> Maxima is pre-pre-pre-alpha-quality software, and is being made open source **prematurely** for [KYVER](https://github.com/ArmchairDevelopers/Kyber), which depends on it. We cannot yet provide any support for attempting to use it standalone, although bug-fixes and [contributions](CONTRIBUTING.md) are welcome.
 
-Maxima is an open-source replacement for the EA Desktop/Origin game launcher, running natively on Linux and Windows, with MacOS support in progress.
+Maxima is an open-source replacement for the EA Desktop/Origin game launcher, running natively on Linux and Windows, with macOS support in progress.
 
-Maxima itself is a library (`maxima-lib`), with povided CLI (`maxima-cli`), TUI (`maxima-tui`), and GUI (`maxima-ui`) frontends. Other launchers compatible with Maxima's license may implement it as a backend. It's used by our sister project, [KYBER](https://uplink.kyber.gg/news/features-overview).
+Maxima itself is a library (`maxima-lib`), with provided CLI (`maxima-cli`), TUI (`maxima-tui`), and GUI (`maxima-ui`) frontends. Other launchers compatible with Maxima's license may implement it as a backend. It's used by our sister project, [KYBER](https://uplink.kyber.gg/news/features-overview).
 
 ![UI](images/UI.png)
 
@@ -26,13 +26,13 @@ Maxima itself is a library (`maxima-lib`), with povided CLI (`maxima-cli`), TUI 
    - `proton-ge` is automatically installed together with [umu](https://github.com/Open-Wine-Components/umu-launcher).
 
 **In-Dev:**
- - MacOS support
+ - macOS support
  - Support for launching Maxima through Epic/Steam
 
 **Planned:**
  - Library documentation/examples
  - Support for installing DLCs
- - Full EA Desktop interopability. Games installed with EA Desktop already appear on Maxima, but to take it a step further we'd like the ability to, for example, start a download on EA Desktop and continue it on Maxima.
+ - Full EA Desktop interoperability. Games installed with EA Desktop already appear on Maxima, but to take it a step further we'd like the ability to, for example, start a download on EA Desktop and continue it on Maxima.
  - Cleaner/Stabler downloader implementation
  - Progressive/Selective installs
    - Some games are able to start without being fully installed, and some games contain language-specific files.
