@@ -20,7 +20,7 @@ use crate::{
     },
     util::{
         hash::hash_file_crc32,
-        native::{maxima_dir, NativeError, SafeParent, SafeStr},
+        native::{maxima_cache_dir, NativeError, SafeParent, SafeStr},
     },
 };
 use async_compression::tokio::write::DeflateDecoder;
@@ -41,7 +41,7 @@ use tokio::{
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 fn zstate_path(id: &str, path: &str) -> Result<PathBuf, DownloaderError> {
-    let mut path = maxima_dir()?.join("temp/downloader").join(id).join(path);
+    let mut path = maxima_cache_dir()?.join("downloader").join(id).join(path);
     path.set_extension("eazstate");
     std::fs::create_dir_all(path.safe_parent()?)?;
     Ok(path)

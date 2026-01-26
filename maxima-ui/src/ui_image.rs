@@ -16,7 +16,7 @@ use core::slice::SlicePattern;
 use log::{debug, error, info};
 
 use image::io::Reader as ImageReader;
-use maxima::util::native::{maxima_dir, NativeError, SafeStr};
+use maxima::util::native::{maxima_cache_dir, NativeError, SafeStr};
 
 #[derive(Clone, PartialEq, Eq, Hash, std::fmt::Debug)]
 pub enum UIImageType {
@@ -101,9 +101,9 @@ impl UIImageCache {
     }
 
     fn get_path_for_image(variant: &UIImageType) -> Result<PathBuf, NativeError> {
-        let image_cache_root = maxima_dir()?.join("cache/ui/images");
+        let image_cache_root = maxima_cache_dir()?.join("ui/images");
         // lib should probably create the pfp path but we'll check both just in case we're first
-        let avatar_cache_root = maxima_dir()?.join("cache/avatars");
+        let avatar_cache_root = maxima_cache_dir()?.join("avatars");
         match variant {
             UIImageType::Hero(slug) => Ok(image_cache_root.join(&slug).join("hero.jpg")),
             UIImageType::Logo(slug) => Ok(image_cache_root.join(&slug).join("logo.png")),

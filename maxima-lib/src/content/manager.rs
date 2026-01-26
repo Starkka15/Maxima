@@ -29,7 +29,7 @@ use crate::{
         service_layer::ServiceLayerError,
         MaximaEvent,
     },
-    util::native::{maxima_dir, NativeError},
+    util::native::{maxima_cache_dir, NativeError},
 };
 
 const QUEUE_FILE: &str = "download_queue.json";
@@ -136,7 +136,7 @@ pub enum DownloaderError {
 
 impl DownloadQueue {
     pub(crate) async fn load() -> Result<DownloadQueue, ContentManagerError> {
-        let file = maxima_dir()?.join(QUEUE_FILE);
+        let file = maxima_cache_dir()?.join(QUEUE_FILE);
         if !file.exists() {
             return Ok(Self::default());
         }
@@ -151,7 +151,7 @@ impl DownloadQueue {
     }
 
     pub(crate) async fn save(&self) -> Result<(), ContentManagerError> {
-        let file = maxima_dir()?.join(QUEUE_FILE);
+        let file = maxima_cache_dir()?.join(QUEUE_FILE);
         fs::write(file, serde_json::to_string(&self)?).await?;
         Ok(())
     }

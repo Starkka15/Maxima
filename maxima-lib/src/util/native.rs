@@ -258,6 +258,31 @@ pub fn maxima_dir() -> Result<PathBuf, NativeError> {
     Ok(path)
 }
 
+#[cfg(not(unix))]
+pub fn maxima_cache_dir() -> Result<PathBuf, NativeError> {
+    use directories::ProjectDirs;
+
+    let dirs = ProjectDirs::from("com", "ArmchairDevelopers", "Maxima");
+    let path = dirs.unwrap().cache_dir().to_path_buf();
+    create_dir_all(&path)?;
+    Ok(path)
+}
+
+#[cfg(unix)]
+pub fn maxima_cache_dir() -> Result<PathBuf, NativeError> {
+    let home = if let Ok(home) = env::var("XDG_CACHE_HOME") {
+        home
+    } else if let Ok(home) = env::var("HOME") {
+        format!("{}/.cache", home)
+    } else {
+        return Err(NativeError::MissingEnvironmentVariable("HOME".to_string()));
+    };
+
+    let path = PathBuf::from(format!("{}/maxima", home));
+    create_dir_all(&path)?;
+    Ok(path)
+}
+
 #[cfg(unix)]
 pub fn platform_path<P: AsRef<Path>>(path: P) -> PathBuf {
     PathBuf::from(format!("Z:{}", path.as_ref().to_str().unwrap()))

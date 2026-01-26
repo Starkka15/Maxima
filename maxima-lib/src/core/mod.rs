@@ -67,7 +67,7 @@ use crate::{
     content::manager::{ContentManager, ContentManagerError},
     lsx::{self, service::LSXServerError, types::LSXRequestType},
     rtm::client::{BasicPresence, RtmClient},
-    util::native::{maxima_dir, NativeError},
+    util::native::{maxima_cache_dir, NativeError},
 };
 
 #[derive(Clone, IntoStaticStr)]
@@ -481,7 +481,7 @@ impl Maxima {
         width: u16,
         height: u16,
     ) -> Result<PathBuf, NativeError> {
-        let dir = maxima_dir()?.join("cache/avatars");
+        let dir = maxima_cache_dir()?.join("avatars");
         create_dir_all(&dir)?;
 
         Ok(dir.join(format!("{}_{}x{}.jpg", id, width, height)))

@@ -14,7 +14,7 @@ use maxima::{
         },
         LockedMaxima,
     },
-    util::native::maxima_dir,
+    util::native::maxima_cache_dir,
 };
 use std::{fs, sync::mpsc::Sender};
 
@@ -245,9 +245,9 @@ pub async fn get_games_request(
         });
         channel.send(res)?;
 
-        let bg = maxima_dir()?.join("cache/ui/images/").join(&slug).join("background.jpg");
-        let game_hero = maxima_dir()?.join("cache/ui/images/").join(&slug).join("hero.jpg");
-        let game_logo = maxima_dir()?.join("cache/ui/images/").join(&slug).join("logo.png");
+        let bg = maxima_cache_dir()?.join("ui/images/").join(&slug).join("background.jpg");
+        let game_hero = maxima_cache_dir()?.join("ui/images/").join(&slug).join("hero.jpg");
+        let game_logo = maxima_cache_dir()?.join("ui/images/").join(&slug).join("logo.png");
         let has_hero = fs::metadata(&game_hero).is_ok();
         let has_logo = fs::metadata(&game_logo).is_ok();
         let has_background = fs::metadata(&bg).is_ok();

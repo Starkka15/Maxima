@@ -24,7 +24,7 @@ use xz2::read::XzDecoder;
 
 use crate::util::{
     github::{fetch_github_release, fetch_github_releases, github_download_asset, GithubRelease},
-    native::{maxima_dir, DownloadError, NativeError, SafeParent, SafeStr, WineError},
+    native::{maxima_dir, maxima_cache_dir, DownloadError, NativeError, SafeParent, SafeStr, WineError},
     registry::RegistryError,
 };
 
@@ -326,19 +326,19 @@ pub(crate) async fn install_wine() -> Result<(), NativeError> {
         None => return Err(NativeError::Wine(WineError::Fetch)),
     };
 
-    let dir = maxima_dir()?.join("downloads");
+    let dir = maxima_cache_dir()?.join("downloads");
     create_dir_all(&dir)?;
 
-    let path = dir.join(&asset.name);
-    github_download_asset(asset, &path)?;
-    extract_wine(&path)?;
+    let archive_path = dir.join(&asset.name);
+    github_download_asset(asset, &archive_path)?;
+    extract_wine(&archive_path)?;
 
     let mut versions = versions()?;
     versions.proton = release.tag_name;
     set_versions(versions)?;
 
-    if let Err(err) = remove_file(&path) {
-        warn!("Failed to delete {:?} - {:?}", path, err);
+    if let Err(err) = remove_file(&archive_path) {
+        warn!("Failed to delete {:?} - {:?}", archive_path, err);
     }
 
     let _ = run_wine_command("", None::<[&str; 0]>, None, false, CommandType::Run).await;
@@ -535,7 +535,7 @@ pub async fn setup_wine_registry() -> Result<(), NativeError> {
         }
     }
 
-    let path = maxima_dir()?.join("temp").join("wine.reg");
+    let path = maxima_cache_dir()?.join("wine.reg");
     tokio::fs::create_dir_all(path.safe_parent()?).await?;
 
     {
