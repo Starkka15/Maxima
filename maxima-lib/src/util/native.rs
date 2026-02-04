@@ -223,9 +223,7 @@ pub fn module_path() -> Result<PathBuf, NativeError> {
 
 #[cfg(target_os = "linux")]
 pub fn module_path() -> Result<PathBuf, NativeError> {
-    let path = std::fs::read_link("/proc/self/exe");
-
-    Ok(path?)
+    Ok(std::fs::read_link("/proc/self/exe")?)
 }
 
 #[cfg(target_os = "macos")]
@@ -233,7 +231,6 @@ pub fn module_path() -> Result<PathBuf, NativeError> {
     Ok(env::current_exe()?)
 }
 
-#[cfg(not(unix))]
 pub fn maxima_dir() -> Result<PathBuf, NativeError> {
     use directories::ProjectDirs;
 
@@ -243,42 +240,11 @@ pub fn maxima_dir() -> Result<PathBuf, NativeError> {
     Ok(path)
 }
 
-#[cfg(unix)]
-pub fn maxima_dir() -> Result<PathBuf, NativeError> {
-    let home = if let Ok(home) = env::var("XDG_DATA_HOME") {
-        home
-    } else if let Ok(home) = env::var("HOME") {
-        format!("{}/.local/share", home)
-    } else {
-        return Err(NativeError::MissingEnvironmentVariable("HOME".to_string()));
-    };
-
-    let path = PathBuf::from(format!("{}/maxima", home));
-    create_dir_all(&path)?;
-    Ok(path)
-}
-
-#[cfg(not(unix))]
 pub fn maxima_cache_dir() -> Result<PathBuf, NativeError> {
     use directories::ProjectDirs;
 
     let dirs = ProjectDirs::from("com", "ArmchairDevelopers", "Maxima");
     let path = dirs.unwrap().cache_dir().to_path_buf();
-    create_dir_all(&path)?;
-    Ok(path)
-}
-
-#[cfg(unix)]
-pub fn maxima_cache_dir() -> Result<PathBuf, NativeError> {
-    let home = if let Ok(home) = env::var("XDG_CACHE_HOME") {
-        home
-    } else if let Ok(home) = env::var("HOME") {
-        format!("{}/.cache", home)
-    } else {
-        return Err(NativeError::MissingEnvironmentVariable("HOME".to_string()));
-    };
-
-    let path = PathBuf::from(format!("{}/maxima", home));
     create_dir_all(&path)?;
     Ok(path)
 }
@@ -291,4 +257,75 @@ pub fn platform_path<P: AsRef<Path>>(path: P) -> PathBuf {
 #[cfg(windows)]
 pub fn platform_path<P: AsRef<Path>>(path: P) -> PathBuf {
     PathBuf::from(path.as_ref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_maxima_dir() -> Result<(), NativeError> {
+        let dir_expected: PathBuf = if cfg!(target_os = "linux") {
+            let home = if let Ok(home) = env::var("XDG_DATA_HOME") {
+                home
+            } else if let Ok(home) = env::var("HOME") {
+                format!("{}/.local/share", home)
+            } else {
+                return Err(NativeError::MissingEnvironmentVariable("HOME".to_string()));
+            };
+            PathBuf::from(format!("{}/maxima", home))
+        } else if cfg!(target_os = "macos") {
+            if let Ok(home) = env::var("HOME") {
+                PathBuf::from(format!("{}/Library/Application Support/com.ArmchairDevelopers.Maxima", home))
+            } else {
+                return Err(NativeError::MissingEnvironmentVariable("HOME".to_string()));
+            }
+        } else if cfg!(target_os = "windows") {
+            if let Ok(appdata) = env::var("APPDATA") {
+                PathBuf::from(format!("{}/ArmchairDevelopers/Maxima/data", appdata))
+            } else {
+                return Err(NativeError::MissingEnvironmentVariable("APPDATA".to_string()));
+            }
+        } else {
+            panic!("unsupported platform");
+        };
+
+        let dir = maxima_dir().unwrap();
+        println!("[test_maxima_dir] Expected: {:?} Got: {:?}", dir_expected, dir);
+        assert_eq!(dir, dir_expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_maxima_cache_dir() -> Result<(), NativeError> {
+        let dir_expected: PathBuf = if cfg!(target_os = "linux") {
+            let home = if let Ok(home) = env::var("XDG_CACHE_HOME") {
+                home
+            } else if let Ok(home) = env::var("HOME") {
+                format!("{}/.cache", home)
+            } else {
+                return Err(NativeError::MissingEnvironmentVariable("HOME".to_string()));
+            };
+            PathBuf::from(format!("{}/maxima", home))
+        } else if cfg!(target_os = "macos") {
+            if let Ok(home) = env::var("HOME") {
+                PathBuf::from(format!("{}/Library/Caches/com.ArmchairDevelopers.Maxima", home))
+            } else {
+                return Err(NativeError::MissingEnvironmentVariable("HOME".to_string()));
+            }
+        } else if cfg!(target_os = "windows") {
+            if let Ok(localappdata) = env::var("LOCALAPPDATA") {
+                PathBuf::from(format!("{}/ArmchairDevelopers/Maxima/cache", localappdata))
+            } else {
+                return Err(NativeError::MissingEnvironmentVariable("LOCALAPPDATA".to_string()));
+            }
+        } else {
+            panic!("unsupported platform");
+        };
+
+        let dir = maxima_cache_dir().unwrap();
+        println!("[test_maxima_cache_dir] Expected: {:?} Got: {:?}", dir_expected, dir);
+        assert_eq!(dir, dir_expected);
+        Ok(())
+    }
 }
