@@ -247,6 +247,11 @@ enum Mode {
         #[arg(long)]
         no_rtm: bool,
     },
+    /// Get game info (offer_id, installed status) by slug
+    GameInfo {
+        /// Game slug (from list-games output)
+        slug: String,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -768,6 +773,9 @@ async fn startup(args: Args) -> Result<()> {
             file,
         } => download_specific_file(maxima_arc.clone(), &offer_id, &build_id, &file).await,
         Mode::Serve { no_rtm } => serve_lsx(maxima_arc.clone(), no_rtm).await,
+        Mode::GameInfo { slug } => {
+            game_info(maxima_arc.clone(), &slug).await
+        }
     }?;
 
     Ok(())
@@ -916,6 +924,27 @@ async fn interactive_install_game(maxima_arc: LockedMaxima) -> Result<()> {
     );
 
     Ok(())
+}
+
+async fn game_info(maxima_arc: LockedMaxima, slug: &str) -> Result<()> {
+    let mut maxima = maxima_arc.lock().await;
+
+    let titles = maxima.mut_library().games().await?;
+    for title in titles {
+        if title.base_offer().slug() == slug {
+            let installed = title.base_offer().is_installed().await;
+            println!(
+                "{{\"slug\":\"{}\",\"name\":\"{}\",\"offer_id\":\"{}\",\"installed\":{}}}",
+                title.base_offer().slug(),
+                title.name().replace('"', "\\\""),
+                title.base_offer().offer_id(),
+                installed
+            );
+            return Ok(());
+        }
+    }
+
+    bail!("No game found with slug '{}'", slug);
 }
 
 async fn download_specific_file(
