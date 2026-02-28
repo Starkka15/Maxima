@@ -111,6 +111,20 @@ enum Mode {
         #[arg(long)]
         file: String,
     },
+    /// Install a game non-interactively by slug
+    Install {
+        /// Game slug (from list-games output)
+        slug: String,
+
+        /// Absolute path to install the game to
+        #[arg(long)]
+        path: String,
+    },
+    /// Get game info (offer_id, installed status) by slug
+    GameInfo {
+        /// Game slug (from list-games output)
+        slug: String,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -323,6 +337,12 @@ async fn startup() -> Result<()> {
             build_id,
             file,
         } => download_specific_file(maxima_arc.clone(), &offer_id, &build_id, &file).await,
+        Mode::Install { slug, path } => {
+            install_game(maxima_arc.clone(), &slug, &path).await
+        }
+        Mode::GameInfo { slug } => {
+            game_info(maxima_arc.clone(), &slug).await
+        }
     }?;
 
     Ok(())
@@ -471,6 +491,121 @@ async fn interactive_install_game(maxima_arc: LockedMaxima) -> Result<()> {
     );
 
     Ok(())
+}
+
+async fn install_game(maxima_arc: LockedMaxima, slug: &str, path: &str) -> Result<()> {
+    let mut maxima = maxima_arc.lock().await;
+
+    // Resolve slug to offer_id
+    let offer = maxima.mut_library().game_by_base_slug(slug).await?;
+    if offer.is_none() {
+        bail!("No owned game found for slug '{}'", slug);
+    }
+    let offer = offer.unwrap();
+    let offer_id = offer.offer_id().to_owned();
+    let game_name = offer.offer().display_name().to_owned();
+
+    info!("Installing {} ({})", game_name, offer_id);
+
+    // Get available builds and pick the live one
+    let builds = maxima
+        .content_manager()
+        .service()
+        .available_builds(&offer_id)
+        .await?;
+    let build = builds.live_build();
+    if build.is_none() {
+        bail!("No suitable build found for '{}'", slug);
+    }
+
+    let build = build.unwrap();
+    info!("Build: {}", build.to_string());
+
+    let install_path = PathBuf::from(path);
+    if !install_path.is_absolute() {
+        bail!("Path '{}' is not absolute", path);
+    }
+
+    let game = QueuedGameBuilder::default()
+        .offer_id(offer_id)
+        .build_id(build.build_id().to_owned())
+        .path(install_path)
+        .build()?;
+
+    let start_time = Instant::now();
+    maxima.content_manager().install_now(game).await?;
+
+    drop(maxima);
+
+    // Progress polling loop
+    loop {
+        let mut maxima = maxima_arc.lock().await;
+
+        for event in maxima.consume_pending_events() {
+            match event {
+                MaximaEvent::ReceivedLSXRequest(_pid, _request) => (),
+                MaximaEvent::InstallFinished(ref _oid) => {
+                    info!("Download Complete");
+                }
+                _ => {}
+            }
+        }
+
+        maxima.update().await;
+
+        if let Some(downloader) = maxima.content_manager().current() {
+            let percent = downloader.percentage_done();
+            let downloaded_bytes = downloader.bytes_downloaded();
+            let total_bytes = downloader.bytes_total();
+            let downloaded_mib = downloaded_bytes as f64 / (1024.0 * 1024.0);
+            let total_mib = total_bytes as f64 / (1024.0 * 1024.0);
+
+            info!(
+                "Progress: {:.2} ",
+                if percent >= 100.0 { 99.99 } else { percent }
+            );
+            info!("Downloaded: {:.2} MiB", downloaded_mib);
+            info!("Total: {:.2} MiB", total_mib);
+        } else {
+            break;
+        }
+
+        drop(maxima);
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    let elapsed = start_time.elapsed();
+    info!(
+        "Download Complete",
+    );
+    info!(
+        "Install finished in {}.{}s",
+        elapsed.as_secs(),
+        elapsed.subsec_millis()
+    );
+
+    Ok(())
+}
+
+async fn game_info(maxima_arc: LockedMaxima, slug: &str) -> Result<()> {
+    let mut maxima = maxima_arc.lock().await;
+
+    let titles = maxima.mut_library().games().await?;
+    for title in titles {
+        if title.base_offer().slug() == slug {
+            let installed = title.base_offer().is_installed().await;
+            println!(
+                "{{\"slug\":\"{}\",\"name\":\"{}\",\"offer_id\":\"{}\",\"installed\":{}}}",
+                title.base_offer().slug(),
+                title.name().replace('"', "\\\""),
+                title.base_offer().offer_id(),
+                installed
+            );
+            return Ok(());
+        }
+    }
+
+    bail!("No game found with slug '{}'", slug);
 }
 
 async fn download_specific_file(
