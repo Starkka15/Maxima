@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: nightly
+        override: true
+
+    - uses: arduino/setup-protoc@v3
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get install -y musl-tools libx11-dev libxcursor-dev libxcb1-dev libxi-dev libxkbcommon-dev libxkbcommon-x11-dev
+        rustup target add x86_64-unknown-linux-musl
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: linux-release
+        cache-on-failure: true
+
+    - name: Build
+      run: cargo build --release --target x86_64-unknown-linux-musl
+      env:
+        RUSTFLAGS: "-C target-feature=+crt-static"
+
+    - name: Prepare binaries
+      run: |
+        chmod +x target/x86_64-unknown-linux-musl/release/maxima-cli
+        cp target/x86_64-unknown-linux-musl/release/maxima-cli maxima-cli-linux-x86_64
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: linux-binary
+        path: maxima-cli-linux-x86_64
+
+  release:
+    name: Create Release
+    needs: build-linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: linux-binary
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: maxima-cli-linux-x86_64
+        generate_release_notes: true
