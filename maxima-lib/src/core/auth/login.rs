@@ -13,7 +13,12 @@ lazy_static! {
 }
 
 pub async fn begin_oauth_login_flow<'a>(context: &mut AuthContext<'a>) -> Result<(), AuthError> {
-    open::that(context.nucleus_auth_url(JUNO_PC_CLIENT_ID, "code")?)?;
+    let url = context.nucleus_auth_url(JUNO_PC_CLIENT_ID, "code")?;
+    if let Ok(browser) = std::env::var("BROWSER") {
+        std::process::Command::new(browser).arg(&url).spawn()?;
+    } else {
+        open::that(&url)?;
+    }
     let listener = TcpListener::bind("127.0.0.1:31033").await?;
 
     loop {
