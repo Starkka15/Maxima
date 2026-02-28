@@ -17,6 +17,7 @@ log = "0.4.19"
 regex = "1.8.4"
 inquire = "0.6.2"
 futures = "0.3.30"
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = [ "memoryapi", "handleapi", "synchapi", "wincon", "consoleapi" ] }

@@ -232,8 +232,14 @@ pub async fn start_game(
     let path = path.safe_str()?;
     info!("Game path: {}", path);
 
+    let skip_bootstrap = env::var("MAXIMA_SKIP_BOOTSTRAP").is_ok();
+
     #[cfg(unix)]
-    mx_linux_setup().await?;
+    if !skip_bootstrap {
+        mx_linux_setup().await?;
+    } else {
+        info!("Skipping wine setup (MAXIMA_SKIP_BOOTSTRAP is set)");
+    }
 
     match mode {
         LaunchMode::Offline(_) => {}
@@ -293,20 +299,33 @@ pub async fn start_game(
         game_args.append(&mut parse_arguments(args.as_str()));
     }
 
-    if !bootstrap_path()?.exists() {
-        return Err(LaunchError::BootstrapMissing);
-    }
+    // When MAXIMA_SKIP_BOOTSTRAP is set, run the game exe directly instead of
+    // going through maxima-bootstrap. This is used when launching through
+    // Steam/Proton where the launcher script handles wine/proton setup.
+    let mut child = if skip_bootstrap {
+        info!("Launching game directly (skipping bootstrap): {}", path);
+        let mut cmd = Command::new(path);
+        for arg in &game_args {
+            cmd.arg(arg);
+        }
+        cmd
+    } else {
+        if !bootstrap_path()?.exists() {
+            return Err(LaunchError::BootstrapMissing);
+        }
 
-    let mut child = Command::new(bootstrap_path()?);
-    child.arg("launch");
+        let mut cmd = Command::new(bootstrap_path()?);
+        cmd.arg("launch");
 
-    let bootstrap_args = BootstrapLaunchArgs {
-        path: path.to_string(),
-        args: game_args,
+        let bootstrap_args = BootstrapLaunchArgs {
+            path: path.to_string(),
+            args: game_args,
+        };
+
+        let b64 = general_purpose::STANDARD.encode(serde_json::to_string(&bootstrap_args)?);
+        cmd.arg(b64);
+        cmd
     };
-
-    let b64 = general_purpose::STANDARD.encode(serde_json::to_string(&bootstrap_args)?);
-    child.arg(b64);
 
     let user = maxima.local_user().await?;
     let launch_id = Uuid::new_v4().to_string();

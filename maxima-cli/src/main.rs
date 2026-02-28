@@ -36,14 +36,19 @@ use maxima::{
         manifest::{self, MANIFEST_RELATIVE_PATH},
         service_layer::{
             ServiceGetBasicPlayerRequestBuilder, ServiceGetLegacyCatalogDefsRequestBuilder,
-            ServiceLegacyOffer, ServicePlayer, SERVICE_REQUEST_GETBASICPLAYER,
+            ServiceLayerError, ServiceLegacyOffer, ServicePlayer, SERVICE_REQUEST_GETBASICPLAYER,
             SERVICE_REQUEST_GETLEGACYCATALOGDEFS,
         },
         LockedMaxima, Maxima, MaximaEvent, MaximaOptionsBuilder,
     },
-    ooa,
+    ooa::{self, needs_license_update, request_and_save_license, LicenseAuth},
     rtm::client::BasicPresence,
-    util::{log::init_logger, native::take_foreground_focus, registry::check_registry_validity},
+    util::{
+        log::init_logger,
+        native::take_foreground_focus,
+        registry::check_registry_validity,
+        simple_crypto,
+    },
 };
 
 lazy_static! {
@@ -124,6 +129,15 @@ enum Mode {
     GameInfo {
         /// Game slug (from list-games output)
         slug: String,
+    },
+    /// Authenticate and print EA environment variables for a game (no game launch)
+    AuthEnv {
+        /// Game slug (from list-games output)
+        slug: String,
+
+        /// Override the game path (used for license binding)
+        #[arg(long)]
+        game_path: Option<String>,
     },
 }
 
@@ -342,6 +356,9 @@ async fn startup() -> Result<()> {
         }
         Mode::GameInfo { slug } => {
             game_info(maxima_arc.clone(), &slug).await
+        }
+        Mode::AuthEnv { slug, game_path } => {
+            auth_env(maxima_arc.clone(), &slug, game_path).await
         }
     }?;
 
@@ -606,6 +623,96 @@ async fn game_info(maxima_arc: LockedMaxima, slug: &str) -> Result<()> {
     }
 
     bail!("No game found with slug '{}'", slug);
+}
+
+async fn auth_env(
+    maxima_arc: LockedMaxima,
+    slug: &str,
+    game_path_override: Option<String>,
+) -> Result<()> {
+    let mut maxima = maxima_arc.lock().await;
+
+    // Resolve slug to offer
+    let offer = maxima.mut_library().game_by_base_slug(slug).await?;
+    if offer.is_none() {
+        bail!("No owned game found for slug '{}'", slug);
+    }
+    let offer = offer.unwrap();
+    let offer_id = offer.offer_id().to_owned();
+    let content_id = offer.offer().content_id().to_owned();
+    let access_token = maxima.access_token().await?;
+
+    // Determine game path for license binding
+    let path = if let Some(ref p) = game_path_override {
+        PathBuf::from(p)
+    } else {
+        offer.execute_path(false).await?.clone()
+    };
+
+    // Handle licensing
+    let auth = LicenseAuth::AccessToken(access_token.clone());
+    if needs_license_update(&content_id).await? {
+        info!("Requesting game license for {}...", offer.offer().display_name());
+        request_and_save_license(&auth, &content_id, path.clone()).await?;
+    } else {
+        info!("Existing game license is still valid");
+    }
+
+    // Request opaque OOA token for online mode
+    let mut auth_context = AuthContext::new()?;
+    auth_context.set_access_token(&access_token);
+    auth_context.set_token_format("OPAQUE");
+    auth_context.set_expires_in(550);
+    auth_context.add_scope("basic.commerce.cartv2");
+    auth_context.add_scope("service.atom");
+    auth_context.add_scope("dp.client.default");
+    auth_context.add_scope("signin");
+    auth_context.add_scope("social_recommendation_user");
+    auth_context.add_scope("basic.optin.write");
+    auth_context.add_scope("basic.commerce.cartv2.write");
+    auth_context.add_scope("basic.billing");
+    auth_context.add_scope("external.social_information_ups_admin");
+    let short_token = nucleus_auth_exchange(&auth_context, JUNO_PC_CLIENT_ID, "token").await?;
+
+    let user = maxima.local_user().await?;
+    let launch_id = uuid::Uuid::new_v4().to_string();
+    let display_name = user
+        .player()
+        .as_ref()
+        .ok_or(ServiceLayerError::MissingField)?
+        .display_name()
+        .to_owned();
+
+    // Print EA environment variables as shell export statements to stdout
+    // The launcher script will eval this output
+    println!("export MXLaunchId=\"{}\"", launch_id);
+    println!("export EAAuthCode=\"unavailable\"");
+    println!("export EAEgsProxyIpcPort=\"0\"");
+    println!("export EAEntitlementSource=\"EA\"");
+    println!("export EAExternalSource=\"EA\"");
+    println!("export EAFreeTrialGame=\"false\"");
+    println!("export EAGameLocale=\"{}\"", maxima.locale().full_str());
+    println!("export EAGenericAuthToken=\"{}\"", access_token);
+    println!("export EALaunchCode=\"unavailable\"");
+    println!("export EALaunchOwner=\"EA\"");
+    println!("export EALaunchEAID=\"{}\"", display_name);
+    println!("export EALaunchEnv=\"production\"");
+    println!("export EALaunchOfflineMode=\"false\"");
+    println!("export EALsxPort=\"{}\"", maxima.lsx_port());
+    println!("export EARtPLaunchCode=\"{}\"", simple_crypto::rtp_handshake());
+    println!("export EASecureLaunchTokenTemp=\"{}\"", user.id());
+    println!("export EASteamProxyIpcPort=\"0\"");
+    println!("export OriginSessionKey=\"{}\"", launch_id);
+    println!("export ContentId=\"{}\"", content_id);
+    println!("export EAOnErrorExitRetCode=\"1\"");
+    println!("export EAConnectionId=\"{}\"", offer_id);
+    println!("export EALicenseToken=\"{}\"", offer_id);
+    println!("export EALaunchUserAuthToken=\"{}\"", short_token);
+    println!("export EAAccessTokenJWS=\"{}\"", access_token);
+
+    info!("EA environment variables exported for {}", slug);
+
+    Ok(())
 }
 
 async fn download_specific_file(
