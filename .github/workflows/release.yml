@@ -4,154 +4,66 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag (e.g. v0.1.0)'
-        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # ── macOS: build MaximaHelper.app ──────────────────────────────────────────
-  build-helper:
-    runs-on: macos-latest
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Build MaximaHelper.app
-        run: bash MaximaHelper/build.sh --output ./dist --no-register
+    - uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: nightly
+        override: true
 
-      - name: Sanity-check helper bundle
-        # Verify the bundle exists, has the expected binary, and declares qrc:// in Info.plist.
-        run: |
-          set -e
-          test -x ./dist/MaximaHelper.app/Contents/MacOS/MaximaHelper
-          test -f ./dist/MaximaHelper.app/Contents/Info.plist
-          /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes" \
-            ./dist/MaximaHelper.app/Contents/Info.plist | grep -q "qrc"
-          echo "✓ MaximaHelper.app looks healthy"
+    - uses: arduino/setup-protoc@v3
 
-      - name: Zip MaximaHelper.app
-        run: |
-          cd dist
-          zip -r --symlinks MaximaHelper.zip MaximaHelper.app
+    - name: Install Dependencies
+      run: |
+        sudo apt-get install -y musl-tools libx11-dev libxcursor-dev libxcb1-dev libxi-dev libxkbcommon-dev libxkbcommon-x11-dev
+        rustup target add x86_64-unknown-linux-musl
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: maxima-helper
-          path: dist/MaximaHelper.zip
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: linux-release
+        cache-on-failure: true
 
-  # ── Windows: build binaries + NSIS installer ──────────────────────────────
-  build-installer:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --release --target x86_64-unknown-linux-musl
+      env:
+        RUSTFLAGS: "-C target-feature=+crt-static"
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Prepare binaries
+      run: |
+        chmod +x target/x86_64-unknown-linux-musl/release/maxima-cli
+        cp target/x86_64-unknown-linux-musl/release/maxima-cli maxima-cli-linux-x86_64
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+    - uses: actions/upload-artifact@v4
+      with:
+        name: linux-binary
+        path: maxima-cli-linux-x86_64
 
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build Maxima
-        # Build the full workspace on Windows. The rustix 0.37 breakage that
-        # blocks maxima-ui on Linux is unix-only (the offending chain is
-        # accesskit_unix → zbus → async-io), so Windows compiles cleanly.
-        # NSIS pulls maxima-tui.exe and maxima.exe in via `File /nonfatal`,
-        # so users get the complete app — the UI is wired up for future use
-        # even if Draconis currently invokes only the CLI side.
-        run: cargo build --release
-
-      - name: Install NSIS
-        run: choco install nsis --yes --no-progress
-
-      - name: Build installer
-        run: |
-          $env:PATH += ";C:\Program Files (x86)\NSIS"
-          makensis /DBIN_DIR="..\target\release" installer\maxima-setup.nsi
-
-      - name: Sanity-check installer
-        # Don't ship an empty / truncated installer.
-        run: |
-          if (-not (Test-Path installer\MaximaSetup.exe)) {
-            Write-Error "MaximaSetup.exe was not produced"; exit 1
-          }
-          $size = (Get-Item installer\MaximaSetup.exe).Length
-          Write-Host "MaximaSetup.exe size: $size bytes"
-          if ($size -lt 100000) {
-            Write-Error "MaximaSetup.exe is suspiciously small (<100KB)"; exit 1
-          }
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: maxima-installer
-          path: installer/MaximaSetup.exe
-
-      # Also publish loose binaries so a broken release can be debugged without
-      # re-running the workflow.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: maxima-binaries-win64
-          path: |
-            target/release/maxima-cli.exe
-            target/release/maxima-bootstrap.exe
-            target/release/maxima-service.exe
-            target/release/maxima-tui.exe
-            target/release/maxima.exe
-
-  # ── Create GitHub Release ─────────────────────────────────────────────────
   release:
-    needs: [build-helper, build-installer]
+    name: Create Release
+    needs: build-linux
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: maxima-helper
-          path: ./artifacts
+    - uses: actions/download-artifact@v4
+      with:
+        name: linux-binary
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: maxima-installer
-          path: ./artifacts
-
-      - name: Resolve tag name
-        id: tag
-        run: |
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            echo "name=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: "Maxima-Draconis ${{ steps.tag.outputs.name }}"
-          body: |
-            ## Assets
-
-            | File | Description |
-            |------|-------------|
-            | `MaximaHelper.zip` | macOS background agent — unzip and place `MaximaHelper.app` in a stable folder, then run `MaximaHelper/build.sh` to register the `qrc://` scheme |
-            | `MaximaSetup.exe` | Windows installer — run inside your CrossOver bottle to install Maxima and register protocol handlers |
-
-            See [README](https://github.com/AA-EION/Maxima-Draconis#setup-on-macos) for setup instructions.
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          files: |
-            ./artifacts/MaximaHelper.zip
-            ./artifacts/MaximaSetup.exe
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: maxima-cli-linux-x86_64
+        generate_release_notes: true
