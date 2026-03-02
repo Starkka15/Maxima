@@ -633,7 +633,7 @@ async fn auth_env(
     let mut maxima = maxima_arc.lock().await;
 
     // Resolve slug to offer — extract owned data before releasing the library borrow
-    let (offer_id, content_id, exe_path) = {
+    let (offer_id, content_id, exe_path, game_display_name) = {
         let offer = maxima.mut_library().game_by_base_slug(slug).await?;
         if offer.is_none() {
             bail!("No owned game found for slug '{}'", slug);
@@ -641,12 +641,13 @@ async fn auth_env(
         let offer = offer.unwrap();
         let oid = offer.offer_id().to_owned();
         let cid = offer.offer().content_id().to_owned();
+        let dname = offer.offer().display_name().to_owned();
         let epath = if game_path_override.is_none() {
             Some(offer.execute_path(false).await?.clone())
         } else {
             None
         };
-        (oid, cid, epath)
+        (oid, cid, epath, dname)
     };
 
     let access_token = maxima.access_token().await?;
@@ -661,7 +662,7 @@ async fn auth_env(
     // Handle licensing
     let auth = LicenseAuth::AccessToken(access_token.clone());
     if needs_license_update(&content_id).await? {
-        info!("Requesting game license for {}...", offer.offer().display_name());
+        info!("Requesting game license for {}...", game_display_name);
         request_and_save_license(&auth, &content_id, path.clone()).await?;
     } else {
         info!("Existing game license is still valid");
