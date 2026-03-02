@@ -632,21 +632,30 @@ async fn auth_env(
 ) -> Result<()> {
     let mut maxima = maxima_arc.lock().await;
 
-    // Resolve slug to offer
-    let offer = maxima.mut_library().game_by_base_slug(slug).await?;
-    if offer.is_none() {
-        bail!("No owned game found for slug '{}'", slug);
-    }
-    let offer = offer.unwrap();
-    let offer_id = offer.offer_id().to_owned();
-    let content_id = offer.offer().content_id().to_owned();
+    // Resolve slug to offer — extract owned data before releasing the library borrow
+    let (offer_id, content_id, exe_path) = {
+        let offer = maxima.mut_library().game_by_base_slug(slug).await?;
+        if offer.is_none() {
+            bail!("No owned game found for slug '{}'", slug);
+        }
+        let offer = offer.unwrap();
+        let oid = offer.offer_id().to_owned();
+        let cid = offer.offer().content_id().to_owned();
+        let epath = if game_path_override.is_none() {
+            Some(offer.execute_path(false).await?.clone())
+        } else {
+            None
+        };
+        (oid, cid, epath)
+    };
+
     let access_token = maxima.access_token().await?;
 
     // Determine game path for license binding
     let path = if let Some(ref p) = game_path_override {
         PathBuf::from(p)
     } else {
-        offer.execute_path(false).await?.clone()
+        exe_path.unwrap()
     };
 
     // Handle licensing
