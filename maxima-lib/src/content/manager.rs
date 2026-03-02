@@ -307,9 +307,14 @@ pub struct ContentManager {
 }
 
 impl ContentManager {
-    pub async fn new(auth: LockedAuthStorage, _resume: bool) -> Result<Self, ContentManagerError> {
+    pub async fn new(auth: LockedAuthStorage, resume: bool) -> Result<Self, ContentManagerError> {
+        let mut queue = DownloadQueue::load().await?;
+        if !resume {
+            queue.queued.clear();
+            queue.save().await?;
+        }
         Ok(Self {
-            queue: DownloadQueue::load().await?,
+            queue,
             service: ContentService::new(auth),
             current: None,
         })
