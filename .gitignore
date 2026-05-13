@@ -3,3 +3,15 @@
 /.idea
 
 Cargo.lock
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+
+# Installer output (compiled binaries — build with installer/build.sh)
+installer/MaximaSetup.exe
+
+# MaximaHelper compiled app (build with MaximaHelper/build.sh)
+MaximaHelper.app/
+MaximaHelper/build/

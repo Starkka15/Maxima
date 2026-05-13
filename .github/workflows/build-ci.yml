@@ -61,12 +61,16 @@ jobs:
       run: |
         cargo build --release
 
-    - name: Build Maxima
-      if: runner.os == 'Linux'
+    - name: Install NSIS
+      if: runner.os == 'Windows'
       run: |
-        cargo build --release --target x86_64-unknown-linux-musl
-      env:
-        RUSTFLAGS: "-C target-feature=+crt-static"
+        choco install nsis -y
+
+    - name: Build Installer
+      if: runner.os == 'Windows'
+      run: |
+        $env:PATH += ";C:\Program Files (x86)\NSIS"
+        makensis installer\maxima-setup.nsi
 
     - uses: actions/upload-artifact@v4
       if: runner.os == 'Windows'
@@ -78,6 +82,19 @@ jobs:
           target/release/maxima-cli.exe
           target/release/maxima-tui.exe
           target/release/maxima.exe
+
+    - uses: actions/upload-artifact@v4
+      if: runner.os == 'Windows'
+      with:
+        name: maxima-installer-win64
+        path: installer/MaximaSetup.exe
+
+    - name: Build Maxima
+      if: runner.os == 'Linux'
+      run: |
+        cargo build --release --target x86_64-unknown-linux-musl
+      env:
+        RUSTFLAGS: "-C target-feature=+crt-static"
 
     - name: File Permissions
       if: runner.os == 'Linux'

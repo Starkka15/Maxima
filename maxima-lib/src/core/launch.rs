@@ -210,6 +210,19 @@ pub async fn start_game(
             )
         } else if let LaunchMode::OnlineOffline(ref content_id, _, _) = mode {
             (content_id.to_owned(), true, None, String::new())
+        } else if let LaunchMode::Offline(ref offer_id) = mode {
+            // Offline: look up game from library but skip auth token
+            let offer = match maxima.mut_library().game_by_base_offer(offer_id).await? {
+                Some(offer) => offer,
+                None => return Err(LaunchError::NoOfferFound(offer_id.clone())),
+            };
+
+            if !offer.is_installed().await {
+                return Err(LaunchError::NotInstalled(offer.offer_id().clone()));
+            }
+
+            let content_id = offer.offer().content_id().to_owned();
+            (content_id, false, Some(offer.clone()), String::new())
         } else {
             return Err(LaunchError::Offline);
         };
@@ -344,7 +357,11 @@ pub async fn start_game(
         .env("EAOnErrorExitRetCode", "1");
 
     match mode {
-        LaunchMode::Offline(_) => todo!(),
+        LaunchMode::Offline(ref _offer_id) => {
+            // Offline mode: use cached license, skip cloud sync
+            // The license should already exist from a prior online session
+            child.env("EALaunchOfflineMode", "true");
+        }
         LaunchMode::Online(ref offer_id) => {
             let short_token = request_opaque_ooa_token(&access_token).await?;
 

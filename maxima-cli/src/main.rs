@@ -281,18 +281,44 @@ async fn startup() -> Result<()> {
         } => {
             let offer_id = if login.is_none() {
                 let mut maxima = maxima_arc.lock().await;
-                let offer = maxima.mut_library().game_by_base_slug(&slug).await;
-                // TODO: ideally this function should return an Error type, but this frontend makes that complicated
-                if let Err(err) = offer {
-                    bail!("Error fetching offer for slug `{}`: {}", slug, err);
-                } else {
-                    let offer = offer.unwrap();
-                    // TODO: could do a match here as well, same problem as above
-                    if offer.is_some() {
-                        offer.unwrap().offer_id().to_owned()
-                    } else {
-                        bail!("No owned offer found for '{}'", slug);
+                
+                // First try standard slug
+                let mut found_offer_id = None;
+                if let Ok(Some(offer)) = maxima.mut_library().game_by_base_slug(&slug).await {
+                    found_offer_id = Some(offer.offer_id().clone());
+                }
+                
+                // Then try base offer
+                if found_offer_id.is_none() {
+                    if let Ok(Some(offer)) = maxima.mut_library().game_by_base_offer(&slug).await {
+                        found_offer_id = Some(offer.offer_id().clone());
                     }
+                }
+                
+                // If still not found, do an exhaustive search across all properties 
+                // (useful for Steam App IDs or content IDs)
+                if found_offer_id.is_none() {
+                    if let Ok(games) = maxima.mut_library().games().await {
+                        for game in games {
+                            let base = game.base_offer();
+                            if base.slug() == &slug || 
+                               base.offer_id() == &slug || 
+                               base.product().id() == &slug || 
+                               base.product().origin_offer_id() == &slug || 
+                               base.offer().content_id() == &slug ||
+                               base.product().product().id() == &slug 
+                            {
+                                found_offer_id = Some(base.offer_id().clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if let Some(id) = found_offer_id {
+                    id
+                } else {
+                    bail!("No owned offer found for '{}'", slug);
                 }
             } else {
                 slug
