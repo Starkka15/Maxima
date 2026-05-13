@@ -77,6 +77,7 @@ else
 fi
 
 echo "[4/5] Assembling app bundle..."
+mkdir -p "${APP_BUNDLE}/Contents/MacOS"
 cp "${BUILD_DIR}/${APP_NAME}" "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 cp "${SCRIPT_DIR}/Info.plist" "${APP_BUNDLE}/Contents/Info.plist"
 printf 'APPL????' > "${APP_BUNDLE}/Contents/PkgInfo"
