@@ -19,7 +19,7 @@
 > [!WARNING]
 > This is a **fork** of [ArmchairDevelopers/Maxima](https://github.com/ArmchairDevelopers/Maxima) primarily maintained for [Draconis](https://github.com/AA-EION/Draconis) on macOS/CrossOver. The code is still portable to the other OSes upstream supports (native Windows + Linux), but only the macOS/CrossOver path is actively tested. If you want a vanilla build on Linux or native Windows, the upstream repo may be a better fit.
 
-**Maxima is an open-source (Mostly Vibecoded, Cringe, I know) replacement for the EA Desktop Launcher.** It handles the EA authentication handshake and license resolution that EA-published games require at startup. On macOS, it runs entirely **inside a CrossOver or Wine bottle** — it is a Windows application, not a native Mac app. The only Mac-native piece is `MaximaHelper.app`, a lightweight background agent that bridges EA's `qrc://` OAuth redirect from your browser into the bottle.
+**Maxima-Draconis is an open-source (Mostly Vibecoded, Cringe, I know) replacement for the EA Desktop Launcher.** It handles the EA authentication handshake and license resolution that EA-published games require at startup. On macOS, it runs entirely **inside a CrossOver or Wine bottle** — it is a Windows application, not a native Mac app. The only Mac-native piece is `MaximaHelper.app`, a lightweight background agent that bridges EA's `qrc://` OAuth redirect from your browser into the bottle.
 
 ---
 
