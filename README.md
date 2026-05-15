@@ -5,7 +5,7 @@
 <h1 align="center">Maxima-Draconis</h1>
 
 <p align="center">
-  EA authentication and launch backend for <a href="https://github.com/AA-EION/Draconis">Draconis</a>.THIS IS IN BETA, IT DOES NOT WORK CURRENTLY
+  EA authentication and launch backend for <a href="https://github.com/AA-EION/Draconis">Draconis</a>. THIS IS IN BETA, IT DOES NOT WORK CURRENTLY
 </p>
 
 <p align="center">
