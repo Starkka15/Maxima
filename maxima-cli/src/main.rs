@@ -81,6 +81,38 @@ enum Mode {
     LocateGame {
         path: String,
     },
+    /// Install a game from the user's EA library to a local path,
+    /// non-interactively. Equivalent to the interactive "Install Game"
+    /// option in `maxima-cli` (no args) or to the maxima-ui install flow,
+    /// but driven entirely by CLI flags so Draconis / scripts can kick it
+    /// off headless.
+    Install {
+        /// Slug, offer_id, or content_id of the game to install. Resolved
+        /// against the EA library the same way `launch` resolves its
+        /// `slug` argument.
+        slug: String,
+
+        /// Absolute path to install into. Will be created if missing. If
+        /// it already contains a different game's files, behavior is
+        /// `install_now`'s problem — Maxima doesn't try to dry-run.
+        #[arg(long)]
+        path: String,
+
+        /// Specific build ID to install. Defaults to the live (latest)
+        /// build advertised by the EA content service.
+        #[arg(long)]
+        build_id: Option<String>,
+
+        /// Emit JSONL progress on stdout (one JSON document per line)
+        /// with logger stdout suppressed. Each progress tick is
+        /// `{"event":"progress","percent":<0-100>}`; the terminator is
+        /// `{"event":"done","elapsed_secs":<float>}` on success or
+        /// `{"event":"error","message":"..."}` on failure (also exits
+        /// non-zero). Designed for Draconis to drive a real-time
+        /// progress bar without scraping log lines.
+        #[arg(long)]
+        json: bool,
+    },
     CloudSync {
         game_slug: String,
 
@@ -289,7 +321,10 @@ fn install_panic_hook() {
 /// stdout suppression on the global logger before anything has a chance to
 /// log — keeps `--json` subcommand output cleanly parseable.
 fn json_mode(args: &Args) -> bool {
-    matches!(args.mode, Some(Mode::ListGames { json: true }))
+    matches!(
+        args.mode,
+        Some(Mode::ListGames { json: true }) | Some(Mode::Install { json: true, .. })
+    )
 }
 
 /// Plain (non-tokio) `main`. The order is load-bearing:
@@ -610,6 +645,12 @@ async fn startup(args: Args) -> Result<()> {
         }
         Mode::ListGames { json } => list_games(maxima_arc.clone(), json).await,
         Mode::LocateGame { path } => locate_game(maxima_arc.clone(), &path).await,
+        Mode::Install {
+            slug,
+            path,
+            build_id,
+            json,
+        } => install_game(maxima_arc.clone(), &slug, &path, build_id.as_deref(), json).await,
         Mode::CloudSync { game_slug, write } => {
             do_cloud_sync(maxima_arc.clone(), &game_slug, write).await
         }
@@ -1174,6 +1215,191 @@ async fn list_games(maxima_arc: LockedMaxima, json: bool) -> Result<()> {
                 width2 = 25
             );
         }
+    }
+
+    Ok(())
+}
+
+/// Non-interactive install driver. Mirrors `interactive_install_game` but
+/// takes all parameters as CLI flags so Draconis / shell scripts can drive
+/// downloads without an inquire-prompted TTY. In JSON mode emits one
+/// JSON document per line on stdout — `{"event":"progress","percent":N}`
+/// once per second, then `{"event":"done",…}` on success or
+/// `{"event":"error",…}` on failure. Logger stdout is already suppressed
+/// by `main()` when `--json` is set.
+async fn install_game(
+    maxima_arc: LockedMaxima,
+    slug: &str,
+    path: &str,
+    build_id_override: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    use std::io::Write;
+
+    let emit_error = |msg: &str| {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"event": "error", "message": msg})
+            );
+            let _ = std::io::stdout().flush();
+        }
+    };
+
+    let install_path = PathBuf::from(path);
+    if !install_path.is_absolute() {
+        let msg = format!("--path must be absolute, got '{}'", path);
+        emit_error(&msg);
+        bail!(msg);
+    }
+
+    // Resolve slug → offer_id. Same chain as `Mode::Launch` minus the
+    // unlinked-Steam passthrough fallbacks (those only let you launch an
+    // already-installed copy; for install we genuinely need the offer in
+    // the user's EA library).
+    let offer_id = {
+        let mut maxima = maxima_arc.lock().await;
+        let mut found: Option<String> = None;
+        if let Ok(Some(offer)) = maxima.mut_library().game_by_base_slug(slug).await {
+            found = Some(offer.offer_id().clone());
+        }
+        if found.is_none() {
+            if let Ok(Some(offer)) = maxima.mut_library().game_by_base_offer(slug).await {
+                found = Some(offer.offer_id().clone());
+            }
+        }
+        if found.is_none() {
+            if let Ok(games) = maxima.mut_library().games().await {
+                for game in games {
+                    let base = game.base_offer();
+                    if base.slug() == slug
+                        || base.offer_id() == slug
+                        || base.product().id() == slug
+                        || base.product().origin_offer_id() == slug
+                        || base.offer().content_id() == slug
+                        || base.product().product().id() == slug
+                    {
+                        found = Some(base.offer_id().clone());
+                        break;
+                    }
+                }
+            }
+        }
+        match found {
+            Some(id) => id,
+            None => {
+                let msg = format!(
+                    "No owned offer found for '{}'. Link your Steam/EA accounts at https://www.ea.com if you bought the game from a third-party store.",
+                    slug
+                );
+                emit_error(&msg);
+                bail!(msg);
+            }
+        }
+    };
+
+    // Pick the build to install: explicit override, else the live build.
+    let build_id = {
+        let mut maxima = maxima_arc.lock().await;
+        let builds = maxima
+            .content_manager()
+            .service()
+            .available_builds(&offer_id)
+            .await?;
+        let chosen = match build_id_override {
+            Some(bid) => builds.build(bid).ok_or_else(|| {
+                anyhow::anyhow!("build_id '{}' not found for offer '{}'", bid, offer_id)
+            })?,
+            None => builds.live_build().ok_or_else(|| {
+                anyhow::anyhow!("No live build available for offer '{}'", offer_id)
+            })?,
+        };
+        let id = chosen.build_id().to_owned();
+        if !json {
+            info!(
+                "Installing build {} of {} into {}",
+                chosen.to_string(),
+                offer_id,
+                install_path.display()
+            );
+        }
+        id
+    };
+
+    let game = QueuedGameBuilder::default()
+        .offer_id(offer_id.clone())
+        .build_id(build_id.clone())
+        .path(install_path.clone())
+        .build()?;
+
+    let start_time = Instant::now();
+    {
+        let mut maxima = maxima_arc.lock().await;
+        if let Err(e) = maxima.content_manager().install_now(game).await {
+            let msg = format!("install_now failed: {}", e);
+            emit_error(&msg);
+            return Err(e.into());
+        }
+    }
+
+    // Progress loop: poll every second, tick the content manager, emit a
+    // progress line. When `current()` goes None the download is done.
+    loop {
+        let (percent, still_downloading) = {
+            let mut maxima = maxima_arc.lock().await;
+            for _event in maxima.consume_pending_events() {
+                // Drained but not surfaced — the current ContentManager API
+                // doesn't emit structured download-error events we could
+                // forward as `event: error` lines. Mid-install failures fall
+                // through to `install_now`'s error return (caught above).
+            }
+            maxima.update().await;
+            match maxima.content_manager().current() {
+                Some(d) => (d.percentage_done(), true),
+                None => (100.0, false),
+            }
+        };
+
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "progress",
+                    "percent": percent,
+                    "build_id": build_id,
+                })
+            );
+            let _ = std::io::stdout().flush();
+        } else {
+            info!("Downloading: {}%/100%", percent);
+        }
+
+        if !still_downloading {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    let elapsed = start_time.elapsed();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "event": "done",
+                "elapsed_secs": elapsed.as_secs_f64(),
+                "offer_id": offer_id,
+                "build_id": build_id,
+                "path": install_path.display().to_string(),
+            })
+        );
+        let _ = std::io::stdout().flush();
+    } else {
+        info!(
+            "Install complete in {}.{}s — {}",
+            elapsed.as_secs(),
+            elapsed.subsec_millis(),
+            install_path.display()
+        );
     }
 
     Ok(())

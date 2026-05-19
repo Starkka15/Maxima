@@ -326,6 +326,7 @@ Everything below is on top of upstream `master` at `cbde5f0`. Categorized so we 
   - Per-game launch args (e.g. `-noOriginStartup` for Northstar, `-multiple` for Source-engine titles) are NOT auto-injected. Callers pass them via `--game-args`, `MAXIMA_LAUNCH_ARGS`, or `cmd_params` on the `link2ea://` URL — Maxima stays universal.
 - `Mode::GetGameBySlug` actually prints slug/offer_id/content_id/display_name/installed (was a no-op stub upstream).
 - **`Mode::ListGames { json }`** — when `--json` is passed, emits a JSON array on stdout (slug, name, offer_id, content_id, installed, install_path, version, has_cloud_save, extra_offers) and suppresses the logger's stdout output for the duration of the command. Designed for Draconis pre-flight detection: "what does Maxima know about this user's library, in machine-readable form?". File-sink logging is unaffected, so debugging traces still land in `%LOCALAPPDATA%\Maxima\Logs\maxima-cli.log`. Per-title-specific detection (TF2 binaries, Northstar markers, etc.) is intentionally kept out of Maxima — that's the consumer's job, since Maxima needs to remain universal across EA titles.
+- **`Mode::Install { slug, path, build_id?, json }`** — non-interactive install driver. Resolves `slug` against the EA library (same chain as `Mode::Launch` minus the unlinked-Steam passthrough), picks the live build (or `--build-id` override), queues via `QueuedGameBuilder` + `install_now`, then polls every second until `content_manager().current()` returns None. In `--json` mode emits JSONL on stdout: `{"event":"progress","percent":N,"build_id":"…"}` per tick, terminator `{"event":"done","elapsed_secs":…,…}` on success or `{"event":"error","message":"…"}` on failure (also non-zero exit). Designed so Draconis can drive a real-time install progress bar without scraping log lines. Same flow the interactive "Install Game" menu uses; this is just the headless CLI form.
 
 #### Steam helpers — new module (`maxima-lib/src/steam.rs`)
 - Lifted from `maxima-cli/src/main.rs` so the auth server can use it too. Contains:
@@ -890,6 +891,16 @@ When TF2 emits `link2ea://`, bootstrap forwards to the running `serve` and exits
 ## Changelog (most recent first)
 
 History of significant changes since this fork was forked. Not a substitute for `git log` but useful for "when did X land" questions.
+
+### 2026-05-19 (still going) — non-interactive `install` subcommand
+
+Second step of the Draconis-side wizard rewrite (after the `list-games --json` work). Lets Draconis (or any script) trigger a Maxima install via CLI without the inquire-prompted interactive menu.
+
+- **`maxima-cli install <slug> --path <abs_dir> [--build-id <id>] [--json]`** ([maxima-cli/src/main.rs](maxima-cli/src/main.rs)) — non-interactive install driver. Resolves slug → offer_id with the same chain `Mode::Launch` uses (`game_by_base_slug` → `game_by_base_offer` → exhaustive `games()` scan over slug/offer_id/content_id/product fields), minus the unlinked-Steam passthrough fallbacks (those only make sense for launching an already-installed copy). Picks the live build by default; `--build-id` overrides to a specific historical build. Queues via `QueuedGameBuilder` + `install_now`, then polls `content_manager().current()` every second until it returns None.
+- In `--json` mode: emits one JSON document per line on stdout. Per-tick progress is `{"event":"progress","percent":N,"build_id":"…"}`; terminator on success is `{"event":"done","elapsed_secs":…,"offer_id":"…","build_id":"…","path":"…"}`; terminator on failure is `{"event":"error","message":"…"}` plus a non-zero process exit. Each line is flushed explicitly so a Draconis-style consumer with a piped stdout sees progress in real time. Logger stdout is auto-suppressed by `main()` when `--json` is set (via the `set_stdout_suppressed` toggle added in v0.9.0).
+- In plain mode: emits the same `info!("Downloading: {}%/100%")` line per tick as the interactive flow, then `info!("Install complete in N.NNs — <path>")`. The interactive "Install Game" menu still uses its own inquire path — no behavior change there.
+
+Limitation worth noting: the polling loop sees mid-install errors only via `install_now()`'s eventual error return — `consume_pending_events` is drained but not surfaced, because the upstream `ContentManager` API doesn't emit structured download-failure events we could forward as `{"event":"error",…}` lines. If a download fails halfway, the consumer gets an `event:error` line at the end (with the propagated error message) rather than mid-stream. Worth improving later when the content manager learns a `MaximaEvent::DownloadFailed` variant.
 
 ### 2026-05-19 (even later) — `list-games --json` for Draconis pre-flight
 
