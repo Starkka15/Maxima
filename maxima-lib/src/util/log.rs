@@ -2,6 +2,7 @@ use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use log::{Level, LevelFilter, Metadata, Record};
@@ -17,6 +18,19 @@ pub static LOGGER: SimpleLogger = SimpleLogger;
 /// Failure to open the file is non-fatal: the logger silently falls back to
 /// stdout-only.
 static LOG_FILE: Mutex<Option<File>> = Mutex::new(None);
+
+/// When true, the logger writes ONLY to the file sink — stdout stays clean.
+/// Used by `--json` subcommands so callers (Draconis, scripts) can parse
+/// stdout as a single JSON document without log noise. The file sink keeps
+/// receiving everything so debugging isn't affected.
+static SUPPRESS_STDOUT: AtomicBool = AtomicBool::new(false);
+
+/// Toggle stdout output from the logger. File sink is unaffected. Call this
+/// after `Args::parse()` and before any heavy logging when entering a
+/// `--json` code path.
+pub fn set_stdout_suppressed(suppressed: bool) {
+    SUPPRESS_STDOUT.store(suppressed, Ordering::Relaxed);
+}
 
 impl log::Log for SimpleLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
@@ -85,8 +99,12 @@ impl log::Log for SimpleLogger {
             )
         };
 
-        // stdout — visible when a console is attached.
-        println!("{}", colored);
+        // stdout — visible when a console is attached. Skipped in JSON
+        // subcommand modes so the caller's stdout parser doesn't choke on
+        // interleaved log lines.
+        if !SUPPRESS_STDOUT.load(Ordering::Relaxed) {
+            println!("{}", colored);
+        }
 
         // File sink — best-effort. We don't want logging to ever panic.
         //
@@ -150,7 +168,10 @@ fn resolve_log_file_path(binary_name: &str) -> Option<PathBuf> {
 /// name (e.g. `"maxima-cli"` → `maxima-cli.log`).
 pub fn init_logger_named(binary_name: &str) {
     if enable_ansi_support::enable_ansi_support().is_err() {
-        println!("ANSI Colors are unsupported in your terminal, things might look a bit off!");
+        // stderr — avoids corrupting stdout for `--json` callers in the rare
+        // case where ANSI support negotiation fails before we know which
+        // subcommand will run.
+        eprintln!("ANSI Colors are unsupported in your terminal, things might look a bit off!");
     }
 
     // Best-effort file sink. Any failure here is silently swallowed — we still

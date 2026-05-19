@@ -68,7 +68,16 @@ enum Mode {
         #[arg(long)]
         login: Option<String>,
     },
-    ListGames,
+    ListGames {
+        /// Emit a JSON array on stdout (with log output suppressed) instead
+        /// of the human-readable `info!` lines. Intended for Draconis and
+        /// other automation that needs to inspect what Maxima has in the
+        /// user's EA library — per-game `slug`, `name`, `offer_id`,
+        /// `content_id`, `installed`, `install_path`, `version`, plus the
+        /// list of extra-offer DLC.
+        #[arg(long)]
+        json: bool,
+    },
     LocateGame {
         path: String,
     },
@@ -276,6 +285,13 @@ fn install_panic_hook() {
     }));
 }
 
+/// Returns true if the parsed mode requests JSON output. Used to enable
+/// stdout suppression on the global logger before anything has a chance to
+/// log — keeps `--json` subcommand output cleanly parseable.
+fn json_mode(args: &Args) -> bool {
+    matches!(args.mode, Some(Mode::ListGames { json: true }))
+}
+
 /// Plain (non-tokio) `main`. The order is load-bearing:
 ///
 /// 1. Panic hook BEFORE anything fallible so a panic in any subsequent step
@@ -294,6 +310,13 @@ fn main() {
     init_logger_named("maxima-cli");
 
     let args = Args::parse();
+
+    // For `--json` subcommands, mute stdout logging so callers (Draconis,
+    // scripts) can parse stdout as a single JSON document. The file sink
+    // keeps receiving everything for debugging.
+    if json_mode(&args) {
+        maxima::util::log::set_stdout_suppressed(true);
+    }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -585,7 +608,7 @@ async fn startup(args: Args) -> Result<()> {
             )
             .await
         }
-        Mode::ListGames => list_games(maxima_arc.clone()).await,
+        Mode::ListGames { json } => list_games(maxima_arc.clone(), json).await,
         Mode::LocateGame { path } => locate_game(maxima_arc.clone(), &path).await,
         Mode::CloudSync { game_slug, write } => {
             do_cloud_sync(maxima_arc.clone(), &game_slug, write).await
@@ -632,7 +655,7 @@ async fn run_interactive(maxima_arc: LockedMaxima) -> Result<()> {
         "Launch Game" => interactive_start_game(maxima_arc.clone()).await?,
         "Install Game" => interactive_install_game(maxima_arc.clone()).await?,
         "List Builds" => generate_download_links(maxima_arc.clone()).await?,
-        "List Games" => list_games(maxima_arc.clone()).await?,
+        "List Games" => list_games(maxima_arc.clone(), false).await?,
         "Account Info" => print_account_info(maxima_arc.clone()).await?,
         _ => bail!("Something went wrong."),
     }
@@ -1030,12 +1053,106 @@ async fn get_legacy_catalog_def(maxima_arc: LockedMaxima, offer_id: &str) -> Res
     Ok(())
 }
 
-async fn list_games(maxima_arc: LockedMaxima) -> Result<()> {
-    let mut maxima = maxima_arc.lock().await;
+#[derive(serde::Serialize)]
+struct GameJson {
+    slug: String,
+    name: String,
+    offer_id: String,
+    content_id: String,
+    display_name: String,
+    installed: bool,
+    install_path: Option<String>,
+    version: Option<String>,
+    has_cloud_save: bool,
+    extra_offers: Vec<ExtraOfferJson>,
+}
 
-    info!("Owned games:");
+#[derive(serde::Serialize)]
+struct ExtraOfferJson {
+    offer_id: String,
+    display_name: String,
+}
+
+async fn list_games(maxima_arc: LockedMaxima, json: bool) -> Result<()> {
+    let mut maxima = maxima_arc.lock().await;
     let titles = maxima.mut_library().games().await?;
 
+    if json {
+        // Machine-readable mode: one JSON array, no log noise. main() already
+        // muted stdout logging via `set_stdout_suppressed(true)` for this
+        // subcommand; everything that follows goes directly to stdout via
+        // `println!`.
+        let mut out: Vec<GameJson> = Vec::with_capacity(titles.len());
+        for title in titles {
+            let base = title.base_offer();
+            let installed = base.is_installed().await;
+            // `execute_path` and `installed_version` both read the local
+            // manifest, which can be absent for externally-installed copies
+            // (Steam, manually-placed). Swallow those errors — Draconis
+            // can still see `installed: true` even when version is unknown,
+            // and `installed: false` is enough to drive the install flow.
+            // Errors are logged at `debug!` so the file sink still has them
+            // for diagnosing why a path/version came back null, without
+            // breaking the JSON document on stdout.
+            let install_path = if installed {
+                match base.execute_path(false).await {
+                    Ok(p) => Some(p.display().to_string()),
+                    Err(e) => {
+                        debug!(
+                            "execute_path for {} failed: {}",
+                            base.offer_id(),
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let version = if installed {
+                match base.installed_version().await {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        debug!(
+                            "installed_version for {} failed: {}",
+                            base.offer_id(),
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let extras = title
+                .extra_offers()
+                .iter()
+                .map(|g| ExtraOfferJson {
+                    offer_id: g.offer_id().clone(),
+                    display_name: g.offer().display_name().to_string(),
+                })
+                .collect();
+
+            out.push(GameJson {
+                slug: base.slug().clone(),
+                name: title.name().to_string(),
+                offer_id: base.offer_id().clone(),
+                content_id: base.offer().content_id().to_string(),
+                display_name: base.offer().display_name().to_string(),
+                installed,
+                install_path,
+                version,
+                has_cloud_save: base.offer().has_cloud_save(),
+                extra_offers: extras,
+            });
+        }
+
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    info!("Owned games:");
     for title in titles {
         info!(
             "{:<width$} - {:<width2$} - {:<width3$} - Installed: {}",

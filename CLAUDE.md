@@ -325,6 +325,7 @@ Everything below is on top of upstream `master` at `cbde5f0`. Categorized so we 
   - Resolves Steam install path via `lookup_steam_game` + `resolve_steam_install_path` (registry + `libraryfolders.vdf` parse) when no `--game-path` is given.
   - Per-game launch args (e.g. `-noOriginStartup` for Northstar, `-multiple` for Source-engine titles) are NOT auto-injected. Callers pass them via `--game-args`, `MAXIMA_LAUNCH_ARGS`, or `cmd_params` on the `link2ea://` URL — Maxima stays universal.
 - `Mode::GetGameBySlug` actually prints slug/offer_id/content_id/display_name/installed (was a no-op stub upstream).
+- **`Mode::ListGames { json }`** — when `--json` is passed, emits a JSON array on stdout (slug, name, offer_id, content_id, installed, install_path, version, has_cloud_save, extra_offers) and suppresses the logger's stdout output for the duration of the command. Designed for Draconis pre-flight detection: "what does Maxima know about this user's library, in machine-readable form?". File-sink logging is unaffected, so debugging traces still land in `%LOCALAPPDATA%\Maxima\Logs\maxima-cli.log`. Per-title-specific detection (TF2 binaries, Northstar markers, etc.) is intentionally kept out of Maxima — that's the consumer's job, since Maxima needs to remain universal across EA titles.
 
 #### Steam helpers — new module (`maxima-lib/src/steam.rs`)
 - Lifted from `maxima-cli/src/main.rs` so the auth server can use it too. Contains:
@@ -375,6 +376,7 @@ Everything below is on top of upstream `master` at `cbde5f0`. Categorized so we 
 #### Logging (`maxima-lib/src/util/log.rs`)
 - `init_logger_named(name)` variant — names the per-process log file (`maxima-cli.log` vs `maxima-bootstrap.log`).
 - All logger output is mirrored to a file in addition to stdout. Default: `%LOCALAPPDATA%\Maxima\Logs\<name>.log` on Windows, `$XDG_DATA_HOME/maxima/logs/<name>.log` on unix. Override via `MAXIMA_LOG_FILE`. Each session writes a `===== maxima log session opened (pid=…) =====` header.
+- `set_stdout_suppressed(bool)` — runtime toggle that drops stdout output from the logger while keeping the file sink intact. Set by `maxima-cli` immediately after `Args::parse()` when a `--json` subcommand is detected, so JSON output on stdout stays parseable. The ANSI-support warning was also moved from `println!` to `eprintln!` so it never lands on stdout even before suppression kicks in.
 
 #### UI runtime (`maxima-ui`)
 - **Renderer switched glow → wgpu** ([maxima-ui/Cargo.toml](maxima-ui/Cargo.toml), [maxima-ui/src/main.rs](maxima-ui/src/main.rs)). Root cause: eframe 0.28's glow path asks glutin for an OpenGL 3.3 Core context without `WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB`, which Wine's `macdrv` rejects ("OS X only supports forward-compatible 3.2+ contexts" → `ERROR_INVALID_VERSION_ARB`). Glutin then tries GLES fallback, but Wine's CrossOver build doesn't expose `WGL_EXT_create_context_es_profile` and `EGL not compiled in!`. eframe 0.28 doesn't expose a knob to set the forward-compat flag, so the cleaner path is wgpu. Added `"wgpu"` to eframe features and set `renderer: eframe::Renderer::Wgpu` in `NativeOptions`. wgpu picks Vulkan via MoltenVK 1.2.10 on Apple Silicon. **The custom glow renderers (`AppBgRenderer`, `GameViewBgRenderer`) auto-disable** because their constructors early-return `None` via `cc.gl.as_ref()?`, and all call sites are `if let Some(...)`. Background gradients disappear silently on macOS; the rest of the UI works. Could be upstreamed.
@@ -889,7 +891,16 @@ When TF2 emits `link2ea://`, bootstrap forwards to the running `serve` and exits
 
 History of significant changes since this fork was forked. Not a substitute for `git log` but useful for "when did X land" questions.
 
-### 2026-05-19 (later) — `--game-path` accepts directory + Steam CEG warning + root-cause docs
+### 2026-05-19 (even later) — `list-games --json` for Draconis pre-flight
+
+First step of the Draconis-side rewrite (full plan in chat history): give the SwiftUI launcher machine-readable detection without scraping log output.
+
+- **`maxima-cli list-games --json`** ([maxima-cli/src/main.rs](maxima-cli/src/main.rs)) — emits a JSON array of every owned title with `slug`, `name`, `offer_id`, `content_id`, `installed`, `install_path`, `version`, `has_cloud_save`, and a nested `extra_offers` list (DLC/expansions). Used by Draconis to answer "does Maxima see TF2 in this user's EA library, and is it installed?". `--json` activates a logger-stdout suppression flag right after `Args::parse()` so the JSON document on stdout has no log-line noise; the file sink keeps capturing everything for debug.
+- **`maxima-lib::util::log::set_stdout_suppressed(bool)`** — the runtime toggle that powers `--json` mode. Affects only the logger's stdout sink; file sink and `eprintln!` are unchanged. The ANSI-support fallback warning in `init_logger_named` moved from `println!` to `eprintln!` so it never corrupts a JSON stdout even before the suppression flag is set.
+
+Per-title detection (Titanfall 2 binary names, Northstar markers, etc.) deliberately stays out of Maxima — `Mode::Inspect` was considered and rejected for the same reason the `-noOriginStartup -multiple` injection was removed in v0.7.0: Maxima needs to remain universal across EA titles. Draconis owns the TF2-specific detection logic using plain `FileManager` checks.
+
+No behavior change to non-`--json` callers. `list-games` without the flag still prints the original `info!` table; bootstrap / serve / launch flows are untouched.
 
 Three changes in `launch::start_game` and CLAUDE.md, in service of the same goal: make the macOS/CrossOver story honest about what Maxima can and can't fix.
 
