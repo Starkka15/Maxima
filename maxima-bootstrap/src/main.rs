@@ -10,6 +10,7 @@ use thiserror::Error;
 use tokio::process::Command;
 
 use base64::{engine::general_purpose, Engine};
+use maxima::auth_server::AUTHORIZE_PORT;
 use maxima::core::launch::BootstrapLaunchArgs;
 use maxima::util::native::NativeError;
 #[cfg(windows)]
@@ -69,6 +70,172 @@ fn is_valid_steam_app_id(s: &str) -> bool {
     // Reject empty (covers `link2ea://launchgame/` with no segment) and
     // anything that includes a non-digit (defends against `12--login=x`).
     !s.is_empty() && s.len() <= 10 && s.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Append a one-liner to `%TEMP%/maxima_execution.log`. Bootstrap is a
+/// GUI subsystem binary so it has no console of its own — this file is
+/// the only feedback channel for what happened during a protocol-handler
+/// invocation. Best-effort; failures are silently ignored.
+fn log_event(line: &str) {
+    let path = std::env::temp_dir().join("maxima_execution.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(
+            file,
+            "[{:?}] {}",
+            std::time::SystemTime::now(),
+            line
+        );
+    }
+}
+
+/// Quick TCP probe — does the `/authorize` HTTP server look reachable?
+/// Used before paying for a full reqwest round-trip.
+///
+/// Uses tokio's async `TcpStream::connect` wrapped in `timeout` so it
+/// doesn't block the executor thread. (`std::net::TcpStream::connect_timeout`
+/// inside an async fn parks a worker for up to the timeout duration,
+/// which we don't want.)
+async fn auth_server_alive(port: u16) -> bool {
+    let addr = format!("127.0.0.1:{}", port);
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
+/// Hand a `link2ea://` or `origin2://` URL off to whichever Maxima
+/// already speaks `/authorize`, or fall back to the legacy
+/// `maxima-cli launch` spawn if nothing's listening.
+///
+/// The fall-back path preserves the upstream behavior (and the `link2ea`
+/// flow Draconis used before `serve`-mode existed), so this rewrite
+/// doesn't regress users who never type `maxima-cli serve` — they just
+/// don't get the benefit of the always-on auth server.
+///
+/// See [`maxima::auth_server`] in `maxima-lib` for the server side.
+async fn handle_protocol_authorize(
+    offer_id: &str,
+    cmd_params: Option<String>,
+    protocol_name: &'static str,
+) -> Result<bool, RunError> {
+    // SECURITY: refuse anything that doesn't match the EA offer ID
+    // shape. URLs like `link2ea://launchgame/--login=stolen_token`
+    // would otherwise inject a flag into the maxima-cli invocation
+    // below (or, worse, into the HTTP forward).
+    if !is_valid_ea_offer_id(offer_id) {
+        log_event(&format!(
+            "REJECTED malformed {} offer_id: {:?}",
+            protocol_name, offer_id
+        ));
+        return Ok(false);
+    }
+
+    let port = std::env::var("MAXIMA_AUTHORIZE_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(AUTHORIZE_PORT);
+
+    if auth_server_alive(port).await {
+        // Forward to the running Maxima. The server will refresh the
+        // `.dlf`, set the EA-* env vars, and spawn the game executable
+        // via `launch::start_game` — that's the chain TF2's Origin
+        // DRM stub expects when it emits `link2ea://` and exits.
+        let mut url = format!(
+            "http://127.0.0.1:{}/authorize?offer_id={}",
+            port,
+            urlencoding::encode(offer_id)
+        );
+        if let Some(ref params) = cmd_params {
+            // Re-encode the param value (URL we got it from might have
+            // used `+` for space or other quirks). The server URL-decodes
+            // on its end.
+            url.push_str("&cmd_params=");
+            url.push_str(&urlencoding::encode(params));
+        }
+        log_event(&format!(
+            "Forwarding {} offer={} to auth server at {}",
+            protocol_name, offer_id, url
+        ));
+
+        // Long timeout: the very first call after `serve` boots may
+        // hit `request_and_save_license` which makes an EA license-
+        // server round-trip (typically <2s, but Wine + spotty network
+        // can push it higher).
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
+        let resp = client.post(&url).send().await?;
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            log_event(&format!(
+                "Auth server accepted {} authorize for {} (body: {})",
+                protocol_name, offer_id, body
+            ));
+            return Ok(true);
+        }
+        // Server is alive but rejected the request. Don't fall back to
+        // spawning `maxima-cli launch` — that would just re-attempt the
+        // same operation through a different code path and produce a
+        // duplicate side-effect (a second TF2 process) without resolving
+        // the underlying problem (not logged in, offer not in library).
+        log_event(&format!(
+            "Auth server rejected {} authorize for {} ({}, body: {})",
+            protocol_name, offer_id, status, body
+        ));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "Maxima authorize for {} failed with HTTP {}: {}",
+                offer_id, status, body
+            ),
+        )
+        .into());
+    }
+
+    // No `/authorize` server reachable. Fall back to the legacy path:
+    // spawn `maxima-cli launch <offer_id>` which will start LSX, log in
+    // if needed, do its own license preflight, and spawn the game via
+    // `launch::start_game`. This is what bootstrap did before the
+    // auth-server existed; it stays here so users who never run
+    // `maxima-cli serve` (or whose `serve` hasn't started yet) still get
+    // a working launch path.
+    log_event(&format!(
+        "No auth server on 127.0.0.1:{}; falling back to maxima-cli launch for {} offer={}",
+        port, protocol_name, offer_id
+    ));
+
+    let mut child = Command::new(current_exe()?.with_file_name("maxima-cli.exe"));
+
+    if let Ok(port) = std::env::var("KYBER_INTERFACE_PORT") {
+        child.env("KYBER_INTERFACE_PORT", port);
+    }
+    if let Some(params) = cmd_params {
+        let decoded = urlencoding::decode(&params)
+            .map(|c| c.into_owned())
+            .unwrap_or(params);
+        child.env("MAXIMA_LAUNCH_ARGS", decoded.replace("\\\"", "\""));
+    }
+
+    child.args(["launch", offer_id]);
+    let status = child.spawn()?.wait().await?;
+    if !status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "maxima-cli ({}) exited non-zero: code={:?}",
+                protocol_name,
+                status.code()
+            ),
+        )
+        .into());
+    }
+    Ok(true)
 }
 
 #[derive(Error, Debug)]
@@ -242,125 +409,40 @@ async fn run(args: &[String]) -> Result<bool, RunError> {
         if arg.starts_with("link2ea") {
             // link2ea://launchgame/<offer-id>?platform=<p>&theme=<t>
             // link2ea://resume/<offer-id>?...
+            //
+            // The offer id is the first path segment after the action.
             let url = Url::parse(arg)?;
-
-            // The offer ID is the first path segment after the host/action
             let segments: Vec<&str> = url
                 .path_segments()
                 .map(|c| c.collect())
                 .unwrap_or_default();
-
             if segments.is_empty() {
                 return Ok(false);
             }
-
-            // segments[0] is the offer ID (e.g. "Origin.OFR.50.0002694")
             let offer_id = segments[0];
-
-            // SECURITY: refuse anything that doesn't match the EA offer ID shape.
-            // A URL like link2ea://launchgame/--login=stolen_token would otherwise
-            // inject a flag into the maxima-cli invocation below.
-            if !is_valid_ea_offer_id(offer_id) {
-                let temp_dir = std::env::temp_dir();
-                let debug_log = temp_dir.join("maxima_execution.log");
-                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&debug_log) {
-                    use std::io::Write;
-                    let _ = writeln!(file, "REJECTED malformed link2ea offer_id: {:?}", offer_id);
-                }
-                return Ok(false);
-            }
-
-            let mut child = Command::new(current_exe()?.with_file_name("maxima-cli.exe"));
-
-            // Forward environment variables from parent process
-            if let Ok(port) = std::env::var("KYBER_INTERFACE_PORT") {
-                child.env("KYBER_INTERFACE_PORT", port);
-            }
-
-            // Extract any command params from the query string
-            if let Some(query) = url.query() {
-                let params = querystring::querify(query);
-                if let Some((_, cmd_params)) = params.iter().find(|(k, _)| *k == "cmdParams") {
-                    child.env(
-                        "MAXIMA_LAUNCH_ARGS",
-                        urlencoding::decode(cmd_params)
-                            .unwrap_or_default()
-                            .into_owned()
-                            .replace("\\\"", "\""),
-                    );
-                }
-            }
-
-            child.args(["launch", offer_id]);
-            let status = child.spawn()?.wait().await?;
-
-            // Propagate non-zero exits as errors so handle_launch_args logs
-            // them to maxima_execution.log and maxima_bootstrap_error.log via
-            // the existing centralized error-reporting path. Previously we
-            // logged manually and still returned Ok(true), which made failures
-            // look like successes in the log.
-            if !status.success() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("maxima-cli (link2ea) exited non-zero: code={:?}", status.code()),
-                )
-                .into());
-            }
-
-            return Ok(true);
+            let cmd_params = url.query().and_then(|q| {
+                querystring::querify(q)
+                    .into_iter()
+                    .find(|(k, _)| *k == "cmdParams")
+                    .map(|(_, v)| v.to_string())
+            });
+            return handle_protocol_authorize(offer_id, cmd_params, "link2ea").await;
         }
 
         if arg.starts_with("origin2") {
             // origin2://game/launch?offerIds=<offer_id>&cmdParams=<encoded_args>&...
             let url = Url::parse(arg)?;
             let query = querystring::querify(url.query().unwrap_or_default());
-            let offer_id = query
+            let offer_id: String = query
                 .iter()
                 .find(|(k, _)| *k == "offerIds")
-                .map(|(_, v)| *v)
+                .map(|(_, v)| v.to_string())
                 .unwrap_or_default();
-
-            // SECURITY: same validation as link2ea:// — offer_id comes from an
-            // attacker-controlled URL and must not be allowed to start with `--`.
-            if !is_valid_ea_offer_id(offer_id) {
-                let temp_dir = std::env::temp_dir();
-                let debug_log = temp_dir.join("maxima_execution.log");
-                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&debug_log) {
-                    use std::io::Write;
-                    let _ = writeln!(file, "REJECTED malformed origin2 offer_id: {:?}", offer_id);
-                }
-                return Ok(false);
-            }
-
-            let mut child = Command::new(current_exe()?.with_file_name("maxima-cli.exe"));
-
-            // Forward optional cmdParams as launch args
-            if let Some((_, cmd_params)) = query.iter().find(|(k, _)| *k == "cmdParams") {
-                child.env(
-                    "MAXIMA_LAUNCH_ARGS",
-                    urlencoding::decode(cmd_params)?
-                        .into_owned()
-                        .replace("\\\"", "\""),
-                );
-            }
-
-            // Forward KYBER port if present in parent environment
-            if let Ok(port) = std::env::var("KYBER_INTERFACE_PORT") {
-                child.env("KYBER_INTERFACE_PORT", port);
-            }
-
-            child.args(["launch", offer_id]);
-            let status = child.spawn()?.wait().await?;
-
-            if !status.success() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("maxima-cli (origin2) exited non-zero: code={:?}", status.code()),
-                )
-                .into());
-            }
-
-            return Ok(true);
+            let cmd_params = query
+                .iter()
+                .find(|(k, _)| *k == "cmdParams")
+                .map(|(_, v)| v.to_string());
+            return handle_protocol_authorize(&offer_id, cmd_params, "origin2").await;
         }
 
         if arg.starts_with("qrc") {

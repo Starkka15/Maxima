@@ -4,11 +4,13 @@
 #![feature(trait_alias)]
 #![feature(type_alias_impl_trait)]
 
+pub mod auth_server;
 pub mod content;
 pub mod core;
 pub mod lsx;
 pub mod ooa;
 pub mod rtm;
+pub mod steam;
 pub mod util;
 
 #[cfg(unix)]

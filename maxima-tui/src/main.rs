@@ -445,7 +445,10 @@ async fn start_game(
         path_override: game_path_override,
         arguments: game_args,
         cloud_saves: true,
-        steam_launch: false,
+        // TUI launches the way EA Desktop's UI does — Steam-Play
+        // handoffs come through bootstrap → /authorize, not through
+        // the TUI's launch path.
+        steam_app_id: None,
     };
 
     if login.is_none() {

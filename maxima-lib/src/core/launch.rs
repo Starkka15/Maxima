@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose, Engine};
 use derive_getters::Getters;
-use log::{error, info};
+use log::{error, info, warn};
 use std::{env, fmt::Display, path::PathBuf, sync::Arc};
 use tokio::{
     process::{Child, Command},
@@ -87,13 +87,30 @@ pub struct LaunchOptions {
     pub path_override: Option<String>,
     pub arguments: Vec<String>,
     pub cloud_saves: bool,
-    /// When true, the game is being launched from Steam context (the user
-    /// clicked Play in Steam, which emitted `link2ea://launchgame/<steam_app_id>?platform=steam`).
-    /// The EA env vars passed to the game are flipped from "EA" to "Steam"
-    /// for `EAExternalSource` / `EALaunchOwner` / `EAEntitlementSource` so the
-    /// game's launch context matches what it expects from Steam DRM and
-    /// Steamworks, avoiding "corrupted files" / "wrong entitlement" rejections.
-    pub steam_launch: bool,
+    /// When set, the game is being launched from Steam context. Steam
+    /// emits `link2ea://launchgame/<numeric_steam_app_id>?platform=steam`
+    /// expecting the link2ea handler to take over the launch entirely
+    /// (Steam does NOT spawn the exe itself for older EA-on-Steam titles
+    /// like TF2 — it delegates to whatever owns the link2ea protocol).
+    ///
+    /// Passing `Some(steam_app_id)` causes `start_game` to:
+    ///   1. Set `EAEntitlementSource` / `EAExternalSource` / `EALaunchOwner`
+    ///      to `"Steam"` instead of `"EA"` so TF2's DRM stub sees a launch
+    ///      context consistent with where it's being run from.
+    ///   2. Set `SteamAppId` / `SteamGameId` env vars on the spawned game
+    ///      (required by the Steam DRM stub — without these TF2 exits
+    ///      immediately with code 100010 "Steam not detected").
+    ///   3. Default `SteamClientLaunch=1` and `SteamPath=...` if the
+    ///      parent env doesn't already provide them.
+    ///   4. Inject `-noOriginStartup -multiple` into `arguments` (the
+    ///      `-noOriginStartup` flag skips Northstar/TF2's Origin-startup
+    ///      wait that hangs forever in Wine; `-multiple` avoids the
+    ///      "another instance already running" race between Steam's
+    ///      verification probe and our spawn).
+    ///
+    /// `None` (the default) is the EA-Desktop-style launch path — env
+    /// vars stay `"EA"` and no Steam-specific setup happens.
+    pub steam_app_id: Option<String>,
 }
 
 pub enum LaunchMode {
@@ -125,6 +142,18 @@ pub struct ActiveGameContext {
     mode: LaunchMode,
     injections: Vec<LibraryInjection>,
     cloud_saves: bool,
+    /// The Steam App ID this launch came from, if any. Threaded through
+    /// from `LaunchOptions.steam_app_id` so the LSX request handlers
+    /// (specifically `GetProfile` and `GetAllGameInfo`) can return
+    /// consistent values for `IsSteamSubscriber` / `EntitlementSource`
+    /// without resorting to reading `env::var("SteamAppId")` from the
+    /// serve process (which doesn't have it — those env vars are set
+    /// directly on the spawned game's `Command`, not on the parent).
+    ///
+    /// `None` means this is an EA-Desktop-style launch (TF2 emitting
+    /// `link2ea://launchgame/Origin.OFR.…` mid-run, or maxima-cli launch
+    /// with an Origin offer ID slug).
+    steam_app_id: Option<String>,
     process: Child,
     started: bool,
 }
@@ -137,6 +166,7 @@ impl ActiveGameContext {
         content_id: &str,
         offer: Option<OwnedOffer>,
         mode: LaunchMode,
+        steam_app_id: Option<String>,
         process: Child,
     ) -> Self {
         Self {
@@ -147,6 +177,7 @@ impl ActiveGameContext {
             mode,
             injections: Vec::new(),
             cloud_saves,
+            steam_app_id,
             process,
             started: false,
         }
@@ -266,7 +297,23 @@ pub async fn start_game(
             let auth = LicenseAuth::AccessToken(maxima.access_token().await?);
 
             let offer = offer.as_ref().unwrap();
-            if needs_license_update(&content_id).await? {
+
+            // Diagnostic override: setting `MAXIMA_SKIP_LICENSE_WRITE=1` in the
+            // environment makes us NOT fetch + write the `.dlf` license file
+            // to `…/EA Services/License/<content_id>.dlf`. Used to test whether
+            // TF2's "Engine Error: File corruption detected" symptom is driven
+            // by the on-disk `.dlf` (hardware-hash mismatch hypothesis from
+            // CLAUDE.md) — if TF2 still corrupts when we DON'T write a `.dlf`,
+            // the issue is somewhere else (Steam DRM, local file integrity,
+            // some other check). Remove the .dlf manually before testing so
+            // there's no stale file lying around.
+            if env::var("MAXIMA_SKIP_LICENSE_WRITE").is_ok() {
+                warn!(
+                    "MAXIMA_SKIP_LICENSE_WRITE is set — skipping OOA license \
+                     fetch + .dlf write entirely. Game will only have whatever \
+                     .dlf was already on disk (or none)."
+                );
+            } else if needs_license_update(&content_id).await? {
                 info!(
                     "Requesting new game license for {}...",
                     offer.offer().display_name()
@@ -318,6 +365,28 @@ pub async fn start_game(
         game_args.append(&mut parse_arguments(args.as_str()));
     }
 
+    // Steam-Play context: auto-inject `-noOriginStartup -multiple` if not
+    // already present. The two flags are required for EA-on-Steam titles
+    // (notably TF2) under Wine — see the `LaunchOptions.steam_app_id`
+    // doc comment for the why. We add them BEFORE building bootstrap_args
+    // so the bootstrap-spawned child gets them via the base64 payload.
+    let is_steam_launch = options.steam_app_id.is_some();
+    if is_steam_launch {
+        if !game_args
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case("-noOriginStartup"))
+        {
+            game_args.insert(0, "-noOriginStartup".to_string());
+        }
+        if !game_args
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case("-multiple"))
+        {
+            game_args.insert(0, "-multiple".to_string());
+        }
+        info!("Steam-Play context; final game args: {:?}", game_args);
+    }
+
     if !bootstrap_path()?.exists() {
         return Err(LaunchError::BootstrapMissing);
     }
@@ -339,9 +408,9 @@ pub async fn start_game(
     // Source / owner / entitlement env vars: "EA" for EA-Desktop-launched
     // games, "Steam" for games launched via Steam (the user clicked Play in
     // Steam). When mismatched, TF2 (and likely other EA-on-Steam titles)
-    // throws a "corrupted game files" error because its DRM stub expects the
-    // ownership tag to match its install context.
-    let source_tag = if options.steam_launch { "Steam" } else { "EA" };
+    // throws a "corrupted game files" error because its DRM stub expects
+    // the ownership tag to match its install context.
+    let source_tag = if is_steam_launch { "Steam" } else { "EA" };
 
     child
         .current_dir(PathBuf::from(path).safe_parent()?)
@@ -375,6 +444,36 @@ pub async fn start_game(
         .env("ContentId", content_id.clone())
         .env("EAOnErrorExitRetCode", "1");
 
+    // Steam-Play env vars on the spawned child specifically (NOT via
+    // `std::env::set_var` on the parent — that would persist for every
+    // future spawn in the same process, which matters for the long-
+    // running `maxima-cli serve` host where /authorize spawns multiple
+    // games over its lifetime).
+    //
+    // The Steam DRM stub in EA-on-Steam titles reads `SteamAppId` /
+    // `SteamGameId` during `SteamAPI_Init()`. If either is absent the
+    // game exits immediately with code 100010 ("Steam not detected").
+    // `SteamClientLaunch` and `SteamPath` are normally set by Steam's
+    // own runtime; we default-fill them from the parent env (if Steam
+    // really did launch us) or to safe constants otherwise.
+    if let Some(ref app_id) = options.steam_app_id {
+        child
+            .env("SteamAppId", app_id)
+            .env("SteamGameId", app_id);
+        let inherited_client_launch = env::var("SteamClientLaunch").ok();
+        child.env(
+            "SteamClientLaunch",
+            inherited_client_launch.as_deref().unwrap_or("1"),
+        );
+        let inherited_steam_path = env::var("SteamPath").ok();
+        child.env(
+            "SteamPath",
+            inherited_steam_path
+                .as_deref()
+                .unwrap_or("C:\\Program Files (x86)\\Steam"),
+        );
+    }
+
     match mode {
         LaunchMode::Offline(ref _offer_id) => {
             // Offline mode: use cached license, skip cloud sync
@@ -382,7 +481,29 @@ pub async fn start_game(
             child.env("EALaunchOfflineMode", "true");
         }
         LaunchMode::Online(ref offer_id) => {
-            let short_token = request_opaque_ooa_token(&access_token).await?;
+            // Best-effort: fetch an OPAQUE short-token for `EALaunchUserAuthToken`
+            // (introduced by upstream PR #34 so the OOA license API works even
+            // with a hardware-hash mismatch). Under Wine / CrossOver EA's auth
+            // service routinely rejects this exchange with a redirect to
+            // `signin.ea.com` (treated as `AuthError::InvalidRedirect`). When
+            // that happens we fall back to the JWS access token — that's the
+            // pre-PR-#34 upstream behavior and it still satisfies the env-var
+            // contract the game expects. Without this fallback every launch
+            // would fail end-to-end on bottles where the OOA exchange isn't
+            // happy with our pc_sign / token, even though the rest of the
+            // flow is fine.
+            let short_token = match request_opaque_ooa_token(&access_token).await {
+                Ok(token) => token,
+                Err(err) => {
+                    warn!(
+                        "OPAQUE OOA token exchange failed ({}); falling back to \
+                         JWS access_token for EALaunchUserAuthToken. The game's \
+                         OOA-side calls may still work via EAAccessTokenJWS.",
+                        err
+                    );
+                    access_token.clone()
+                }
+            };
 
             child
                 .env("EAConnectionId", offer_id.clone())
@@ -408,6 +529,7 @@ pub async fn start_game(
         &content_id,
         offer,
         mode,
+        options.steam_app_id.clone(),
         child,
     ));
 

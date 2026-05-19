@@ -1,23 +1,25 @@
 # Maxima-Draconis — engineering reference for Claude agents
 
-This is the **Maxima-Draconis fork** — the EA authentication and launch backend used by [Draconis](https://github.com/AA-EION/Draconis), a native macOS launcher for Titanfall 2 on CrossOver / Wine. This file is the living engineering reference for anyone picking up the repo cold. It covers architecture, known gotchas, diagnostics, and a running changelog.
+This is the **Maxima-Draconis fork** — the EA authentication and launch backend used by [Draconis](https://github.com/AA-EION/Draconis), a native macOS launcher for Titanfall 2 on CrossOver / Wine. This file is the living engineering reference for anyone picking up the repo cold: architecture, gotchas, diagnostics, and a running changelog.
+
+If you're updating this file, the rule is: **state of the world first, history at the bottom**. Don't make new sessions read three months of changelog before learning what the code currently does.
 
 ---
 
 ## What Maxima is
 
-Open-source replacement for the EA Desktop Launcher. **Not** a macOS-native app — `maxima-cli` / `maxima-bootstrap` / `maxima-service` are Windows binaries that run **inside the CrossOver bottle** alongside Titanfall 2. The only piece that runs on the macOS host is `MaximaHelper.app`, a tiny Swift background agent that bridges EA's `qrc://` OAuth redirect from the user's browser into the bottle.
+Open-source replacement for the EA Desktop / Origin launcher. **Not** a macOS-native app — `maxima-cli` / `maxima-bootstrap` / `maxima-service` are Windows binaries that run **inside the CrossOver bottle** alongside Titanfall 2. The only piece that runs on the macOS host is `MaximaHelper.app`, a tiny Swift background agent that bridges EA's `qrc://` OAuth redirect from the user's browser into the bottle.
 
 The Draconis fork is tested *only* for Titanfall 2 on macOS via CrossOver. Other configurations may work but aren't supported here.
 
 ### Multi-OS compatibility principle
 
-Even though the active maintenance target is macOS/CrossOver, **the code must remain compatible with the other OSes upstream supports** — Linux (native + musl) and native Windows. Concretely:
+Even though the active maintenance target is macOS/CrossOver, **the code must remain compatible with the other OSes upstream supports** — Linux (native + musl) and native Windows:
 
 - All `#[cfg(unix)]`, `#[cfg(target_os = "linux")]`, `#[cfg(target_os = "macos")]`, `#[cfg(windows)]`, `#[cfg(not(windows))]` gates that exist in upstream must be preserved when editing the affected file.
 - Don't introduce hard `panic!()` or `unimplemented!()` on a code path that other OSes hit at runtime.
 - Don't add `#[cfg]`-gated dependencies that would skip building on other targets without a clear reason; if you need to, scope the gate as narrowly as possible.
-- `maxima-ui` and `maxima-tui` are **upstream graphical/TUI frontends**. They are built and shipped in this fork's Windows installer (`maxima.exe`, `maxima-tui.exe`) — the UI is wired up for future use even though Draconis currently invokes only the CLI side. On Linux they are excluded from CI because `maxima-ui` transitively pulls `rustix 0.37` via `accesskit_unix → zbus → async-io`, which doesn't build on modern nightly. The Windows target uses a different rustix path (no unix backend) and compiles fine, so we ship them there. **Do not delete them from the workspace.**
+- `maxima-ui` and `maxima-tui` are **upstream graphical / TUI frontends**. They are built and shipped in this fork's Windows installer (`maxima.exe`, `maxima-tui.exe`) — the UI is wired up for future use even though Draconis currently invokes only the CLI side. On Linux they are excluded from CI because `maxima-ui` transitively pulls `rustix 0.37` via `accesskit_unix → zbus → async-io`, which doesn't build on modern nightly. The Windows target uses a different rustix path (no unix backend) and compiles fine, so we ship them there. **Do not delete them from the workspace.**
 - The Linux CI job builds `maxima-cli` + `maxima-bootstrap` to make sure the cross-platform code paths actually compile on a non-macOS unix. The Windows CI job builds the three Draconis-relevant crates **and** the NSIS installer. If you touch `#[cfg(unix)]` or `#[cfg(windows)]` blocks, make sure those jobs still pass.
 
 In short: macOS/CrossOver is what we **test**, but the codebase is **portable** to the same targets upstream supports.
@@ -34,12 +36,16 @@ macOS host
 │                              (built from MaximaHelper/ in this repo)
 │
 └── CrossOver bottle (Wine prefix)
-    └── Program Files (x86)/Maxima/
-        ├── maxima-cli.exe         — auth + launch CLI
+    └── Program Files/Maxima/
+        ├── maxima-cli.exe         — auth + launch CLI (also runs `serve` mode)
         ├── maxima-bootstrap.exe   — link2ea:// / origin2:// / qrc:// handler
         ├── maxima-service.exe     — background service (DLL injection, registry setup)
-        └── Uninstall.exe          — NSIS uninstaller from MaximaSetup.exe
+        ├── maxima.exe             — upstream GUI (shipped, not yet wired into Draconis)
+        ├── maxima-tui.exe         — upstream TUI (shipped, not yet wired into Draconis)
+        └── Uninstall.exe          — NSIS uninstaller
 ```
+
+> **Path note:** Wine on macOS uses `Program Files`, not `Program Files (x86)`, so the install lands at `drive_c/Program Files/Maxima/`. The NSIS script uses `$PROGRAMFILES` which resolves correctly under both layouts.
 
 Build outputs:
 
@@ -52,21 +58,24 @@ Build outputs:
 ## Workspace inventory
 
 ```
-maxima-lib/          Core library — auth, launch, license, library, LSX, RTM,
-                     OOA, cloudsync. All other crates depend on this.
-maxima-cli/          CLI frontend — `maxima-cli launch <offer_id>`, login,
-                     listGames, getGameBySlug, cloudSync, etc. Entry point
-                     invoked by maxima-bootstrap.
+maxima-lib/          Core library — auth, launch, license, library, LSX,
+                     RTM, OOA, cloudsync, /authorize HTTP server, Steam
+                     install helpers. All other crates depend on this.
+maxima-cli/          CLI frontend — `maxima-cli launch <slug>` (legacy
+                     orchestrated launch), `maxima-cli serve` (passive
+                     auth-only mode), plus utility subcommands.
 maxima-bootstrap/    Protocol handler binary — registered for link2ea://,
                      origin2://, qrc:// in Wine's registry. Parses the URL,
-                     validates the offer_id, and shells out to maxima-cli.
+                     validates the offer_id, and either forwards to a
+                     running Maxima via HTTP /authorize or spawns
+                     maxima-cli launch as fallback.
 maxima-service/      Windows background service — registry setup, DLL
                      injection for KYBER. Windows-only (no-op `main` on
                      other targets). Not exercised in the Draconis flow.
-maxima-tui/          Terminal UI (upstream, ratatui-based). Not built by
-                     this fork's CI; preserved for upstream compat.
-maxima-ui/           Graphical UI (upstream, eframe/egui). Not built by
-                     this fork's CI; preserved for upstream compat.
+maxima-tui/          Terminal UI (upstream, ratatui-based). Shipped in the
+                     installer but not invoked by Draconis yet.
+maxima-ui/           Graphical UI (upstream, eframe/egui). Shipped in the
+                     installer but not invoked by Draconis yet.
 maxima-resources/    Shared assets — logo, translations.
 MaximaHelper/        Native macOS Swift app (build.sh + Info.plist +
                      Sources/main.swift). Bridges qrc:// from the host
@@ -79,120 +88,350 @@ images/              Repo images — banners, screenshots.
                      upstream).
 ```
 
-Key entry points to know:
+Key entry points:
 
-| File                                          | What it does                                              |
-|-----------------------------------------------|-----------------------------------------------------------|
-| `maxima-cli/src/main.rs`                      | CLI argparse + subcommand dispatch                        |
-| `maxima-bootstrap/src/main.rs`                | Protocol URL parser + validator + `maxima-cli launch` invocation |
-| `maxima-lib/src/core/launch.rs`               | `start_game()` — license, cloud sync, env vars, spawn     |
-| `maxima-lib/src/core/auth/login.rs`           | OAuth flow + `remid`-cookie fallback                      |
-| `maxima-lib/src/lsx/request/license.rs`       | Denuvo token fetch (env override: `MAXIMA_DENUVO_TOKEN`)  |
-| `maxima-lib/src/util/registry.rs`             | Windows registry: install check + protocol registration   |
-| `maxima-lib/src/unix/wine.rs`                 | Wine detection, registry setup via `regedit /S`           |
-| `maxima-lib/src/util/dll_injector.rs`         | KYBER DLL injection (Windows-only)                        |
-| `MaximaHelper/Sources/main.swift`             | NSApplicationDelegate that handles `qrc://` URLs          |
-| `installer/maxima-setup.nsi`                  | NSIS script, takes `/DBIN_DIR` for binary location        |
-
----
-
-## Deltas vs upstream (`ArmchairDevelopers/Maxima`)
-
-Cumulative summary of everything this fork carries on top of upstream `master`. Use this to understand what's macOS/Draconis-specific vs. plain bug fixes that could be sent upstream.
-
-### Infrastructure (macOS/Draconis-specific)
-
-- **`MaximaHelper/`** — new native Swift macOS background agent. Replaces the upstream AppleScript "helper" with a properly bundle-signable binary that LaunchServices will honor for `qrc://`. Universal binary (arm64 + x86_64), built with `swiftc` from `MaximaHelper/build.sh`. Bundle id `com.armchairdevelopers.maxima.helper`, listens for `qrc://` and forwards to `http://127.0.0.1:31033/auth?...` inside the bottle.
-- **`installer/maxima-setup.nsi` + `installer/build.sh`** — NSIS-based Windows installer that drops `maxima-cli.exe`, `maxima-bootstrap.exe`, `maxima-service.exe` into the bottle, registers `link2ea://`, `origin2://`, `qrc://` in Wine's registry, and adds start menu shortcuts. Cross-compiled on macOS via `mingw-w64` + `nsis`. Supports `/DBIN_DIR=<path>` override to point at any cargo target dir.
-- **`.github/workflows/release.yml`** — three-job release pipeline (macOS builds the helper, Windows builds the installer, Ubuntu collects artifacts and creates the GitHub release). Triggered on `v*` tags.
-- **`.github/workflows/build-ci.yml`** — push CI matrix (Linux/Windows/macOS) running the build + sanity checks on every branch.
-- **`.github/workflows/block-upstream-pr.yml`** — fires on `pull_request_target` and fails if anyone tries to open a PR against upstream from this fork by accident.
-
-### Code changes (could be sent upstream)
-
-- **Bootstrap protocol-handler hardening** (`maxima-bootstrap/src/main.rs`)
-  - `link2ea://` and `origin2://` validate the offer_id against `Origin.OFR.<digits>.<digits>` before invoking `maxima-cli`. Without this, a crafted URL like `link2ea://launchgame/--login=stolen_token` would have made `maxima-cli` interpret `--login` as a flag and bypass OAuth. **(Security)**
-  - `origin2://` now reads the real `offerIds` from the URL instead of the hardcoded `Origin.OFR.50.0002148` upstream had. Works for any EA title. **(Bug)**
-  - `qrc://` handler no longer panics on URLs missing `login_successful.html?` (was indexing `[1]` on a split vec without bounds checking). **(Bug)**
-  - `link2ea://` forwards `KYBER_INTERFACE_PORT` from the parent environment instead of hardcoding `3005`. **(Bug)**
-- **`maxima-cli launch` Steam-only owner passthrough** (`maxima-cli/src/main.rs`) — if EA library lookup fails but the slug already matches the EA offer ID pattern, pass it through with a warning instead of bailing. Lets Steam-only TF2 owners launch without linking accounts. **(Bug/UX)**
-- **`maxima-cli` `GetGameBySlug` subcommand was a no-op stub** — now actually prints slug/offer_id/content_id/display_name/installed. **(Bug)**
-- **`maxima-cli` exhaustive library lookup** — beyond `base_slug` and `base_offer`, scans every game's `slug`/`offer_id`/`product.id`/`product.origin_offer_id`/`offer.content_id`/`product.product.id`. **(Feature, brought in by upstream `9437bcd`.)**
-- **DLL injector wide-string support** (`maxima-lib/src/util/dll_injector.rs`) — switched `GetModuleHandleA`/`LoadLibraryA` to `GetModuleHandleW`/`LoadLibraryW` with UTF-16. Fixes injection on non-ASCII install paths. **(Bug, equivalent to upstream `fix/non-ascii-characters` branch.)**
-- **Wine registry setup** (`maxima-lib/src/unix/wine.rs`)
-  - Added `HKEY_LOCAL_MACHINE\Software\Origin` bare key (some EA titles check this path without the `Electronic Arts\` prefix).
-  - `regedit` runs with `/S` (silent) — no longer blocks on a confirmation dialog in Wine.
-  - stderr is now piped **and** read, so Wine errors surface in `WineError::Command` instead of being swallowed. **(Bug, partial subset of upstream `fix/wine-registry-setup` branch — the part of that branch that *disabled* `link2ea`/`origin2` protocol registration was intentionally NOT taken because this fork needs them.)**
-- **License env override** (`maxima-lib/src/lsx/request/license.rs`) — `MAXIMA_DENUVO_TOKEN` env var short-circuits the license request and returns the token directly. Useful for offline debugging. **(Feature, from upstream `feat/license-token-override`.)**
-- **License-update parity** (`maxima-lib/src/core/launch.rs`) — `OnlineOffline` mode now calls `needs_license_update()` before re-requesting, matching `Online` mode. Avoids redundant license server hits. **(Bug, from upstream `fix/license-update-online-offline`.)**
-
-### Removals
-
-- The original AppleScript-based macOS helper. Replaced by the Swift `MaximaHelper.app` above.
+| File                                          | What it does                                                       |
+|-----------------------------------------------|--------------------------------------------------------------------|
+| `maxima-cli/src/main.rs`                      | CLI argparse + subcommand dispatch (Launch, Serve, ListGames, …)   |
+| `maxima-bootstrap/src/main.rs`                | Protocol URL parser + auth-server probe + HTTP forward / spawn     |
+| `maxima-lib/src/auth_server.rs`               | `GET /` + `POST /authorize?offer_id=X` over plain TCP, port 13219  |
+| `maxima-lib/src/steam.rs`                     | `STEAM_GAMES` table, Steam install path discovery (registry + VDF) |
+| `maxima-lib/src/core/launch.rs`               | `start_game()` — license preflight, env vars, spawn the game       |
+| `maxima-lib/src/core/auth/login.rs`           | OAuth flow + `remid`-cookie fallback for macOS/CrossOver           |
+| `maxima-lib/src/core/mod.rs`                  | `Maxima` struct, `start_lsx` (with probe), `start_auth_server`     |
+| `maxima-lib/src/lsx/connection.rs`            | LSX socket lifecycle + ConnectionState (game_version, etc.)        |
+| `maxima-lib/src/lsx/service.rs`               | LSX TCP listener on port 3216 + accept loop                        |
+| `maxima-lib/src/lsx/request/license.rs`       | Denuvo token fetch (env override: `MAXIMA_DENUVO_TOKEN`)           |
+| `maxima-lib/src/util/registry.rs`             | Windows registry: install check + protocol registration            |
+| `maxima-lib/src/unix/wine.rs`                 | Wine detection, registry setup via `regedit /S`                    |
+| `maxima-lib/src/util/dll_injector.rs`         | KYBER DLL injection (Windows-only, UTF-16 paths)                   |
+| `MaximaHelper/Sources/main.swift`             | NSApplicationDelegate that handles `qrc://` URLs                   |
+| `installer/maxima-setup.nsi`                  | NSIS script, takes `/DBIN_DIR` for binary location                 |
 
 ---
 
-## CI
+## Current architecture: two launch paths
 
-Two workflows. Both use **Rust nightly** (required by `#![feature(slice_pattern)]` in `maxima-ui/src/main.rs` and similar feature gates elsewhere — this is inherited from upstream).
+A bottle running this fork can authenticate games **two ways**. They use the same underlying `maxima-lib` code; the difference is whether Maxima is treated as a long-running auth service or as an on-demand orchestrator.
 
-### `build-ci.yml` — push CI
-
-Fires on every push to any branch except `v*` tags. Matrix: Linux, Windows, macOS.
-
-| Job             | What it builds                                                                 |
-|-----------------|-------------------------------------------------------------------------------|
-| ubuntu-latest   | `cargo build --release --target x86_64-unknown-linux-musl -p maxima-cli -p maxima-bootstrap` (skips UI/TUI — see "Multi-OS compatibility" above) |
-| windows-latest  | `cargo build --release` (full workspace, produces all 5 binaries — `maxima-cli.exe`, `maxima-bootstrap.exe`, `maxima-service.exe`, `maxima-tui.exe`, `maxima.exe`), then `makensis /DBIN_DIR="..\target\release"` |
-| macos-latest    | `bash MaximaHelper/build.sh --output ./dist --no-register`, then sanity check that the bundle layout is healthy and `Info.plist` declares `qrc://` |
-
-What CI does **not** validate:
-
-- `maxima-ui` and `maxima-tui` — they pull `rustix 0.37.28` (via `accesskit_unix → zbus 3 → async-process 1.8 → async-io 1.13`) which doesn't build on modern nightly because of the `rustc_attrs` namespace reservation. Excluded from CI to keep the workflow green; the crates themselves are unchanged from upstream.
-- `MaximaSetup.exe` actually installing anything in a Wine bottle. We sanity-check size (>100KB) but never run it.
-- `MaximaHelper.app`'s code signature — the helper is shipped linker-signed (adhoc) and Draconis re-signs it at consumption time with `codesign --force --deep --sign -` to seal the Info.plist. See "Signing gotcha" below.
-
-### `release.yml` — tag release
-
-Fires on `v*` tags or `workflow_dispatch`. Three jobs:
-
-1. **`build-helper`** (macOS) — builds `MaximaHelper.app`, sanity-checks layout + Info.plist, zips with `--symlinks`, uploads `MaximaHelper.zip` artifact.
-2. **`build-installer`** (Windows) — builds the three Draconis-relevant crates, runs `makensis`, sanity-checks installer size >100KB, uploads `MaximaSetup.exe` + a separate `maxima-binaries-win64` artifact with the loose `.exe`s.
-3. **`release`** (Ubuntu) — downloads both artifacts and creates a non-prerelease GitHub release. Asset names are fixed: `MaximaHelper.zip` and `MaximaSetup.exe` (Draconis hardcodes these names in `Scripts/fetch-maxima-helper.sh` and `MaximaService.downloadAndInstall`, so do not rename).
-
-### `block-upstream-pr.yml`
-
-Trivial guard that fires on `pull_request_target` and fails if the PR base is `ArmchairDevelopers/Maxima`. Prevents accidentally sending fork-specific changes upstream.
-
----
-
-## End-to-end launch flow (the one that works)
-
-This is the **only** launch path that works on a Steam-owned, Wine-bottled TF2:
+### Path A: `serve` + bootstrap-forwarded launch  *(preferred for Draconis / Steam)*
 
 ```
-1. User clicks Launch in Draconis (vanilla mode)
-2. Draconis runs Titanfall2.exe directly via the backend driver
-   (CrossOver: cxstart --bottle X Titanfall2.exe).
-   For Northstar mode Draconis runs steam.exe -applaunch 1237970 -northstar
-   instead (NorthstarLauncher.exe is broken — see below).
-3. Titanfall2.exe wants EA auth, emits a URL:
-     link2ea://launchgame/Origin.OFR.50.0002694?platform=PCWIN&theme=...
-4. Wine routes link2ea:// to maxima-bootstrap.exe (registered by MaximaSetup).
-5. maxima-bootstrap parses the URL, takes segments[0] as the offer_id
-   (e.g. "Origin.OFR.50.0002694"), and shells out:
-     maxima-cli.exe launch <offer_id>
-6. maxima-cli authenticates with EA. If the user's EA login needs the
-   browser OAuth redirect, EA redirects to a qrc:// URL. The bottle's
-   browser hands it to macOS, where MaximaHelper.app is the registered
-   handler for qrc:// — it forwards the query back into the bottle by
-   hitting http://127.0.0.1:31033/auth?<query>. (maxima-service listens
-   there.)
-7. maxima-cli resolves the license for the offer_id and TF2 gets its
-   auth ticket. Game runs.
+┌──────────────────────────────────────────────────────────────────────┐
+│ Terminal 1: `maxima-cli.exe serve` (started by user / Draconis)      │
+│                                                                      │
+│   maxima-cli                                                         │
+│     ├── log in (cached refresh token, or OAuth on first run)         │
+│     ├── start_lsx()  →  TCP listen 127.0.0.1:3216                    │
+│     └── start_auth_server() → TCP listen 127.0.0.1:13219             │
+│            (HTTP: GET / + POST /authorize?offer_id=X)                │
+│                                                                      │
+│   maxima.playing() = None  (no game launched yet)                    │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ Steam / Draconis / user starts Titanfall2.exe                        │
+│                                                                      │
+│   Titanfall2.exe                                                     │
+│     ├── starts up                                                    │
+│     ├── DRM stub: "I need Origin / EA auth"                          │
+│     ├── emits link2ea://launchgame/Origin.OFR.50.0001456?…           │
+│     └── EXITS — expects the link2ea handler to re-launch it with     │
+│                  EA auth context (EAGenericAuthToken, EALsxPort, …)  │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ Wine routes link2ea:// to maxima-bootstrap.exe                       │
+│                                                                      │
+│   maxima-bootstrap                                                   │
+│     ├── parses URL, validates Origin.OFR.<digits>.<digits>           │
+│     ├── TCP probe 127.0.0.1:13219 with 200ms timeout                 │
+│     ├── alive → POST http://127.0.0.1:13219/authorize?offer_id=X     │
+│     │             [&cmd_params=...] with 60s timeout                 │
+│     └── exits (logs outcome to %TEMP%/maxima_execution.log)          │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ `serve`'s auth_server handles POST /authorize                        │
+│                                                                      │
+│   handle_authorize(offer_id="Origin.OFR.50.0001456")                 │
+│     ├── auth_storage.logged_in()  → must be true                     │
+│     ├── library.game_by_base_offer(offer_id)  → must be Some(…)      │
+│     ├── steam install-path lookup (path_override for Steam-          │
+│     │   installed TF2; falls back to offer.execute_path otherwise)   │
+│     └── launch::start_game(Online(offer_id), LaunchOptions{…})       │
+│           ├── request_and_save_license  → .dlf on disk               │
+│           ├── builds full EA-* env (EALsxPort, EAGenericAuthToken,   │
+│           │   EAAccessTokenJWS, EALaunchEAID, ContentId, …)          │
+│           ├── spawns bootstrap with base64(BootstrapLaunchArgs)      │
+│           │   → bootstrap runs Titanfall2.exe with that env          │
+│           └── maxima.playing = Some(ActiveGameContext)               │
+│     → returns 200 OK {"status":"ok"} after the spawn is in flight    │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ Re-launched TF2 connects to serve's LSX                              │
+│                                                                      │
+│   Connection::new(serve.maxima_arc)                                  │
+│     └── maxima.playing() = Some(ctx) (set by launch::start_game)     │
+│           → standard active-launch branch                            │
+│           → request_license does real OOA fetch on TF2's request     │
+│           → set_presence updates RTM                                 │
+│                                                                      │
+│   LSX handshake → Challenge → GetProfile → … → game runs             │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-For Northstar mode the same auth chain still applies after Steam launches the game.
+Key property: **`/authorize` does NOT just preflight the license — it
+also spawns the game.** TF2's Origin DRM stub emits `link2ea://` and
+exits, expecting whoever handles the URL to re-launch it. Bootstrap
+forwards to `/authorize`, which calls `launch::start_game`, which
+spawns a fresh TF2 with the full EA env in place. This is the same
+code path the upstream UI's "Play" button takes — `serve` just lets
+us reuse a single logged-in session across many launches instead of
+re-bootstrapping from scratch each time. **`maxima.playing` ends up
+`Some(...)` on the server, so the LSX flow goes down the standard
+active-launch branch (not catornot's external-LSX branch).**
+
+The `serve` loop also calls `maxima.update()` once per second, so
+when the game exits the server detects it (`update_playing_status`
+runs the cloud-save sync and clears `playing`), leaving the auth
+server ready for the next launch.
+
+### Path B: legacy `maxima-cli launch <slug>` *(fallback when `serve` isn't running)*
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ Anything emits link2ea:// (or user runs `maxima-cli launch X`)       │
+│                                                                      │
+│   bootstrap parses URL                                               │
+│     ├── TCP probe 127.0.0.1:13219                                    │
+│     └── DEAD → spawns `maxima-cli.exe launch <offer_id>`             │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ Fresh maxima-cli process: full orchestrated launch                   │
+│                                                                      │
+│   maxima-cli launch                                                  │
+│     ├── login (cached / OAuth)                                       │
+│     ├── start_lsx()                                                  │
+│     │     ├── probe 127.0.0.1:3216 — anything listening?             │
+│     │     │     YES (e.g. UI running) → skip our bind, defer to it   │
+│     │     │     NO → bind ourselves                                  │
+│     │     └── listening                                              │
+│     ├── resolve slug → offer_id (EA library / Origin pattern /       │
+│     │                            STEAM_GAMES table)                  │
+│     ├── set SteamAppId / SteamGameId env vars if slug is numeric     │
+│     ├── launch::start_game(LaunchOptions { steam_launch })           │
+│     │     ├── request_and_save_license → .dlf on disk                │
+│     │     ├── set EAEntitlementSource / EAExternalSource /           │
+│     │     │   EALaunchOwner = "Steam" or "EA" per steam_launch       │
+│     │     ├── spawn bootstrap with base64(BootstrapLaunchArgs)       │
+│     │     │   bootstrap then runs the game executable                │
+│     │     └── maxima.playing = Some(ActiveGameContext)               │
+│     └── poll loop until playing becomes None (game exits)            │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+Path B is what upstream Maxima does. It still works for the cases where the game **isn't** running yet at the moment `link2ea://` fires (e.g. a modern EA-Desktop title launched via a desktop shortcut that hands the launch off to EA Desktop). For Titanfall 2 launched via Steam it's the wrong path — TF2 is already running and waiting — but it's preserved as the bootstrap fallback so users who never start `serve` still get a working launch.
+
+### Why the split
+
+Before this rewrite, every `link2ea://` invocation **fully re-bootstrapped Maxima**:
+
+1. Steam launches `Titanfall2.exe` directly (Steam does NOT emit link2ea here for TF2 — old game, predates EA Desktop).
+2. TF2 starts, emits `link2ea://launchgame/Origin.OFR.50.0001456?platform=PCWIN`, and exits expecting a relaunch.
+3. Wine → bootstrap → spawns a fresh `maxima-cli launch …` process.
+4. That maxima-cli re-does OAuth login (or refreshes the cached token), restarts LSX, etc., then calls `launch::start_game` which spawns Titanfall2.exe again with EA env vars.
+5. Works in principle, but: every launch pays the full Maxima startup cost; and on macOS/CrossOver the surface area kept tripping different failure modes (LSX port race, console-visibility, file-corruption-after-PI).
+
+Path A centralizes the auth-provider role in a long-running `serve` process. When `link2ea://` fires, bootstrap doesn't restart Maxima — it forwards to the running `serve` over HTTP, which already has cached login state. `serve` then calls the same `launch::start_game` path the upstream UI does (so the EA env vars end up on the re-spawned TF2 identically), but without paying for a fresh `maxima-cli` process startup each time.
+
+**An earlier draft of Path A skipped the game-spawn entirely** — the theory was that TF2 stayed alive polling LSX after emitting link2ea, so we just needed the auth server to refresh `.dlf` and TF2's polling would reconnect. Empirically TF2 *exits* after emitting link2ea (it expects EA Desktop to relaunch it), so a preflight-only `/authorize` leaves the game closed and the user sees "TF2 opens for a moment and then closes". The current design (spawn the game from `/authorize`) is the corrected version, aligned with upstream issue [#27](https://github.com/ArmchairDevelopers/Maxima/issues/27) ("Protocol handler should then use the obtained parameters to launch the game process").
+
+---
+
+## URI protocols Maxima owns
+
+| Scheme       | Registered by                                            | Where         | Handler does                                                          |
+|--------------|----------------------------------------------------------|---------------|-----------------------------------------------------------------------|
+| `qrc://`     | `MaximaHelper.app`                                       | macOS host    | GETs `http://127.0.0.1:31033/auth?<query>` inside the bottle           |
+| `qrc://`     | `maxima-bootstrap.exe`                                   | Wine registry | Same target as above (host handler wins when Draconis is installed)   |
+| `link2ea://` | `maxima-bootstrap.exe`                                   | Wine registry | Probe + HTTP forward to `/authorize`, else spawn `maxima-cli launch`  |
+| `origin2://` | `maxima-bootstrap.exe`                                   | Wine registry | Same as `link2ea://`. Reads real `offerIds` (no longer hardcoded BF2) |
+
+The `qrc://` listener on `127.0.0.1:31033` is **only up during an interactive OAuth login** (inside `core/auth/login.rs::begin_oauth_login_flow`). After the login completes that listener exits. It is **not** the same server as the `/authorize` HTTP endpoint, which lives on port `13219` and runs for the lifetime of `maxima-cli serve` / a UI session.
+
+MaximaHelper.app's bundle id is `com.armchairdevelopers.maxima.helper`. **The Draconis fork's Info.plist must remain signed-sealed** — see "Signing gotcha" below.
+
+---
+
+## EA identifiers cheat sheet
+
+| Thing                     | TF2 value                               |
+|---------------------------|-----------------------------------------|
+| Steam App ID              | `1237970` (resolved via `STEAM_GAMES` table when EA library lookup fails) |
+| EA Origin offer id        | `Origin.OFR.50.0001456` (real TF2 offer id, NOT `0002694` / `0002148` which are Apex / Battlefront 2) |
+| MaximaHelper bundle id    | `com.armchairdevelopers.maxima.helper`  |
+| MaximaHelper qrc port     | `127.0.0.1:31033` inside Wine            |
+| LSX port                  | `127.0.0.1:3216` (override via `MAXIMA_LSX_PORT`)            |
+| Authorize HTTP port       | `127.0.0.1:13219` (override via `MAXIMA_AUTHORIZE_PORT`)     |
+
+---
+
+## Deltas vs upstream `ArmchairDevelopers/Maxima`
+
+Everything below is on top of upstream `master` at `cbde5f0`. Categorized so we can tell what's macOS-specific from what could go upstream.
+
+### 1. New infrastructure (macOS / Draconis-specific)
+
+- **`MaximaHelper/`** — native Swift macOS background agent. Replaces upstream's AppleScript helper with a bundle-signable binary LaunchServices honors for `qrc://`. Universal arm64 + x86_64, built via `swiftc` from `MaximaHelper/build.sh`. Bundle id `com.armchairdevelopers.maxima.helper`; listens for `qrc://`, forwards query to `http://127.0.0.1:31033/auth?<query>` inside the bottle.
+- **`installer/`** — NSIS-based Windows installer (`maxima-setup.nsi`) and cross-compile script (`build.sh`). Drops `maxima-cli.exe`, `maxima-bootstrap.exe`, `maxima-service.exe`, `maxima.exe`, `maxima-tui.exe` into the bottle. Registers `link2ea://` / `origin2://` / `qrc://` in Wine's registry with backup/restore semantics for the pre-Maxima state. Cross-compiled on macOS via `mingw-w64` + `nsis`. Supports `/DBIN_DIR=<path>` to override the cargo target dir.
+- **`.github/workflows/`** — three workflows: `build-ci.yml` (push CI matrix Linux/Windows/macOS), `release.yml` (tag-triggered: builds the helper on macOS + the installer on Windows + assembles the GitHub release on Ubuntu), `block-upstream-pr.yml` (prevents accidentally PR-ing fork-specific changes upstream).
+- **`.cargo/config.toml`** + **`rust-toolchain.toml`** — nightly pin (required by upstream's `#![feature(slice_pattern)]` etc.) and MinGW cross-compiler hookup.
+
+### 2. Code changes (most of these could go upstream)
+
+#### Bootstrap protocol handlers (`maxima-bootstrap/src/main.rs`)
+- Implemented `link2ea://` (was `todo!()` upstream).
+- `origin2://` reads real `offerIds` from the URL instead of hardcoded `Origin.OFR.50.0002148`. **(Generic — useful for every EA title.)**
+- `qrc://` no longer panics on URLs missing `login_successful.html?` (was indexing `[1]` on a split vec without bounds checking).
+- Both `link2ea` and `origin2` validate `offer_id` against `Origin.OFR.<digits>.<digits>` or `<1..=10 digits>` before invoking anything — defends against `link2ea://launchgame/--login=stolen_token` flag injection.
+- **NEW (Session 2026-05-18):** Both protocols probe `127.0.0.1:13219` and forward via HTTP `POST /authorize` when a Maxima auth server is running. Falls back to spawning `maxima-cli launch` only if no server answers.
+- `KYBER_INTERFACE_PORT` forwarded from parent env (was hardcoded `3005`).
+- Non-zero exits from spawned `maxima-cli` are surfaced as errors (used to be swallowed silently).
+- All protocol-handler invocations append a line to `%TEMP%/maxima_execution.log` — bootstrap is a GUI-subsystem binary with no console, this is its only feedback channel.
+
+#### CLI runtime (`maxima-cli/src/main.rs`)
+- **NEW (Session 2026-05-16):** `Mode::Serve { no_rtm }` subcommand — passive auth-only mode. Starts LSX + auth_server, optionally logs in to RTM for friends presence, then parks. See "Path A" above.
+- **NEW:** Console + stdio rewire prologue so the CLI is visible when spawned by GUI-subsystem `maxima-bootstrap`. Calls `AllocConsole()` if no console attached, then `SetStdHandle(STD_*_HANDLE, CreateFileA("CONOUT$"|"CONIN$"))` so Rust's `println!` actually reaches the new window.
+- **NEW:** Panic hook writing to `%LOCALAPPDATA%\Maxima\Logs\maxima-cli.panic.log` before unwinding — catches panics that fire before the regular logger is initialized.
+- **NEW:** `main()` is plain `fn`, builds tokio runtime manually with `Builder::new_multi_thread().enable_all()`. The previous `#[tokio::main]` macro built the runtime before user code, which defeated the panic hook.
+- **`Mode::Launch`** (legacy path B) now:
+  - Resolves slug via EA library lookup, then EA-offer passthrough, then `STEAM_GAMES` table fallback for Steam-only owners with unlinked accounts.
+  - Sets `SteamAppId` / `SteamGameId` / `SteamClientLaunch` / `SteamPath` env vars when slug matches `<1..=10 digits>` (Steam App ID pattern).
+  - Auto-injects `-noOriginStartup -multiple` launch args for Steam-launched games (Wine/Origin compatibility).
+  - Resolves Steam install path via `lookup_steam_game` + `resolve_steam_install_path` (registry + `libraryfolders.vdf` parse) when no `--game-path` is given.
+- `Mode::GetGameBySlug` actually prints slug/offer_id/content_id/display_name/installed (was a no-op stub upstream).
+
+#### Steam helpers — new module (`maxima-lib/src/steam.rs`)
+- Lifted from `maxima-cli/src/main.rs` so the auth server can use it too. Contains:
+  - `STEAM_GAMES` table (currently just TF2: app id `1237970` → `Origin.OFR.50.0001456`, `Titanfall2/Titanfall2.exe`).
+  - `lookup_steam_game(steam_app_id)`, `lookup_steam_game_by_offer(origin_offer_id)` (reverse lookup, used by `auth_server`).
+  - `resolve_steam_install_path(SteamGameEntry)` — Steam install discovery: registry (`HKLM\SOFTWARE\(Wow6432Node\)Valve\Steam\InstallPath`), then `Program Files (x86)\Steam` / `Program Files\Steam` defaults, then `libraryfolders.vdf` parse. **Windows only**; returns `None` on other targets (Wine builds use the cfg(windows) path).
+  - `EA_OFFER_ID_PATTERN`, `STEAM_APP_ID_PATTERN` regexes.
+
+#### Authorize HTTP server — new module (`maxima-lib/src/auth_server.rs`)
+- Plain `tokio::net::TcpListener` + manual HTTP parsing (same pattern `core/auth/login.rs` uses for the OAuth callback — avoids pulling in `actix-web`).
+- `GET /` → `200 OK` body `maxima-auth-server`. Bootstrap's liveness probe.
+- `POST /authorize?offer_id=<id>` → resolve offer, refresh `.dlf` via `request_and_save_license`, return `200 OK {"status":"ok"}`. **Does not spawn the game** — that's the architectural distinction from `Mode::Launch`.
+- Errors map to HTTP status: `400` missing offer_id, `401` not logged in, `404` offer not in library or install path not found, `502` upstream EA / library failure.
+- Default port `13219`; override with `MAXIMA_AUTHORIZE_PORT`.
+
+#### LSX server cooperation (`maxima-lib/src/core/mod.rs::Maxima::start_lsx`)
+- Probes `127.0.0.1:<port>` synchronously with 200ms timeout before binding. If a server is already listening (e.g. `serve` in another window, or the UI), logs and returns without trying to bind.
+- Without this, the bootstrap-spawned `maxima-cli launch` would also bind 3216 (under Wine this can race the existing `serve` listener and steal the game's connection).
+
+#### LSX response handlers (`maxima-lib/src/lsx/`)
+- **`request/license.rs`** — `playing()=None` case no longer panics on `unwrap()`. Returns an empty `attr_License` so the game falls back to its on-disk `.dlf` (which `/authorize` deposited just before TF2's polling reconnected).
+- **`request/profile.rs::handle_set_presence_request`** — `playing()=None` returns `ErrorSuccess` without trying to broadcast presence (catornot patch).
+- **`request/profile.rs::handle_profile_request`** — `attr_IsSubscriber` / `attr_IsSteamSubscriber` reflect `env::var("SteamAppId").is_ok()`. (Empirical: toggling this didn't fix the File-corruption symptom; left in because it's at least less wrong than hardcoded `false` when running under Steam.)
+- **`request/challenge.rs`** — captures `Version` and `Title` from the client's challenge response into `ConnectionState`.
+- **`request/game.rs::handle_all_game_info_request`** — `InstalledVersion` / `AvailableVersion` / `DisplayName` echo the captured Challenge values (fallback to upstream's hardcoded `1.0.1.3` / `Titanfall® 2 Deluxe Edition` if Challenge hasn't arrived yet). `EntitlementSource` is still hardcoded `"STEAM"` — see "Pending code quality items" below.
+- **`request/progressive_install.rs`** — echoes `attr_ItemId` from the request instead of hardcoded `Origin.OFR.50.0001456`.
+- **`connection.rs::Connection::new`** — accepts connections when `maxima.playing()=None` instead of rejecting with `LSXConnectionError::GameContext`. Ported from `catornot/Maxima@patch-external-lsx` (upstream PR #42 by p0358). PID lookup / Kyber injection is skipped in that branch since there's no `ActiveGameContext` to read from.
+
+#### Launch & env vars (`maxima-lib/src/core/launch.rs`)
+- `LaunchOptions.steam_launch: bool` flips `EAEntitlementSource` / `EAExternalSource` / `EALaunchOwner` between `"EA"` and `"Steam"`. (Empirical: didn't fix File-corruption either; kept in because it's at least consistent with the surrounding env when launching via Steam.)
+- `LaunchMode::Offline(_)` implemented (was `todo!()`). Looks up the offer, requires `path_override`, sets `EALaunchOfflineMode=true`. Draconis doesn't expose this yet.
+- `path_override` skips `offer.is_installed()` (covers Steam-installed games EA Desktop has no record of).
+- `LaunchMode::OnlineOffline(_)` now calls `needs_license_update()` before re-requesting, matching the `Online` branch. From upstream `fix/license-update-online-offline`.
+
+#### Auth / login (`maxima-lib/src/core/auth/login.rs`)
+- `begin_oauth_login_flow` uses `tokio::select!` between the TCP listener and stdin. Users whose browser can't emit `qrc://` (macOS Safari blocking custom URL schemes, Wine-bottle browsers without registered handlers, etc.) can paste either a full OAuth redirect URL or just a `remid` cookie value and the flow extracts the auth code via a redirect probe.
+- Multi-line on-screen hint walks the user through copying the `remid` cookie from EA's DevTools storage.
+
+#### Wine / Windows-side (`maxima-lib/src/unix/wine.rs`, `util/registry.rs`)
+- `setup_wine_registry()` adds a bare `HKLM\Software\Origin` key (without `Electronic Arts\` prefix) that some EA titles check.
+- `regedit` runs with `/S` (silent) so it doesn't block on a confirmation dialog under Wine.
+- stderr is piped and concatenated into `WineError::Command` output instead of being swallowed.
+- (Intentionally **not** taken from upstream `fix/wine-registry-setup`: the part that *disabled* `link2ea`/`origin2` protocol registration. We need them.)
+
+#### DLL injector (`maxima-lib/src/util/dll_injector.rs`)
+- `GetModuleHandleA` / `LoadLibraryA` → `GetModuleHandleW` / `LoadLibraryW` with UTF-16. Fixes injection on non-ASCII install paths. Ported from upstream `fix/non-ascii-characters`. Windows-only file; benefits native Windows users equally.
+
+#### Logging (`maxima-lib/src/util/log.rs`)
+- `init_logger_named(name)` variant — names the per-process log file (`maxima-cli.log` vs `maxima-bootstrap.log`).
+- All logger output is mirrored to a file in addition to stdout. Default: `%LOCALAPPDATA%\Maxima\Logs\<name>.log` on Windows, `$XDG_DATA_HOME/maxima/logs/<name>.log` on unix. Override via `MAXIMA_LOG_FILE`. Each session writes a `===== maxima log session opened (pid=…) =====` header.
+
+#### Env-driven overrides
+- `MAXIMA_DENUVO_TOKEN` — short-circuits `RequestLicense` in the LSX handler and returns this token verbatim. Useful for offline debugging.
+- `MAXIMA_LSX_PORT` — overrides the LSX listen port (default 3216).
+- `MAXIMA_AUTHORIZE_PORT` — overrides the authorize HTTP port (default 13219).
+- `MAXIMA_LOG_FILE` — overrides the file logger destination.
+- `MAXIMA_DISABLE_WINE_VERIFICATION` — skips the Wine / runtime version check at startup.
+
+### 3. Removed from upstream
+- The original AppleScript-based macOS helper. Replaced by `MaximaHelper/Sources/main.swift`.
+- Stale `todo.md` / `changes.md` tracking files.
+
+---
+
+## End-to-end flow (concrete walkthrough, Draconis vanilla + Steam-installed TF2)
+
+This is the **currently recommended** flow on macOS/CrossOver. Use Path A from "Current architecture: two launch paths" above as the reference; this is the concrete instantiation.
+
+```
+1. User clicks Launch in Draconis (vanilla mode).
+2. Draconis runs Titanfall2.exe directly via cxstart --bottle "Titanfall 2".
+   (For Northstar mode Draconis runs `steam.exe -applaunch 1237970
+   -northstar` instead; the same authentication chain still applies
+   once Steam starts the game with the Northstar hooks loaded.)
+3. Titanfall2.exe starts. Its Origin DRM stub checks for a running EA
+   launcher. None found, so it emits the protocol URL:
+     link2ea://launchgame/Origin.OFR.50.0001456?platform=PCWIN&theme=tf2
+   TF2 then begins polling 127.0.0.1:3216 (its hardcoded LSX port) and
+   stays alive until something answers.
+4. Wine routes the link2ea:// URL to maxima-bootstrap.exe.
+5. maxima-bootstrap parses the URL, validates the offer_id shape, then:
+     5a. Probes 127.0.0.1:13219 (auth server). 200ms timeout.
+     5b. If alive → POSTs http://127.0.0.1:13219/authorize?offer_id=…
+         with a 60s timeout, then exits.
+     5c. If dead → spawns `maxima-cli.exe launch Origin.OFR.50.0001456`
+         (the upstream Path B behavior) and waits for it to finish.
+6. (Path A) The running maxima-cli serve handles the authorize POST:
+     - Confirms it's still logged in (auth_storage.logged_in()).
+     - Confirms the offer is in the EA library.
+     - Resolves the Steam install path for path_override
+       (lookup_steam_game_by_offer + resolve_steam_install_path).
+     - Calls launch::start_game(LaunchMode::Online(offer_id), …):
+         · request_and_save_license → writes …/EA Services/License/
+           <content_id>.dlf
+         · sets EALsxPort / EAGenericAuthToken / EAAccessTokenJWS /
+           EALaunchEAID / ContentId / … env vars
+         · spawns bootstrap (Mode::Launch) which spawns Titanfall2.exe
+           with that env
+         · maxima.playing = Some(ActiveGameContext)
+     - Returns 200 OK to the original bootstrap (the one that handled
+       the link2ea:// URL). That bootstrap exits.
+7. The newly-spawned TF2 has the full EA env and connects to LSX on
+   127.0.0.1:3216 — serve's listener. Connection::new sees
+   playing()=Some(ctx), takes the standard active-launch branch.
+8. LSX handshake completes:
+     Challenge → ChallengeAccepted (captures game version + title)
+     GetConfig / GetProfile / GetSetting / GetGameInfo /
+     GetAllGameInfo / IsProgressiveInstallationAvailable / …
+     RequestLicense → real OOA fetch, returns Denuvo token.
+9. TF2 has its license, has its LSX session, runs normally.
+10. When the game eventually exits, serve's update_playing_status
+    notices the bootstrap child returned, runs the cloud-save sync
+    (if enabled and the offer has cloud saves), and clears
+    maxima.playing. serve stays running for the next launch.
+```
+
+When `serve` is NOT running, step 5 takes branch 5c and a fresh `maxima-cli launch` process re-does the full bootstrap (login + LSX + launch::start_game). Same end state — the game is spawned with EA env vars — but every link2ea pays the full Maxima startup cost.
+
+**Operationally: start `serve` before launching TF2.** Both paths end in `launch::start_game`; `serve` just amortizes login across launches.
 
 ---
 
@@ -200,52 +439,17 @@ For Northstar mode the same auth chain still applies after Steam launches the ga
 
 `NorthstarLauncher.exe` in the TF2 directory **hard-codes a Win32 attempt to start Origin** (via a path to `Origin.exe`, not via `origin2://`). On macOS / Wine there is no Origin install, and our `origin2://` handler doesn't get a chance to intercept. Result: `[*] Starting Origin... [*] Waiting for Origin...` hangs forever.
 
-Draconis works around this by launching Northstar mode via Steam's `-northstar` launch option (`steam.exe -applaunch 1237970 -northstar`), so Steam invokes `Titanfall2.exe` with the flag and Northstar's `wsock32` proxy hooks load. NorthstarLauncher.exe is never invoked.
+Draconis works around this by launching Northstar mode via Steam's `-northstar` launch option (`steam.exe -applaunch 1237970 -northstar -noOriginStartup -multiple`), so Steam invokes `Titanfall2.exe` with the flag and Northstar's `wsock32` proxy hooks load. `NorthstarLauncher.exe` is never invoked.
 
 If you want to fix Northstar to work standalone here, the right place is to make Northstar's "start Origin" step use `origin2://` (so maxima-bootstrap can catch it). That's an upstream Northstar issue, not Maxima's.
 
----
-
-## maxima-cli launch — Steam-only owner passthrough (FIXED)
-
-`maxima-cli launch <slug>` looks up the slug against the user's owned EA library before calling the license server:
-
-```rust
-// maxima-cli/src/main.rs — Mode::Launch block
-// Tries: base_slug, base_offer, then exhaustive match across all known ID fields.
-// If nothing matches AND the slug looks like a valid EA offer ID (Origin.OFR.X.Y),
-// passes it through directly with a warning and lets EA's license server decide.
-// Otherwise bails with a descriptive error pointing to https://www.ea.com.
-```
-
-**Previously broken for Steam-only owners** whose EA account doesn't have TF2 linked — `maxima-cli` would log in fine but bail with `"No owned offer found for 'Origin.OFR.50.0002694'"`. This is now fixed: if the slug matches `Origin\.OFR\.\d+\.\d+` and the library lookup fails, it falls through with a warning instead of an error.
-
-The user-side fix (linking Steam ↔ EA at https://www.ea.com) still removes the warning and is recommended for full LSX functionality.
-
-There's also `--login <token>` mode (`maxima-cli launch <content_id> --login ...`) which treats the slug as a content id and skips the library lookup entirely — but it disables online LSX and uses a dummy persona name.
-
-Stale Draconis releases (≤ v0.3.9) called `maxima-cli launch 1237970` directly, where `1237970` is the *Steam* app id, not an EA slug — the library lookup obviously didn't match anything. v0.4.0 of Draconis stopped doing this: the only path that reaches `maxima-cli` is via `link2ea://`, where the slug is the real EA offer id.
-
----
-
-## URI protocols Maxima owns
-
-| Scheme       | Registered by        | Where         | Handler does                                             |
-|--------------|----------------------|---------------|----------------------------------------------------------|
-| `qrc://`     | `MaximaHelper.app`   | macOS host    | GETs `http://127.0.0.1:31033/auth?<query>` inside bottle |
-| `qrc://`     | maxima-bootstrap.exe | Wine registry | same target (host handler is preferred when Draconis runs)|
-| `link2ea://` | maxima-bootstrap.exe | Wine registry | extracts offer_id, runs `maxima-cli launch <offer_id>`   |
-| `origin2://` | maxima-bootstrap.exe | Wine registry | extracts real `offerIds` from URL, runs `maxima-cli launch <offer_id>` |
-
-**Note on `origin2://`:** The upstream handler hardcoded `Origin.OFR.50.0002148` (Star Wars Battlefront 2). This fork now reads the `offerIds` query parameter from the URL and uses that, making `origin2://` generic across all EA games.
-
-MaximaHelper.app's bundle id is `com.armchairdevelopers.maxima.helper`. **The Draconis fork's Info.plist must remain signed-sealed** — see signing issue below.
+Credit to [catornot](https://github.com/catornot) for documenting the `-noOriginStartup` requirement and contributing the external-LSX patch in the first place.
 
 ---
 
 ## Signing gotcha (relevant when packaging MaximaHelper)
 
-The upstream zipped `MaximaHelper.app` is shipped **linker-signed only**:
+The upstream zipped `MaximaHelper.app` ships **linker-signed only**:
 
 ```
 codesign -dv MaximaHelper.app
@@ -267,14 +471,37 @@ If you ever change how `MaximaHelper.app` is signed at release time in this repo
 
 ---
 
-## EA identifiers cheat sheet
+## CI
 
-| Thing                     | TF2 value                               |
-|---------------------------|-----------------------------------------|
-| Steam App ID              | `1237970` (Steam-only — do **not** pass to maxima-cli) |
-| EA Origin offer id        | `Origin.OFR.50.0002694` (extracted from link2ea://)     |
-| MaximaHelper bundle id    | `com.armchairdevelopers.maxima.helper`  |
-| MaximaHelper qrc port     | `127.0.0.1:31033` inside Wine            |
+Two workflows. Both use **Rust nightly** (required by `#![feature(slice_pattern)]` in `maxima-ui/src/main.rs` and similar feature gates elsewhere — inherited from upstream).
+
+### `build-ci.yml` — push CI
+
+Fires on every push to any branch except `v*` tags. Matrix: Linux, Windows, macOS.
+
+| Job             | What it builds                                                                                                          |
+|-----------------|-------------------------------------------------------------------------------------------------------------------------|
+| ubuntu-latest   | `cargo build --release --target x86_64-unknown-linux-musl -p maxima-cli -p maxima-bootstrap` (skips UI/TUI)             |
+| windows-latest  | `cargo build --release` (full workspace → all 5 binaries), then `makensis /DBIN_DIR="..\target\release"`                |
+| macos-latest    | `bash MaximaHelper/build.sh --output ./dist --no-register`, then sanity check that `Info.plist` declares `qrc://`        |
+
+What CI does **not** validate:
+
+- `maxima-ui` / `maxima-tui` on Linux — pull `rustix 0.37` via `accesskit_unix → zbus 3 → async-process 1.8 → async-io 1.13`, which doesn't build on modern nightly because of `rustc_attrs` namespace reservation.
+- `MaximaSetup.exe` actually installing into a Wine bottle. We sanity-check size (>100KB) but never run it.
+- `MaximaHelper.app`'s code signature — it ships linker-signed (adhoc) and Draconis re-signs it at consumption time with `codesign --force --deep --sign -`.
+
+### `release.yml` — tag release
+
+Fires on `v*` tags or `workflow_dispatch`. Three jobs:
+
+1. **`build-helper`** (macOS) — builds `MaximaHelper.app`, sanity-checks layout + Info.plist, zips with `--symlinks`, uploads `MaximaHelper.zip`.
+2. **`build-installer`** (Windows) — builds the full workspace, runs `makensis`, sanity-checks installer size > 100KB, uploads `MaximaSetup.exe` + a separate `maxima-binaries-win64` artifact with the loose `.exe`s.
+3. **`release`** (Ubuntu) — downloads both artifacts and creates a non-prerelease GitHub release. Asset names are fixed: `MaximaHelper.zip` and `MaximaSetup.exe` (Draconis hardcodes these names in `Scripts/fetch-maxima-helper.sh` and `MaximaService.downloadAndInstall`, so do not rename).
+
+### `block-upstream-pr.yml`
+
+Trivial guard that fires on `pull_request_target` and fails if the PR base is `ArmchairDevelopers/Maxima`. Prevents accidentally sending fork-specific changes upstream.
 
 ---
 
@@ -316,16 +543,42 @@ Common offenders: mounted `Draconis-vX.dmg` (`/Volumes/Draconis [N]/...`), Xcode
 
 ### Is maxima-bootstrap actually being invoked?
 
-Inside the bottle, maxima-bootstrap appends to `%TEMP%/maxima_execution.log` on every invocation (see `maxima-bootstrap/src/main.rs`). On a CrossOver bottle that's typically `~/Library/Application Support/CrossOver/Bottles/<bottle>/drive_c/users/crossover/Temp/maxima_execution.log`. If this file isn't growing when a launch is attempted, the protocol handler registration is broken and TF2's `link2ea://` is going nowhere.
+Inside the bottle, maxima-bootstrap appends to `%TEMP%/maxima_execution.log` on every invocation. On a CrossOver bottle that's typically `~/Library/Application Support/CrossOver/Bottles/<bottle>/drive_c/users/crossover/Temp/maxima_execution.log`. If this file isn't growing when a launch is attempted, the protocol handler registration is broken and TF2's `link2ea://` is going nowhere.
+
+### Is the auth server up? Did bootstrap forward?
+
+When `serve` is running, the maxima-cli log file (`%LOCALAPPDATA%\Maxima\Logs\maxima-cli.log`) should contain `Authorize HTTP server listening on 127.0.0.1:13219`. When bootstrap forwards a request, the `maxima_execution.log` line is:
+
+```
+Forwarding link2ea offer=Origin.OFR.50.0001456 to auth server at http://127.0.0.1:13219/authorize?offer_id=…
+Auth server accepted link2ea authorize for Origin.OFR.50.0001456 (body: {"status":"ok"})
+```
+
+If you see `No auth server on 127.0.0.1:13219; falling back to maxima-cli launch …` instead, `serve` isn't running (or it crashed) and bootstrap fell through to Path B.
+
+### Quick port probe from inside the bottle
+
+```cmd
+:: Bottle PowerShell / cmd
+Test-NetConnection 127.0.0.1 -Port 3216    :: LSX
+Test-NetConnection 127.0.0.1 -Port 13219   :: Authorize HTTP
+```
+
+Or from the macOS host (works because Wine forwards ports to the host loopback):
+
+```bash
+nc -zv 127.0.0.1 3216
+nc -zv 127.0.0.1 13219
+```
 
 ### Steam vs vanilla launch contract (Draconis ↔ here)
 
 Draconis v0.4.0+:
 
 - Vanilla launch: runs `Titanfall2.exe` directly. The binary's own Steam DRM stub self-relaunches via `steam://run/1237970` if needed; the EA path triggers `link2ea://` which reaches maxima-bootstrap.
-- Northstar launch: runs `steam.exe -applaunch 1237970 -novid -northstar`. Steam routes through TF2, the Northstar hooks load, EA auth still goes via link2ea:// → maxima-bootstrap → maxima-cli.
+- Northstar launch: runs `steam.exe -applaunch 1237970 -novid -northstar -noOriginStartup -multiple`. Steam routes through TF2, the Northstar hooks load, EA auth still goes via link2ea:// → maxima-bootstrap.
 
-Draconis never calls `maxima-cli.exe` directly anymore. If you see `maxima-cli launch 1237970` in any log, it's from an old Draconis (≤ v0.3.9).
+Draconis never calls `maxima-cli.exe` directly. If you see `maxima-cli launch 1237970` in any log, it's from an old Draconis (≤ v0.3.9) — they shouldn't exist in v0.4.0+ flows.
 
 ---
 
@@ -341,7 +594,7 @@ GET https://api.github.com/repos/AA-EION/Maxima-Draconis/releases/latest
 → xcodegen + xcodebuild bundles it into Draconis.app
 ```
 
-So a new MaximaHelper release flows into the next Draconis build automatically as long as the asset is named `MaximaHelper.zip` and `MaximaSetup.exe` (for the in-bottle installer).
+A new MaximaHelper release flows into the next Draconis build automatically as long as the assets are named `MaximaHelper.zip` and `MaximaSetup.exe`.
 
 Tag the release as `vX.Y.Z` (lowercase v). The bottle installer is downloaded by Draconis on demand via `MaximaService.downloadAndInstall` — it fetches the latest release's `MaximaSetup.exe`, copies it into the bottle's `drive_c/windows/Temp/`, runs it silently with `/S`.
 
@@ -350,11 +603,22 @@ Tag the release as `vX.Y.Z` (lowercase v). The bottle installer is downloaded by
 ## Working on this repo
 
 ```bash
-bash MaximaHelper/build.sh           # build the macOS helper
-bash installer/build.sh              # cross-compile MaximaSetup.exe (mingw + nsis)
-cargo build --release --target x86_64-pc-windows-gnu -p maxima-cli
-cargo build --release --target x86_64-pc-windows-gnu -p maxima-bootstrap
-cargo build --release --target x86_64-pc-windows-gnu -p maxima-service
+# Cross-compile a single binary for Windows
+cargo +nightly build --release --target x86_64-pc-windows-gnu -p maxima-cli
+cargo +nightly build --release --target x86_64-pc-windows-gnu -p maxima-bootstrap
+cargo +nightly build --release --target x86_64-pc-windows-gnu -p maxima-service
+
+# Or build the full workspace (UI + TUI + lib + all)
+cargo +nightly build --release --target x86_64-pc-windows-gnu
+
+# Build the macOS helper
+bash MaximaHelper/build.sh
+
+# Cross-compile the full installer (mingw + nsis)
+bash installer/build.sh                  # → installer/MaximaSetup.exe
+
+# Quick cargo check (faster than build) — useful during refactors
+cargo check --target x86_64-pc-windows-gnu -p maxima-lib -p maxima-cli -p maxima-bootstrap
 ```
 
 Anything that affects the Draconis integration — protocol handler registration, offer_id resolution, Info.plist contents in MaximaHelper, `MaximaSetup.exe`'s install location — is worth flagging in the release notes so Draconis can adapt.
@@ -369,220 +633,206 @@ Evaluated all 14 upstream branches. Only these were complete and merged-ready:
 |--------|---------------------|
 | `feat/license-token-override` | ✅ Already merged (commit `6ab4631`) |
 | `fix/license-update-online-offline` | ✅ Already merged (commit `246bc53`) |
-| `fix/non-ascii-characters` | ✅ Applied in this session |
+| `fix/non-ascii-characters` | ✅ Applied 2026-05-14 |
 | `fix/wine-registry-setup` | ✅ Partially applied (registry additions + silent regedit; the part that disabled link2ea/origin2 was intentionally skipped) |
+| `catornot/Maxima@patch-external-lsx` | ✅ Applied 2026-05-15, defensive coverage extended in `license.rs` on 2026-05-18 |
 
 The remaining branches (`feat/server`, `feature/umu-launcher`, `feat/new-ci`, etc.) are either stale (6–20 months old), have unresolved conflicts, or are WIP with no clear completion signal. Do not merge them without a full review.
 
 ---
 
-## Changelog
-
-### Session 2026-05-14 (post-v0.2.0 fixes)
-
-#### Fixed — log output invisible when `maxima-cli` is spawned from `maxima-bootstrap`
-`maxima-bootstrap` is built with `#![windows_subsystem = "windows"]` (release builds) so it has no console of its own. When Wine routes a `link2ea://` URL to it and bootstrap spawns `maxima-cli.exe`, the child inherits the GUI parent's empty stdio — `println!()` from the logger went nowhere and users saw no auth/launch progress. Two-part fix:
-
-1. **`maxima-cli` now calls `AllocConsole()` at the very start of `main` if no console is attached** (Windows-only, `winapi::um::consoleapi`). When invoked from `cmd.exe` the existing console is reused; when invoked from bootstrap a new window pops up. Restores the v0.1.0-and-earlier behavior the user expected.
-2. **The shared logger (`maxima-lib/src/util/log.rs`) now mirrors all output to a file** in addition to stdout. Default location: `%LOCALAPPDATA%\Maxima\Logs\<binary>.log` on Windows, `$XDG_DATA_HOME/maxima/logs/<binary>.log` on unix. Overridable via `MAXIMA_LOG_FILE`. Failure to open the file is non-fatal — stdout-only is still acceptable. Each session writes a `===== maxima log session opened (pid=...) =====` header so distinct invocations are easy to skim.
-
-The combination means: console is the primary UX, file is the durable forensics trail. **Cross-OS impact**: the `AllocConsole` shim is `#[cfg(windows)]`; file logging is portable.
-
-#### Fixed — installer ships incomplete app (missing UI / TUI)
-v0.2.0 restricted the Windows build to `-p maxima-cli -p maxima-bootstrap -p maxima-service`, which silently dropped `maxima.exe` (UI) and `maxima-tui.exe` (TUI) from the installer. The `.nsi` had `File /nonfatal` lines for both so the install kept working, but users got a stripped-down app. Verified that both crates compile cleanly on the Windows target (the `rustix 0.37` block is unix-only — `accesskit_unix → zbus → async-io` is gated `#[cfg(unix)]`, never compiled on Windows). Windows CI and `release.yml` now do `cargo build --release` (full workspace). Linux keeps the `-p` restriction.
-
-### Session 2026-05-14 (CI + release pipeline)
-
-#### Fixed — `.github/workflows/build-ci.yml`
-CI had been red on every commit since the workflow was added (5+ master pushes, none green). Two unrelated breakages:
-- **Linux**: `cargo build --release` built the whole workspace, which pulled `maxima-ui → eframe → egui-winit → accesskit_winit → accesskit_unix → zbus 3.15 → async-process 1.8 → async-io 1.13 → rustix 0.37.28`. Recent nightlies (1.97.0-nightly) reserved the `rustc_*` attribute namespace, so rustix 0.37 fails to compile. Restricted Linux to `-p maxima-cli -p maxima-bootstrap`, which only pull rustix 0.38/1.x via tempfile/tokio. Also dropped the X11/xkbcommon apt deps that were only needed by `maxima-ui`. **Cross-OS impact**: none — the excluded crates still live in the workspace and a downstream user on a working toolchain can still `cargo build -p maxima-ui` locally.
-- **Windows**: NSIS script defaulted to `${BIN_DIR}=..\target\x86_64-pc-windows-gnu\release\` but the runner compiles MSVC (`target/release/`). Passed `/DBIN_DIR="..\target\release"` through. Also restricted to the three Draconis-relevant crates.
-
-#### Added — `.github/workflows/build-ci.yml` macOS job
-Added a third matrix entry that builds `MaximaHelper.app` via `MaximaHelper/build.sh` and validates the bundle layout + that `Info.plist` declares `CFBundleURLTypes` with `qrc://`. Catches helper regressions on every PR instead of only at tag time. Rust/protoc/rust-cache steps are gated `if: runner.os != 'macOS'` so the macOS job stays a pure Swift build.
-
-#### Fixed — `.github/workflows/release.yml`
-The release pipeline had the same `cargo build --release` problem and would have failed silently on the next tag. Restricted the Windows job to the Draconis-relevant crates, added installer-size sanity check, added helper-bundle sanity check, and now uploads loose Windows binaries as a separate artifact (debug aid).
-
-### Session 2026-05-14 (code fixes)
-
-#### Fixed — `maxima-lib/src/util/dll_injector.rs`
-DLL injection broke on non-ASCII installation paths (e.g. usernames or bottle paths with accented characters). Root cause: `GetModuleHandleA` / `LoadLibraryA` only accept ANSI strings. Fixed by switching to `GetModuleHandleW` / `LoadLibraryW` with UTF-16 wide strings, matching the `fix/non-ascii-characters` upstream branch. **Cross-OS impact**: file is Windows-only (`use winapi::...`); change benefits native Windows users equally.
-
-#### Fixed — `maxima-lib/src/unix/wine.rs`
-Two issues in `setup_wine_registry()`:
-1. Missing `HKEY_LOCAL_MACHINE\Software\Origin` bare key — some games check for this path without the `Electronic Arts\` prefix and would fail to recognise Origin as installed.
-2. `regedit` was called without the `/S` (silent) flag, causing it to show a confirmation dialog that blocked the launch flow silently in Wine. Also added `Stdio::piped()` for stderr and `read+append` for stderr-to-`output_str`, so Wine errors surface in `WineError::Command` instead of disappearing.
-
-**Cross-OS impact**: file is unix-only (`#[cfg(unix)]`). The change benefits Linux + macOS/CrossOver equally; native Windows doesn't compile this file.
-
-#### Fixed — `maxima-bootstrap/src/main.rs`
-The `origin2://` protocol handler had `Origin.OFR.50.0002148` (Star Wars Battlefront 2) hardcoded, making it useless for any other game. Also used wrong CLI syntax (`--mode launch --offer-id X` doesn't exist in this version of maxima-cli). Fixed to read the real `offerIds` from the URL query string and call `maxima-cli launch <offer_id>`. The handler now works generically for any EA title that emits `origin2://`. **Cross-OS impact**: code is portable (no `#[cfg]` gates); benefits Linux/Windows users of maxima-bootstrap who register `origin2://` natively.
-
-#### Fixed — `maxima-cli/src/main.rs`
-`maxima-cli launch Origin.OFR.X.Y` would bail with `"No owned offer found"` for Steam-only owners whose EA library is empty (TF2 not linked). Added offer_id passthrough: if all library lookups fail but the slug matches the `Origin.OFR.\d+\.\d+` pattern, Maxima passes it directly to the license server with a warning. Users are directed to link accounts at https://www.ea.com for the cleanest experience. **Cross-OS impact**: portable code; benefits any platform.
-
-#### Fixed — `maxima-cli/src/main.rs`
-`GetGameBySlug` subcommand was a no-op stub (body commented out, returned `Ok(())`). Now prints slug, offer ID, content ID, display name, and installed status.
-
-#### Security — `maxima-bootstrap/src/main.rs` (CLI flag injection)
-The `link2ea://` and `origin2://` handlers passed the URL-derived `offer_id` directly as a positional argument to `maxima-cli launch`. Because that segment comes from an attacker-controlled URL, a crafted link like `link2ea://launchgame/--login=stolen_token?platform=PCWIN` would have made `maxima-cli` interpret `--login` as a real flag (it exists in the CLI and treats the value as an EA access token, bypassing the OAuth flow). Added `is_valid_ea_offer_id()` strict validation (`Origin.OFR.<digits>.<digits>`) before invoking the subprocess. Rejects log to `maxima_execution.log` for diagnostics.
-
-#### Fixed — `maxima-bootstrap/src/main.rs` (panic in qrc:// handler)
-The `qrc://` handler did `arg.split("login_successful.html?").collect::<Vec<&str>>()[1]` — indexing `[1]` panics if the marker is absent. Replaced with `splitn(2, ...).get(1)` and a graceful early return.
-
-### Session 2026-05-15 (Steam App ID launch support + LSX fixes) — PR #4
-
-#### Fixed — Bootstrap rejecting Steam App IDs (root cause of "Maxima never appears")
-
-`is_valid_ea_offer_id()` only accepted `Origin.OFR.<digits>.<digits>` patterns. When Steam launches an EA game via `link2ea://launchgame/1237970?platform=steam`, the offer segment is the numeric Steam App ID — which was being rejected, so maxima-bootstrap silently exited without invoking maxima-cli. Added `is_valid_steam_app_id()` (non-empty, ≤10 chars, all ASCII digits) and made `is_valid_ea_offer_id()` accept both forms.
-
-#### Added — Steam App ID → EA offer ID lookup table in maxima-cli
-
-When `maxima-cli launch 1237970` is called (Steam App ID), the new `STEAM_GAMES` table maps it to the real EA offer ID (`Origin.OFR.50.0001456` for TF2), resolves the install path from `HKLM\SOFTWARE\Valve\Steam\InstallPath` + `libraryfolders.vdf`, sets `SteamAppId` / `SteamGameId` / `SteamClientLaunch` / `SteamPath` env vars, and injects `-noOriginStartup -multiple` launch args. The `steam_launch: bool` flag is passed through `LaunchOptions` to `start_game()`.
-
-#### Fixed — `is_installed()` check failing for Steam-only games
-
-`start_game()` was calling `offer.is_installed()` which checks the EA library. Steam-installed TF2 is not in the EA library, so the check always failed with `LaunchError::NotInstalled`. Fixed by skipping the check when `path_override` is set.
-
-#### Fixed — `EAExternalSource` / `EALaunchOwner` / `EAEntitlementSource` env vars
-
-When `steam_launch` is true, these env vars are now set to `"Steam"` instead of `"EA"`. TF2 reads them to verify the launch context matches the entitlement source reported by LSX.
-
-#### Fixed — `GetAllGameInfo` returning wrong version (triggering "File corruption detected")
-
-`GetAllGameInfoResponse` hardcoded `InstalledVersion="0"` and `AvailableVersion="1.0.1.3"`. TF2's current build is `9.12.1.3` — the mismatch triggered its tamper-detection dialog. Fixed by capturing the real version from the LSX challenge response (`message.version`) into `ConnectionState.game_version` and echoing it back in `GetAllGameInfoResponse`. `game_title` is also captured and echoed in `attr_DisplayName`.
-
-#### Fixed — `IsSubscriber` / `IsSteamSubscriber` inconsistency
-
-`GetProfileResponse` hardcoded both subscriber fields to `false`. When `EntitlementSource="STEAM"`, TF2 treats `IsSteamSubscriber=false` as a contradiction and triggers the tamper check. These fields are now set based on whether `SteamAppId` is set in the environment.
-
-#### Fixed — `IsProgressiveInstallationAvailableResponse` hardcoded ItemId
-
-Response hardcoded `attr_ItemId="Origin.OFR.50.0001456"`. Now echoes back `request.attr_ItemId`, making the handler correct for any game.
-
-#### Fixed — `maxima-bootstrap` non-zero exit codes swallowed
-
-After `wait().await`, the exit code was never checked. Added logging for non-zero exit codes to `maxima_execution.log`.
-
-#### Ported — External LSX connections (Northstar / Steam launch)
-
-Ported `catornot/Maxima@patch-external-lsx` (upstream PR #42 by p0358): when the game was not started through maxima-cli (`maxima.playing()` is `None`), `Connection::new()` now accepts the connection with a warning instead of returning `LSXConnectionError::GameContext`. `handle_set_presence_request` also handles the `playing() == None` case gracefully. This enables Northstar and any externally-launched game to maintain an LSX connection.
-
----
-
-## Open issues being investigated
+## Open issues
 
 ### "Engine Error: File corruption detected" after `IsProgressiveInstallationAvailableResponse`
 
-**Status as of 2026-05-15.** TF2 launched from Steam via Maxima completes authentication and gets through the LSX handshake up to `IsProgressiveInstallationAvailableResponse`, then closes the LSX connection and shows the error dialog. The game never reaches `RequestLicense` or `GetAuthCode`.
+**Status as of 2026-05-18.** Symptom-level workaround landed via the split-brain architecture; root cause still not isolated.
 
-**Full LSX sequence observed:**
-```
-Challenge → ChallengeAccepted
-GetConfig → GetConfigResponse
-GetProfile → GetProfileResponse (IsSubscriber=true, IsSteamSubscriber=true)
-GetSetting → GetSettingResponse
-GetGameInfo → GetGameInfoResponse
-GetAllGameInfo → GetAllGameInfoResponse (InstalledVersion=9.12.1.3, EntitlementSource=STEAM)
-IsProgressiveInstallationAvailable → IsProgressiveInstallationAvailableResponse
-[connection closed — no RequestLicense or GetAuthCode]
-```
+**Symptom.** When `maxima-cli launch` (Path B) is the LSX server for a Steam-launched TF2, the game completes Challenge → ChallengeAccepted → GetConfig → GetProfile → GetSetting → GetGameInfo → GetAllGameInfo → IsProgressiveInstallationAvailable, then closes the LSX connection and shows the "File corruption detected" engine error. Never reaches `RequestLicense` or `GetAuthCode`.
 
-**What has been tried and ruled out:**
-- Northstar hooks (`wsock32.dll`) — removed, same result
-- `IsSubscriber=false` / `IsSteamSubscriber=false` — fixed to true, same result
-- `InstalledVersion="0"` → real version — fixed, same result
-- `ItemId` hardcoded vs echoed — fixed, same result
-- `EAExternalSource=EA` vs `Steam` — tried both, same result
+**What was ruled out (toggled, symptom unchanged).**
+- `IsSubscriber=false` ↔ `true`
+- `IsSteamSubscriber=false` ↔ `true`
+- `InstalledVersion="0"` ↔ real version captured at Challenge
+- `IsProgressiveInstallationAvailableResponse.ItemId` hardcoded ↔ echoed
+- `EAExternalSource="EA"` ↔ `"Steam"` env var
+- Northstar `wsock32.dll` proxy removed
+- ItemId echoed vs hardcoded
 
-**Hypothesis:** TF2 may be performing a local file-integrity check independently of LSX (DRM stub reading the install manifest or a `.dlf` file) before completing the LSX flow. The "File corruption detected" message may not be LSX-driven at all. The game closes LSX *after* the check fails, not *because* LSX responded incorrectly.
+**First mitigation attempt (early Session 2026-05-18) — abandoned.** The original `/authorize` was preflight-only (refresh `.dlf`, no game spawn) on the theory that TF2 stayed running after emitting link2ea. Empirically TF2 *exits* and waits for the launcher to re-spawn it, so this design produced a new symptom: "TF2 opens for a moment and then closes" without ever reaching the file-corruption point. Reverted.
 
-**Next steps when resuming:**
-1. Check if `C:\ProgramData\Electronic Arts\EA Services\License\` contains a valid `.dlf` for `Origin.OFR.50.0001456`.
-2. Check if `C:\Program Files (x86)\Origin Games\Titanfall2\__Installer\` or equivalent Steam path has a manifest that TF2 validates.
-3. Try running with `MAXIMA_DENUVO_TOKEN` env override to skip the license server and see if the error still appears.
-4. Compare what EA Desktop sends in `GetAllGameInfo` for a working installation — specifically `FullGamePurchased`, `FullGameReleased`, `HasExpiration`, and `UpToDate`.
+**Current design (late Session 2026-05-18).** `/authorize` calls `launch::start_game` — same code path the upstream UI's "Play" button takes. The flow ends up identical to Path B from the EA-side perspective (full env vars, license preflight, `maxima.playing=Some(ctx)`, standard active-launch LSX branch), just with cached login state.
+
+**The user has not yet confirmed this resolves the file-corruption symptom in TF2.** Pending feedback. If the symptom returns, it's the same root cause we were debugging before (LSX response is not the issue — toggling the response fields didn't help in earlier sessions).
+
+**Remaining hypotheses, in rough order of plausibility.**
+1. **Steam DRM IPC.** TF2's Steam wrapper calls `SteamAPI_Init()` which needs `steam.exe` running and a valid Steam session. If Steam isn't actively running, init fails and TF2 reports the failure as file-corruption (known misleading error). The "UI is open" baseline that the user reports works on Windows might just be coincident with them having Steam running for unrelated reasons. Verify by checking the bottle's process list for `steam.exe` during a working vs failing run.
+2. **`.dlf` mismatch via hardware-hash.** When Path B runs `request_and_save_license` with `playing=Some`, the OOA license is bound to a hardware hash computed inside maxima-cli's process. If TF2's own internal validation computes a different hash (different process-time WMI reads, version-2 vs version-4 hash composition), the `.dlf` signature won't validate. Path A also calls `request_and_save_license`, but the LSX side returns an empty token under `playing()=None` so TF2 isn't told to validate via LSX. Validate by exporting `MAXIMA_DENUVO_TOKEN` to short-circuit license fetch entirely.
+3. **A local file check tied to a missing registry / file artifact.** Possibly `C:\Program Files (x86)\Origin Games\Titanfall2\__Installer\` or some EA-Desktop-only marker file. Not investigated.
+
+### Update 2026-05-18 (later) — Origin in-game login window + still corrupting
+
+Once the bootstrap → /authorize → launch::start_game chain was wired end-to-end (with the OPAQUE→JWS fallback below), the user reports:
+
+- TF2 actually launches now (no more "opens for a moment and closes").
+- TF2 then shows the **in-game Origin login window** (the deprecated EA launcher's embedded SSO prompt) asking for credentials.
+- After logging in with EA credentials, TF2 proceeds and shows "Engine Error: File corruption detected" — same symptom as before.
+
+This is real progress: the LSX flow now completes the Challenge handshake (`Game Connected - Name: Titanfall2, Offer ID: Origin.OFR.50.0001456, Multiplayer Id: 1039093, Version: 9.12.1.3` lands in the log). What we don't yet know is which subsequent LSX request triggers the corruption error — the LSX request/response logs were `debug!` so they're invisible at default INFO level.
+
+Two distinct issues now:
+
+**Issue A — embedded Origin login window appears.** TF2's Origin DRM stub doesn't accept our SSO env vars (`EAGenericAuthToken` / `EAAccessTokenJWS` / `EALaunchUserAuthToken`) and falls back to its built-in login dialog. Root cause: EA's `nucleus_auth_exchange` rejects our JWS→OPAQUE swap with a redirect to `signin.ea.com/p/juno/login?fid=…` (treated as `AuthError::InvalidRedirect`). We added a `match`-with-fallback in `launch::start_game::LaunchMode::Online` so we pass the JWS access token through as `EALaunchUserAuthToken` instead of bailing — that's the pre-PR-#34 upstream behavior and it lets the launch proceed. The cost is that TF2's Origin SDK doesn't trust the JWS as if it were OPAQUE and shows its own login. Manual login through that window works as a workaround.
+
+Likely root cause of the OPAQUE rejection: EA's auth service wants a session cookie from a recent SSO flow (which EA Desktop carries from its embedded browser). Our reqwest client is cookie-less and stateless, so EA treats the exchange as untrusted. Fixing this properly would require either persisting EA cookies across `maxima-cli` runs or pre-fetching the OPAQUE token at login time and caching it.
+
+**Issue B — "File corruption" after manual Origin login.** Same symptom as the prior session. Diagnostic this session: promoted the `Received/Queuing LSX Message` logs from `debug!` → `info!` in `lsx/connection.rs`, and changed `service.rs::"LSX connection closed"` to include the underlying error. The next test should produce a full LSX request/response trace + a real close reason, so we can see precisely which LSX request TF2 sends last before disconnecting.
+
+Pending validation steps (next session):
+
+1. **Capture the full LSX trace** — re-run with the latest binaries; the log should now show every request/response in `maxima-cli.log`. We expect to see the same sequence the prior session documented ending at `IsProgressiveInstallationAvailable`, or possibly stopping at an earlier request now that the EA env-var context is different.
+2. **`MAXIMA_DENUVO_TOKEN` test** — set the env var on the `serve` process before invoking and re-launch TF2. If the symptom disappears, it's `.dlf` hash. If it persists, it's something else (Steam DRM IPC or local file integrity).
+3. **Steam-running test** — open `steam.exe` inside the bottle (just the client UI) before clicking Play on TF2. If TF2 then works, Steam DRM IPC is the root cause.
+
+Do not delete this section until the user confirms TF2 runs end-to-end.
+
+**Next diagnostic steps if Path A doesn't fix it:**
+1. Check that `…/EA Services/License/Origin.OFR.50.0001456_<...>.dlf` exists and is non-empty after a `serve` + Steam launch attempt.
+2. Try the same launch with `MAXIMA_DENUVO_TOKEN=<anything>` set on the `serve` instance.
+3. Diff the LSX trace from a working Windows session against the failing macOS session, especially `GetAllGameInfoResponse` fields.
+
+Do not delete this section until the user confirms TF2 launches reliably end-to-end.
 
 ---
 
-## Pending code quality items (from PR #4 Gemini review)
+## Pending code quality items
 
-These are medium-priority, not blocking. Address in a follow-up PR.
+Tracked from PR #4 (Gemini review) and reaffirmed during the Session 2026-05-18 audit. Medium-priority. Address before publishing a release that other macOS users will rely on.
 
-1. **Blocking I/O in async** — `std::fs::read_to_string` (libraryfolders.vdf parse) is called inside the `startup` async fn. Replace with `tokio::fs::read_to_string` or wrap in `tokio::task::spawn_blocking`. (`maxima-cli/src/main.rs`)
-2. **Hardcoded SteamPath fallback** — `C:\Program Files (x86)\Steam` is used as fallback when registry lookup fails. Should use the resolved path from the registry lookup instead. (`maxima-cli/src/main.rs` — `resolve_steam_install_path`)
-3. **`attr_EntitlementSource` hardcoded to `"STEAM"`** — `GetAllGameInfoResponse` always returns `"STEAM"`. Should be dynamic: `"STEAM"` when `steam_launch=true`, `"EA"` otherwise, to avoid tamper-check failures in non-Steam EA games. (`maxima-lib/src/lsx/request/game.rs`)
-4. **`SteamAppId` env var used as IPC in LSX handler** — `GetProfile` reads `std::env::var("SteamAppId")` to decide `IsSubscriber`. This relies on global process state. Cleaner approach: add a `steam_launch: bool` field to `ConnectionState`, populate it from `ActiveGameContext` at connection init, and read it from `state` in the handler. (`maxima-lib/src/lsx/connection.rs`, `maxima-lib/src/lsx/request/profile.rs`)
-
----
-
-## Open issues being investigated
-
-### v0.2.1 — nothing appears on TF2 launch from Steam (UI/TUI/CLI all invisible)
-
-**Reported 2026-05-14.** User on v0.2.1 (latest, with `AllocConsole` fix in `maxima-cli` and full UI/TUI in installer). When launching TF2 from Steam, no Maxima window appears at all — not the CLI console, not the UI, not the TUI. In earlier versions the CLI window at least popped up. Diagnostics from the user are still pending.
-
-**Code audit conducted 2026-05-14. Findings, in priority order (each independently capable of producing the reported symptom):**
-
-#### Finding 1 — NSIS `SetRegView` chaos (most likely root cause)
-
-[installer/maxima-setup.nsi:173](installer/maxima-setup.nsi:173) sets `SetRegView 64` for the `HKLM\SOFTWARE\WOW6432Node\Origin` writes and **never resets it** before the HKCR protocol writes at lines ~186-201 or the `BackupProtocol` calls at lines ~176-178. Consequences:
-
-- 32-bit Wine consumers (TF2, Origin, anything emitting `link2ea://` from a 32-bit process) resolve HKCR through the **32-bit view** (`HKLM\Software\Classes\Wow6432Node\...`). They never see the entries v0.2.1 wrote under the 64-bit view.
-- `BackupProtocol` (lines 58-79) and `RestoreProtocol` (lines 83-107) inherit whatever view leaked in from the caller — i.e. they back up the 64-bit view and miss any 32-bit-view registrations entirely. On a v0.2.0→v0.2.1 upgrade this means the v0.2.0 entries (written under whatever view the old `.nsi` used — most likely 32-bit by default for a 32-bit NSIS installer) are never read, never overwritten, never even noticed.
-- Possible end state after upgrade: v0.2.1's "Maxima" entries are in 64-bit view; TF2 still resolves via 32-bit view and finds v0.2.0's stale entries (or nothing at all if the old uninstaller fired). Either way the dispatch is unpredictable and on at least some setups Wine ends up with no working handler.
-
-**Fix:** In [installer/maxima-setup.nsi](installer/maxima-setup.nsi):
-- Add `SetRegView 32` (or `SetRegView default`) immediately before line 186 (HKCR writes) and before line 176-178 (`BackupProtocol` calls).
-- Inside both `BackupProtocol` and `RestoreProtocol` macros, set the view explicitly at entry — ideally back up *both* views and document the choice.
-- In `BackupProtocol`, also guard against backing up Maxima's own values: read the existing `\shell\open\command` first, and if it points at `maxima-bootstrap.exe`, set `_existed=0` (treat as "no prior handler") so the uninstaller will simply delete the keys instead of restoring stale Maxima paths.
-
-#### Finding 2 — `AllocConsole()` does not reattach stdio
-
-[maxima-cli/src/main.rs:140-150](maxima-cli/src/main.rs:140) calls `AllocConsole()` but never reattaches `STD_OUTPUT_HANDLE` / `STD_ERROR_HANDLE` / Rust's stdio FDs. When bootstrap (GUI subsystem) spawns maxima-cli, the child inherits invalid stdio handles. `AllocConsole` creates a window but does NOT redirect existing handles — meaning the console pops up but `println!` and the `log.rs` writer at line 89 write to dead pipes. User sees a blank/silent console, or (depending on timing) no console at all.
-
-**Fix:** After `AllocConsole()` succeeds, do `SetStdHandle(STD_OUTPUT_HANDLE, CreateFileW(L"CONOUT$", GENERIC_READ|GENERIC_WRITE, ...))` for stdout and stderr, and call `freopen("CONOUT$", "w", ...)` equivalents for the C runtime (Rust's stdout/stderr are buffered on top of these FDs). Without this, AllocConsole is decorative only.
-
-#### Finding 3 — `#[tokio::main]` runs before `ensure_console_attached`
-
-[maxima-cli/src/main.rs:155](maxima-cli/src/main.rs:155): `#[tokio::main]` desugars to runtime construction *before* user code. Any panic in IOCP/thread-pool init under Wine kills the process before AllocConsole. Same risk applies to `init_logger_named`, which runs after `Args::parse()` at line 246.
-
-**Fix:** Convert `main` to a plain `fn main()` that (1) calls `ensure_console_attached()`, (2) installs a panic hook that writes to `%LOCALAPPDATA%\Maxima\Logs\maxima-cli.panic.log`, (3) calls `init_logger_named()`, (4) parses args, (5) builds the tokio runtime manually with `tokio::runtime::Runtime::new()` and `block_on(startup())`. This guarantees console + file logger exist before *anything* fallible runs.
-
-#### Finding 4 — `Args::parse()` before logger init
-
-If clap exits because of a malformed argv (or because the `MAXIMA_LAUNCH_ARGS` env var is mis-encoded), the error message goes to stderr — which is the unattached pipe. User sees nothing, no log line on disk. Init the logger first, then parse args.
-
-#### Finding 5 — Bootstrap swallows non-zero exit codes
-
-[maxima-bootstrap/src/main.rs:271](maxima-bootstrap/src/main.rs:271): `child.spawn()?.wait().await?` only propagates an error on `wait()` itself; a non-zero exit from maxima-cli returns `Ok(ExitStatus)` and bootstrap logs "Result: Success". If maxima-cli crashes or auth fails, bootstrap pretends everything worked. Not the root cause but blinds diagnostics — every other finding becomes invisible because we can't tell whether maxima-cli even ran.
-
-**Fix:** After `wait().await?`, check `status.success()` and log the exit code to `maxima_execution.log` if non-zero.
-
-#### Ruled out
-
-- `is_valid_ea_offer_id("Origin.OFR.50.0002694")` returns `true` — leading zeros are fine.
-- `url::Url::parse("link2ea://launchgame/Origin.OFR.50.0002694?...").path_segments()` correctly yields `["Origin.OFR.50.0002694"]` (the action is the host, not a path segment). `segments[0]` is the offer id, as intended.
-- `LOG_FILE` mutex deadlock — not a realistic failure mode; lock scope is short and not reentrant.
-- `winapi` features `consoleapi` / `wincon` are correctly enabled in [maxima-cli/Cargo.toml:22](maxima-cli/Cargo.toml:22).
-
-#### Recommended order of work when picking this up
-
-1. Ship Finding 5 (bootstrap exit-code logging) first — it's a one-liner and makes every subsequent change debuggable.
-2. Then Finding 1 (NSIS `SetRegView` reset + Maxima-ownership guard in `BackupProtocol`). High likelihood of being the user-facing root cause.
-3. Then Findings 2+3+4 together (rewrite the prologue of `maxima-cli/main.rs`: plain main, panic hook, logger before args, manual tokio runtime, stdio reattach after AllocConsole).
-4. Have the user share the contents of `maxima_execution.log` and `%LOCALAPPDATA%\Maxima\Logs\maxima-cli.log` after the fixes ship — those should now be populated and tell us whether the symptom is gone or whether a new layer is exposed.
-
-Do not delete this section until the user confirms TF2 launches with Maxima visible again.
+1. **Blocking I/O inside async** — `std::fs::read_to_string` on `libraryfolders.vdf` runs on a tokio worker without `spawn_blocking`. Low impact (VDF is small, ms-scale) but technically a yield-point hazard. Fix in `maxima-lib/src/steam.rs::resolve_steam_install_path`.
+2. **Hardcoded Steam install fallback** — `C:\Program Files (x86)\Steam` and `C:\Program Files\Steam` are tried unconditionally after the registry. Should be removed once we trust the registry lookup is reliable inside Wine. `maxima-lib/src/steam.rs`.
+3. **`attr_EntitlementSource` still hardcoded `"STEAM"`** — `GetAllGameInfoResponse` always returns `"STEAM"` regardless of launch path. Should reflect `LaunchOptions.steam_launch` (when known) or default to `"EA"` for non-Steam EA games. `maxima-lib/src/lsx/request/game.rs`.
+4. **`SteamAppId` env var used as IPC** — `GetProfile` reads `std::env::var("SteamAppId")` to decide `IsSubscriber`. Cleaner: add a `steam_launch: bool` field to `ConnectionState`, populate it from `ActiveGameContext` at connection init (or from a per-request hint), and read it from `state`. `maxima-lib/src/lsx/connection.rs` + `request/profile.rs`.
+5. **`Mode::Launch` and `Mode::Serve` coexistence** — when both `launch` and `serve` run simultaneously in the same bottle, `launch`'s `start_lsx` probe correctly defers to `serve`'s LSX, but it still spawns the game and sets `playing=Some(...)` on its own `maxima_arc`. The game's traffic still goes to `serve` (good), but `launch`'s state is then stale (`playing` set but no LSX traffic to update it). Cosmetic; not a correctness issue.
+6. **No retry / health-check loop in bootstrap's forward path** — if `/authorize` returns a transient 5xx (e.g. EA license server hiccup), bootstrap surfaces the error directly. TF2 will keep polling LSX regardless, so a retry from the user side works, but a 1-retry in bootstrap would be friendlier.
 
 ---
 
 ## Known remaining gaps
 
-- **`maxima-tui` / `maxima-ui`**: The UI crates exist and compile but are not wired into the Draconis flow at all. They are upstream components that may be useful in a future Draconis "standalone mode" but need significant work to be production-ready.
-- **`origin2://` without an `offerIds` param**: If the URL has no `offerIds` the handler now passes an empty string to `maxima-cli`, which will fail gracefully but not helpfully. A better fallback (e.g. reading from query params `productId` or hardcoding a per-game table) is a future improvement.
-- **DLL injection on macOS / CrossOver**: `maxima-service`'s DLL injector is Windows-only by design. CrossOver / Wine does not support `CreateRemoteThread` injection. The service is installed by the NSIS installer but its injection path is never exercised in the Draconis flow.
-- **Cloud saves, downloads, friends**: All implemented upstream and present in the codebase, but untested in the Draconis / CrossOver configuration.
-- **Offline mode after first launch**: The `LaunchMode::Offline` path exists but Draconis does not yet expose it in the UI. License cache lives at `C:/ProgramData/Maxima/Licenses/<content_id>.dlf` and is valid for approximately two weeks.
-- **Steam-only games table is TF2-only**: `STEAM_GAMES` in `maxima-cli` only has an entry for TF2 (`1237970`). Other EA games launched via Steam App ID would not be recognized. Extend the table or add a dynamic fallback for other titles.
+- **`maxima-tui` / `maxima-ui`** — built and shipped in the installer, but Draconis doesn't invoke them. The UI doesn't have `/authorize` wired up yet (would be a one-liner in `bridge_thread`); for now only `maxima-cli serve` provides the auth server. If we want a graphical "Maxima is running" indicator on macOS/CrossOver, that's the obvious next step.
+- **`origin2://` without an `offerIds` param** — the handler passes an empty string and the auth server returns 400. A better fallback (e.g. reading `productId`, or per-game hardcoded table) is a future improvement.
+- **DLL injection on macOS / CrossOver** — `maxima-service`'s injector is Windows-only by design. Wine doesn't support `CreateRemoteThread`-style injection. The service is installed by NSIS but its injection path is never exercised in the Draconis flow.
+- **Cloud saves, downloads, friends** — implemented upstream and present in the codebase, but untested in the Draconis / CrossOver configuration.
+- **Offline mode after first launch** — `LaunchMode::Offline` path exists but Draconis doesn't expose it. License cache lives at `C:/ProgramData/Electronic Arts/EA Services/License/<content_id>.dlf` and is valid for approximately two weeks.
+- **`STEAM_GAMES` table is TF2-only** — `lookup_steam_game(steam_app_id)` only has an entry for `1237970`. Other EA-on-Steam titles would not resolve via the fallback. Extend per title we validate.
+- **No registry-driven UI-vs-CLI auth provider selector** — the user previously proposed `HKLM\Software\Maxima\AuthProvider = "UI"|"CLI"` that bootstrap would read when no auth server is running. Not implemented; the current fallback path simply spawns `maxima-cli launch` unconditionally. Becomes meaningful once we want bootstrap to auto-start `serve` if it can't find one running.
+- **Auth-server endpoint not on UI yet** — `maxima.exe` doesn't bring up `/authorize`. If a user runs the UI without `serve`, bootstrap falls through to Path B (spawn). Easy fix; just hasn't been wired.
+- **TF2's LSX-polling timeout, if any, is undocumented.** Path A relies on TF2 retrying indefinitely while bootstrap forwards. If TF2 has a finite timeout (we suspect it doesn't but haven't measured), `serve` cold-starts could miss the window.
+
+---
+
+## Operator recipes
+
+### First-time setup in a fresh CrossOver bottle
+
+```bash
+# 1. Install MaximaSetup.exe inside the bottle (Draconis does this automatically;
+#    if doing it by hand, copy the .exe from a release and run it).
+#    The installer registers link2ea://, origin2://, qrc:// in Wine's registry
+#    and drops the binaries in C:\Program Files\Maxima\.
+
+# 2. On the macOS host, install / register MaximaHelper.app for qrc://. Draconis
+#    does this with `codesign --force --deep --sign -` + `NSWorkspace`.
+
+# 3. Inside the bottle, run maxima-cli once interactively to do OAuth login.
+maxima-cli.exe
+# → "Welcome to Maxima!" menu → Launch Game (any) → browser opens → log in →
+#   redirect comes back via qrc:// → MaximaHelper forwards → :31033 captures the
+#   auth code → token stored.
+# (Or: paste a `remid` cookie value at the stdin prompt if the browser is stuck.)
+```
+
+After that the bottle has a persistent token. You never need to log in interactively again until it expires (months).
+
+### Run `serve` and play
+
+```bash
+# Terminal 1 (inside the bottle):
+maxima-cli.exe serve
+# Expected console lines (and the same go to %LOCALAPPDATA%\Maxima\Logs\maxima-cli.log):
+#   LSX server listening on port 3216
+#   Authorize HTTP server listening on 127.0.0.1:13219
+#   Subscribed to N friends for presence       (omit with --no-rtm)
+#   Serving LSX. Launch your game externally; press Ctrl-C to stop.
+```
+
+Then launch TF2 any way you want:
+- Draconis (vanilla or Northstar)
+- Steam → Library → Titanfall 2 → Play
+- `cxstart --bottle "Titanfall 2" -- "C:\\Program Files\\…\\Titanfall2.exe"`
+
+When TF2 emits `link2ea://`, bootstrap forwards to the running `serve` and exits; TF2's LSX polling reaches `serve`'s listener; auth completes.
+
+### Fallback: no `serve` running
+
+`maxima-cli.exe launch Origin.OFR.50.0001456` (or any Steam App ID Maxima knows about, e.g. `1237970`) drops you into Path B. This is what bootstrap auto-spawns when `/authorize` doesn't answer.
+
+---
+
+## Changelog (most recent first)
+
+History of significant changes since this fork was forked. Not a substitute for `git log` but useful for "when did X land" questions.
+
+### 2026-05-18 — split-brain auth: bootstrap as router, `/authorize` as service (with launch)
+
+The whole "Path A" infrastructure landed in this session, replacing the previous attempt where the bootstrap-spawned `maxima-cli launch` would try to coexist with `serve` and lose the LSX-port race under Wine.
+
+- **New module `maxima-lib/src/auth_server.rs`** (~250 lines). Plain `tokio::net::TcpListener` + manual HTTP parse. `GET /` → liveness probe; `POST /authorize?offer_id=X[&cmd_params=…]` → call `launch::start_game` (license preflight + EA env vars + spawn game + set `maxima.playing=Some`). Default port 13219. Initially shipped as preflight-only (no spawn); reworked mid-session after empirical evidence showed TF2 exits after emitting `link2ea://` and needs to be re-launched, not just authenticated. Now aligned with upstream issue #27's design intent.
+- **New module `maxima-lib/src/steam.rs`** (~180 lines). Lifted `STEAM_GAMES`, `lookup_steam_game`, `resolve_steam_install_path`, `EA_OFFER_ID_PATTERN`, `STEAM_APP_ID_PATTERN` out of `maxima-cli/src/main.rs`. Added `lookup_steam_game_by_offer` (reverse: `Origin.OFR.…` → entry) because `/authorize` receives offer IDs, not Steam App IDs.
+- **`Maxima::start_auth_server`** in `maxima-lib/src/core/mod.rs`. Companion to `start_lsx`. Reads `MAXIMA_AUTHORIZE_PORT` for override.
+- **`maxima-bootstrap/src/main.rs`** rewrite of `link2ea://` + `origin2://` handlers:
+  - Deduplicated into a single `handle_protocol_authorize(offer_id, cmd_params, protocol_name)` helper.
+  - Probes 127.0.0.1:13219 with `std::net::TcpStream::connect_timeout(200ms)`.
+  - If alive: `reqwest::Client::post(http://…/authorize?offer_id=…&cmd_params=…)` with 60s timeout. 2xx → success, 4xx/5xx → surface as error (no fallthrough spawn — server made a deliberate decision).
+  - If dead: spawn `maxima-cli.exe launch <offer_id>` (legacy Path B preserved).
+  - New `log_event` helper writes structured lines to `%TEMP%/maxima_execution.log`.
+- **`maxima-cli/src/main.rs::serve_lsx`** now calls `maxima.start_auth_server` after `start_lsx`. Best-effort: failure logs a warning and `serve` keeps going with LSX alone. The park loop ticks `maxima.update()` once per second so `update_playing_status` can detect game exit and run cloud-save sync.
+- **`maxima-cli/Cargo.toml`** dropped `winreg` (only used by Steam helpers, now in `maxima-lib`).
+- **`maxima-lib/Cargo.toml`** added `urlencoding`.
+- **`maxima-bootstrap`** imports `AUTHORIZE_PORT` from `maxima-lib` instead of duplicating the constant.
+
+### 2026-05-16 — `serve` mode + `start_lsx` probe + defensive license.rs
+
+- **`Mode::Serve { no_rtm }`** subcommand added to `maxima-cli`. Long-running auth-only mode: logs in, starts LSX, optionally RTM, parks indefinitely.
+- **`Maxima::start_lsx`** now probes `127.0.0.1:<port>` with a 200ms TCP timeout before binding. If a server is already listening it logs and returns without binding. Prevents the bootstrap-spawned `maxima-cli launch` from racing the existing `serve` for the LSX socket.
+- **`maxima-lib/src/lsx/request/license.rs`** — `playing().as_ref().unwrap()` replaced with `let Some(playing) = … else { return empty-token }`. Mirrors the pattern `handle_set_presence_request` already had since the catornot patch. With this, externally-launched games (Steam direct, Northstar) that hit `RequestLicense` get a graceful empty-token response instead of crashing the spawned LSX task.
+- Added `maxima-cli serve` operator recipe to CLAUDE.md.
+
+### 2026-05-15 — Steam App ID launch support + LSX response fixes (PR #4)
+
+- **Bootstrap** — accept Steam App IDs (pure numeric) in addition to `Origin.OFR.<digits>.<digits>`. Previously rejected, so Steam-launched titles silently no-op'd.
+- **`maxima-cli`** — `STEAM_GAMES` table maps Steam App ID → Origin offer ID + install subdir; auto-discovers Steam install via registry + `libraryfolders.vdf`; sets `SteamAppId` / `SteamGameId` / `SteamClientLaunch` / `SteamPath` env vars; auto-injects `-noOriginStartup -multiple` launch args.
+- **`launch::start_game`** — skip `offer.is_installed()` check when `path_override` is supplied. Adds conditional `"Steam"` vs `"EA"` for `EAEntitlementSource` / `EAExternalSource` / `EALaunchOwner`.
+- **`GetAllGameInfoResponse`** — captures real `Version` and `Title` from the LSX Challenge handshake (was hardcoded `"0"` / `"1.0.1.3"` / `Titanfall® 2 Deluxe Edition`).
+- **`GetProfileResponse`** — `attr_IsSubscriber` / `attr_IsSteamSubscriber` reflect `env::var("SteamAppId")` presence.
+- **`IsProgressiveInstallationAvailableResponse`** — echoes the request's `attr_ItemId` instead of hardcoded TF2 offer.
+- **`handle_set_presence_request`** — graceful no-op when `playing()=None` (catornot patch, applied here).
+- **`Connection::new`** — accepts external LSX connections (catornot patch).
+- **Bootstrap exit codes** — non-zero exits from `maxima-cli` now propagate as errors instead of being logged as "Success".
+
+### 2026-05-14 — console visibility, NSIS registry view, full installer (PRs #1–#3)
+
+- **`maxima-cli`** — `AllocConsole()` + `SetStdHandle("CONOUT$" / "CONIN$")` so the CLI is actually visible when bootstrap (GUI subsystem) spawns it. Panic hook to `%LOCALAPPDATA%\Maxima\Logs\maxima-cli.panic.log`. Plain `fn main()` + manual tokio runtime so the panic hook is installed before anything fallible. `init_logger_named` for per-binary log filenames.
+- **`maxima-bootstrap`** — `link2ea://` URL parsing implemented (was `todo!()`); `origin2://` reads real `offerIds` from URL (was hardcoded BF2 offer); `qrc://` no longer panics on missing marker; offer-id shape validation defends against `--login=` flag injection.
+- **`maxima-lib/src/util/log.rs`** — always-on file sink in addition to stdout; default `%LOCALAPPDATA%\Maxima\Logs\<binary>.log`.
+- **NSIS installer** (`installer/maxima-setup.nsi`) — full rewrite. `SetRegView` properly reset before HKCR writes (avoids 32-vs-64-bit view collision). `BackupProtocol` guards against backing up Maxima's own values. Cross-compiled via `mingw-w64` + `nsis` from macOS.
+- **CI** — `build-ci.yml` matrix expanded to Linux+Windows+macOS; Linux restricted to `-p maxima-cli -p maxima-bootstrap` (UI/TUI excluded due to rustix 0.37 incompatibility on nightly); Windows builds full workspace + NSIS. `release.yml` builds helper on macOS + installer on Windows + assembles GitHub release on Ubuntu.
+- **`maxima-lib/src/util/dll_injector.rs`** — `GetModuleHandleW` / `LoadLibraryW` + UTF-16 paths (from upstream `fix/non-ascii-characters`).
+- **`maxima-lib/src/unix/wine.rs`** — bare `HKLM\Software\Origin` registry entry, `regedit /S`, stderr captured.
+- **`maxima-lib/src/core/launch.rs`** — `OnlineOffline` mode calls `needs_license_update` (from upstream `fix/license-update-online-offline`); `LaunchMode::Offline` implemented (was `todo!()`).
+- **`maxima-lib/src/lsx/request/license.rs`** — `MAXIMA_DENUVO_TOKEN` env override (from upstream `feat/license-token-override`).
+- **`maxima-cli launch`** — Steam-only owner passthrough (warn + try anyway when slug matches `Origin.OFR.<digits>.<digits>` but EA library doesn't know it); `GetGameBySlug` subcommand body restored (was a no-op stub upstream).
+
+### Earlier — initial fork
+
+Native Swift `MaximaHelper.app` replacing the upstream AppleScript helper; NSIS installer cross-compiled via mingw + nsis; release CI; PR template + upstream-PR guard; CLAUDE.md / README scope-narrowed to macOS/CrossOver + TF2.

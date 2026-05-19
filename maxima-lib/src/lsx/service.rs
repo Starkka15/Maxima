@@ -29,12 +29,16 @@ pub async fn start_server(port: u16, maxima: LockedMaxima) -> Result<(), LSXServ
         while idx < connections.len() {
             let connection = &mut connections[idx];
 
-            if let Err(_) = connection.process_queue().await {
-                warn!("Failed to process LSX message queue");
+            if let Err(err) = connection.process_queue().await {
+                warn!("Failed to process LSX message queue: {}", err);
             }
 
-            if let Err(_) = connection.listen().await {
-                warn!("LSX connection closed");
+            if let Err(err) = connection.listen().await {
+                // Surface the actual error — `Closed` means clean EOF
+                // from the peer (game closed the socket on purpose),
+                // anything else is an unexpected transport / parse
+                // failure that may be the cause of an in-game error.
+                warn!("LSX connection closed: {}", err);
                 connections.remove(idx);
                 maxima
                     .lock()

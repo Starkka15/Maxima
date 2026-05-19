@@ -6,7 +6,7 @@ use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use regex::Regex;
 
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{path::PathBuf, time::Instant};
 
 #[cfg(windows)]
 use is_elevated::is_elevated;
@@ -20,7 +20,7 @@ use maxima::{
 use maxima::{
     content::{
         downloader::ZipDownloader,
-        manager::{QueuedGame, QueuedGameBuilder},
+        manager::QueuedGameBuilder,
         ContentService,
     },
     core::{
@@ -43,155 +43,12 @@ use maxima::{
     },
     ooa,
     rtm::client::BasicPresence,
+    steam::{lookup_steam_game, resolve_steam_install_path, EA_OFFER_ID_PATTERN, STEAM_APP_ID_PATTERN},
     util::{log::init_logger_named, native::take_foreground_focus, registry::check_registry_validity},
 };
 
 lazy_static! {
     static ref MANUAL_LOGIN_PATTERN: Regex = Regex::new(r"^(.*):(.*)$").unwrap();
-    // Matches a well-formed EA offer ID like "Origin.OFR.50.0002694"
-    static ref EA_OFFER_ID_PATTERN: Regex = Regex::new(r"^Origin\.OFR\.\d+\.\d+$").unwrap();
-    // Matches a Steam App ID emitted by `link2ea://launchgame/<id>?platform=steam`
-    static ref STEAM_APP_ID_PATTERN: Regex = Regex::new(r"^\d{1,10}$").unwrap();
-}
-
-/// Hardcoded fallback table for EA-published games available on Steam.
-///
-/// When TF2 (and similar) is launched from inside Steam, the URL Steam emits
-/// is `link2ea://launchgame/<steam_app_id>?platform=steam&theme=...`. Steam
-/// does NOT spawn the game executable — it expects the link2ea handler (us)
-/// to take over the launch entirely: auth + spawn the binary with the right
-/// env vars so TF2 connects to our LSX server.
-///
-/// For Steam-only owners whose EA account is not linked, the EA library
-/// lookup will fail to translate the Steam App ID to an Origin offer ID
-/// AND won't know where the game is installed. This table provides both:
-///   - the EA Origin offer ID to use for license/auth
-///   - the relative path inside Steam's `steamapps/common/` to find the exe
-///
-/// Discovery process at runtime (`resolve_steam_install_path`):
-///   1. Read `HKLM\SOFTWARE\(Wow6432Node\)Valve\Steam\InstallPath` for Steam root
-///   2. Parse `<steam>\steamapps\libraryfolders.vdf` for additional libraries
-///   3. Look for `<library>\steamapps\appmanifest_<app_id>.acf` and its `installdir`
-///   4. Fall back to `<steam_root>\steamapps\common\<install_subdir>\<exe>` from this table
-///
-/// Extend as more EA-on-Steam titles are validated.
-struct SteamGameEntry {
-    steam_app_id: &'static str,
-    origin_offer_id: &'static str,
-    /// Directory name under `steamapps/common/`, e.g. "Titanfall2"
-    install_subdir: &'static str,
-    /// Game executable filename within the install dir, e.g. "Titanfall2.exe"
-    exe_name: &'static str,
-}
-
-const STEAM_GAMES: &[SteamGameEntry] = &[
-    SteamGameEntry {
-        steam_app_id: "1237970",
-        // Note: NOT Origin.OFR.50.0002694 — that's Apex Legends. TF2's real
-        // offer ID is Origin.OFR.50.0001456, confirmed against a real EA
-        // library dump ("titanfall-2 - Titanfall 2 - Origin.OFR.50.0001456").
-        origin_offer_id: "Origin.OFR.50.0001456",
-        install_subdir: "Titanfall2",
-        exe_name: "Titanfall2.exe",
-    },
-];
-
-fn lookup_steam_game(steam_app_id: &str) -> Option<&'static SteamGameEntry> {
-    STEAM_GAMES.iter().find(|g| g.steam_app_id == steam_app_id)
-}
-
-/// Resolve where a given Steam game is installed on disk. Returns the full
-/// path to the game executable (e.g. `C:\...\Steam\steamapps\common\Titanfall2\Titanfall2.exe`)
-/// or `None` if the game isn't installed in any known Steam library.
-///
-/// Lookup order:
-///   1. Steam install path from registry (`HKLM\SOFTWARE\WOW6432Node\Valve\Steam\InstallPath`
-///      or `HKLM\SOFTWARE\Valve\Steam\InstallPath`)
-///   2. Common default install locations as a last-resort
-///   3. Parse libraryfolders.vdf to find additional Steam library folders
-///   4. Verify the executable exists at `<library>\steamapps\common\<subdir>\<exe>`
-#[cfg(windows)]
-fn resolve_steam_install_path(game: &SteamGameEntry) -> Option<PathBuf> {
-    use winreg::enums::HKEY_LOCAL_MACHINE;
-    use winreg::RegKey;
-
-    let mut steam_roots: Vec<PathBuf> = Vec::new();
-
-    // 1. Registry — try both views since Steam installs as 32-bit on most systems
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    for key in &[
-        "SOFTWARE\\WOW6432Node\\Valve\\Steam",
-        "SOFTWARE\\Valve\\Steam",
-    ] {
-        if let Ok(subkey) = hklm.open_subkey(key) {
-            if let Ok(path) = subkey.get_value::<String, _>("InstallPath") {
-                steam_roots.push(PathBuf::from(path));
-            }
-        }
-    }
-
-    // 2. Common defaults (covers fresh Wine bottles where the registry key
-    //    may not have been written yet, or when running outside Wine)
-    for default in &[
-        "C:\\Program Files (x86)\\Steam",
-        "C:\\Program Files\\Steam",
-    ] {
-        let p = PathBuf::from(default);
-        if p.exists() && !steam_roots.contains(&p) {
-            steam_roots.push(p);
-        }
-    }
-
-    // 3. For each Steam root, gather library folders from libraryfolders.vdf
-    //    and search for the game.
-    for root in &steam_roots {
-        let mut libraries: Vec<PathBuf> = vec![root.clone()];
-
-        // Parse libraryfolders.vdf for extra library paths. VDF is a simple
-        // key-value format; we don't need a full parser — just grep "path".
-        let vdf_paths = [
-            root.join("steamapps").join("libraryfolders.vdf"),
-            root.join("config").join("libraryfolders.vdf"),
-        ];
-        for vdf in &vdf_paths {
-            if let Ok(content) = std::fs::read_to_string(vdf) {
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    // Lines look like:   "path"   "C:\\SteamLibrary"
-                    if let Some(rest) = trimmed.strip_prefix("\"path\"") {
-                        if let Some(start) = rest.find('"') {
-                            let after = &rest[start + 1..];
-                            if let Some(end) = after.find('"') {
-                                let extra = PathBuf::from(after[..end].replace("\\\\", "\\"));
-                                if !libraries.contains(&extra) {
-                                    libraries.push(extra);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4. Verify the executable exists in each library
-        for lib in &libraries {
-            let exe = lib
-                .join("steamapps")
-                .join("common")
-                .join(game.install_subdir)
-                .join(game.exe_name);
-            if exe.exists() {
-                return Some(exe);
-            }
-        }
-    }
-
-    None
-}
-
-#[cfg(not(windows))]
-fn resolve_steam_install_path(_game: &SteamGameEntry) -> Option<PathBuf> {
-    None
 }
 
 #[derive(Subcommand, Debug)]
@@ -254,6 +111,25 @@ enum Mode {
 
         #[arg(long)]
         file: String,
+    },
+    /// Run as a passive LSX server — log in, start the LSX listener, optionally
+    /// log in to RTM, and wait indefinitely (Ctrl-C to stop). This is the CLI
+    /// equivalent of "open the Maxima UI and leave it running": no game is
+    /// launched by this process, so when an externally-started game (Steam
+    /// `applaunch`, Northstar's `steam.exe -applaunch 1237970 -northstar`, or
+    /// a direct double-click on `Titanfall2.exe`) connects to LSX, the
+    /// connection's `playing()` is None — which exercises the
+    /// catornot/patch-external-lsx code path that the user reports works on
+    /// Windows. Use this when `maxima-cli launch` keeps tripping TF2's
+    /// "File corruption detected" tamper check: kick `serve` first, then
+    /// launch the game externally.
+    Serve {
+        /// Skip RTM (Real-Time Messaging) login — useful in low-connectivity
+        /// environments or when you only care about LSX auth, not friends
+        /// presence. Default is to log in to RTM so SetPresence requests from
+        /// the game update your status normally.
+        #[arg(long)]
+        no_rtm: bool,
     },
 }
 
@@ -689,54 +565,24 @@ async fn startup(args: Args) -> Result<()> {
                 game_path
             };
 
-            // Steam DRM stub in EA-on-Steam titles (notably TF2) exits with
-            // code 100010 ("Steam not detected") if launched without the
-            // SteamAppId / SteamGameId env vars set. EA Desktop's Link2EA.exe
-            // sets these when it spawns the game; we have to do the same.
-            // The env vars propagate from this process through bootstrap to
-            // the actual game executable via Command::env inheritance.
-            let is_steam_launch = STEAM_APP_ID_PATTERN.is_match(&slug);
-            if is_steam_launch {
-                info!("Setting Steam env vars (SteamAppId={}) for Steam-launched game", slug);
-                std::env::set_var("SteamAppId", &slug);
-                std::env::set_var("SteamGameId", &slug);
-                // Steam also normally exports these — set defaults so anything
-                // that polls the env directly doesn't see them unset.
-                if std::env::var("SteamClientLaunch").is_err() {
-                    std::env::set_var("SteamClientLaunch", "1");
-                }
-                if std::env::var("SteamPath").is_err() {
-                    std::env::set_var("SteamPath", "C:\\Program Files (x86)\\Steam");
-                }
-            }
+            // Steam-Play detection: if the original slug was a numeric
+            // Steam App ID, surface it via `LaunchOptions.steam_app_id`.
+            // `launch::start_game` handles the SteamAppId/SteamGameId env
+            // vars + `-noOriginStartup -multiple` arg injection in one
+            // place — see the LaunchOptions doc comment.
+            let steam_app_id = STEAM_APP_ID_PATTERN
+                .is_match(&slug)
+                .then(|| slug.clone());
 
-            // Auto-inject launch args known to be required for Wine/Steam
-            // launches. These are the same defaults flightcore-ng uses
-            // (see catornot/flightcore-ng wine_run.rs L23-31):
-            //   -noOriginStartup : skip the Origin "starting" wait that hangs
-            //                      forever in Wine since EA Desktop isn't present
-            //   -multiple        : allow multiple game instances (avoids the
-            //                      "another instance already running" check that
-            //                      can fire when Steam + Maxima race the launch)
-            // Only add them if the user didn't already specify them.
-            let mut final_game_args = game_args;
-            if is_steam_launch {
-                let has_no_origin = final_game_args
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case("-noOriginStartup"));
-                let has_multiple = final_game_args
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case("-multiple"));
-                if !has_no_origin {
-                    final_game_args.insert(0, "-noOriginStartup".to_string());
-                }
-                if !has_multiple {
-                    final_game_args.insert(0, "-multiple".to_string());
-                }
-                info!("Auto-injected Steam launch args; final args: {:?}", final_game_args);
-            }
-
-            start_game(&offer_id, resolved_game_path, final_game_args, login, is_steam_launch, maxima_arc.clone()).await
+            start_game(
+                &offer_id,
+                resolved_game_path,
+                game_args,
+                login,
+                steam_app_id,
+                maxima_arc.clone(),
+            )
+            .await
         }
         Mode::ListGames => list_games(maxima_arc.clone()).await,
         Mode::LocateGame { path } => locate_game(maxima_arc.clone(), &path).await,
@@ -761,6 +607,7 @@ async fn startup(args: Args) -> Result<()> {
             build_id,
             file,
         } => download_specific_file(maxima_arc.clone(), &offer_id, &build_id, &file).await,
+        Mode::Serve { no_rtm } => serve_lsx(maxima_arc.clone(), no_rtm).await,
     }?;
 
     Ok(())
@@ -815,7 +662,7 @@ async fn interactive_start_game(maxima_arc: LockedMaxima) -> Result<()> {
         game.base_offer().offer_id().to_owned()
     };
 
-    start_game(&offer_id, None, Vec::new(), None, false, maxima_arc.clone()).await?;
+    start_game(&offer_id, None, Vec::new(), None, None, maxima_arc.clone()).await?;
 
     Ok(())
 }
@@ -1258,7 +1105,7 @@ async fn start_game(
     game_path_override: Option<String>,
     game_args: Vec<String>,
     login: Option<String>,
-    steam_launch: bool,
+    steam_app_id: Option<String>,
     maxima_arc: LockedMaxima,
 ) -> Result<()> {
     {
@@ -1280,7 +1127,7 @@ async fn start_game(
         path_override: game_path_override,
         arguments: game_args,
         cloud_saves: true,
-        steam_launch,
+        steam_app_id,
     };
 
     if login.is_none() {
@@ -1322,4 +1169,107 @@ async fn start_game(
     }
 
     Ok(())
+}
+
+/// Long-running "passive LSX server" mode — the CLI equivalent of leaving the
+/// Maxima UI open.
+///
+/// Why this exists: the catornot/patch-external-lsx scenario only works
+/// reliably when the LSX server's `maxima.playing()` is None at the moment
+/// the game establishes its socket. `maxima-cli launch` always sets
+/// `playing = Some(...)` immediately before spawning bootstrap, so when the
+/// game connects a few seconds later the LSX handlers go down the
+/// "Some(context)" branch in `Connection::new` (Kyber PID lookup, RTM
+/// presence updates, real OOA license requests, etc.). On Windows that's
+/// fine; on macOS/CrossOver the user reports it triggers TF2's
+/// "Engine Error: File corruption detected" tamper dialog.
+///
+/// `maxima-cli serve` decouples the two halves of the launch:
+///
+///   1. Terminal 1: `maxima-cli.exe serve` — logs in, opens the LSX listener
+///      on the configured port (`MAXIMA_LSX_PORT` or 3216), optionally logs
+///      in to RTM, and parks.
+///   2. Terminal/Steam/Northstar: launch the game by any means that gets
+///      `EALsxPort=<that port>` into the process environment (Steam's
+///      `applaunch`, Draconis's vanilla / Northstar launch, or a `cxstart`
+///      against `Titanfall2.exe` after manually setting the env var).
+///
+/// When the game connects, the server sees `playing=None`, takes the
+/// catornot external-LSX path (now correctly defended in
+/// `license.rs` / `profile.rs::set_presence`), and the auth flow proceeds.
+///
+/// This loop deliberately does NOT call `maxima.update()` — `update_playing_status`
+/// is a no-op when `playing` is None and we don't want the content manager
+/// poking at downloads from a serve session. Ctrl-C is the exit path.
+async fn serve_lsx(maxima_arc: LockedMaxima, no_rtm: bool) -> Result<()> {
+    {
+        let mut maxima = maxima_arc.lock().await;
+        maxima.start_lsx(maxima_arc.clone()).await?;
+        info!("LSX server listening on port {}", maxima.lsx_port());
+
+        // Bring up the HTTP `/authorize` endpoint too. Bootstrap probes
+        // this when handling `link2ea://` / `origin2://` and forwards the
+        // offer here instead of spawning a duplicate `maxima-cli launch`.
+        // Failure to bind isn't fatal — LSX is what TF2 strictly needs,
+        // and bootstrap falls back to the legacy spawn path if the probe
+        // can't reach us.
+        if let Err(err) = maxima.start_auth_server(maxima_arc.clone()).await {
+            warn!(
+                "Authorize HTTP server failed to start ({}); bootstrap will fall back \
+                 to spawning maxima-cli launch on link2ea://.",
+                err
+            );
+        }
+
+        if !no_rtm {
+            // Best-effort RTM login: it's only needed for friends presence /
+            // SetPresence handlers. A failure here shouldn't bring down the
+            // LSX server.
+            if let Err(err) = maxima.rtm().login().await {
+                warn!("RTM login failed (continuing without presence): {}", err);
+            } else {
+                match maxima.friends(0).await {
+                    Ok(friends) => {
+                        let players: Vec<String> =
+                            friends.iter().map(|f| f.id().to_owned()).collect();
+                        if let Err(err) = maxima.rtm().subscribe(&players).await {
+                            warn!("Failed to subscribe to friends presence: {}", err);
+                        } else {
+                            info!("Subscribed to {} friends for presence", players.len());
+                        }
+                    }
+                    Err(err) => warn!("Failed to fetch friends list: {}", err),
+                }
+            }
+        }
+    }
+
+    info!("Serving LSX. Launch your game externally (Steam / Draconis / etc.); press Ctrl-C to stop.");
+
+    // Park indefinitely. Tick `maxima.update()` so when a game launched
+    // via `/authorize` exits, `update_playing_status` notices the
+    // bootstrap child has finished, runs cloud-save sync, and clears
+    // `maxima.playing` — leaving the server ready to handle the next
+    // launch with a clean state.
+    loop {
+        {
+            let mut maxima = maxima_arc.lock().await;
+            for event in maxima.consume_pending_events() {
+                if let MaximaEvent::ReceivedLSXRequest(pid, request) = event {
+                    debug!("LSX request from pid={}: {:?}", pid, request);
+                }
+            }
+            maxima.update().await;
+            // Heartbeat RTM so presence stays fresh (no-op if RTM wasn't started).
+            if !no_rtm {
+                if let Err(err) = maxima.rtm().heartbeat().await {
+                    warn!("RTM heartbeat failed: {}", err);
+                }
+            }
+        }
+        // 1s tick — enough to detect game exit promptly without burning
+        // CPU. Lock contention with LSX handlers is negligible at this
+        // cadence.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }

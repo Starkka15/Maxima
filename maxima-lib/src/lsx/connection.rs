@@ -1,6 +1,6 @@
 use derive_getters::Getters;
 use lazy_static::lazy_static;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use quick_xml::DeError;
 use regex::Regex;
 use std::{
@@ -151,7 +151,10 @@ impl ConnectionState {
 
     pub fn queue_message(&mut self, message: LSX) -> Result<(), LSXConnectionError> {
         let mut str = quick_xml::se::to_string(&message)?;
-        debug!("Queuing LSX Message: {}", str);
+        // Same rationale as the `info!("Received LSX Message: …")` log
+        // above — paired here so the trace shows the request/response
+        // sequence in order.
+        info!("Queuing LSX Message: {}", str);
 
         if let EncryptionState::Enabled(key) = self.encryption {
             str = simple_encrypt(str.as_bytes(), &key)
@@ -376,7 +379,14 @@ impl Connection {
     // Message Processing
 
     async fn process_message(&mut self, message: &str) -> Result<(), LSXConnectionError> {
-        debug!("Received LSX Message: {}", message);
+        // Promoted from `debug!` to `info!` so the per-launch LSX trace
+        // is captured in `maxima-cli.log` by default. The XML payload is
+        // typically <500 bytes per message and we receive ~15 messages
+        // per TF2 launch, so the volume is fine. Lets us diagnose exactly
+        // which LSX request TF2 sends last before disconnecting (the
+        // "File corruption" symptom kills the connection mid-flow and
+        // the last successful request tells us where to look next).
+        info!("Received LSX Message: {}", message);
 
         let mut message = message.to_string();
         message.remove_matches("version=\"\" ");

@@ -42,7 +42,10 @@ pub async fn start_game_request(
             path_override: exe_override,
             arguments: args,
             cloud_saves,
-            steam_launch: false,
+            // UI launches are always EA-Desktop-style; the UI never
+            // receives a Steam App ID. Steam-Play handoffs come through
+            // `link2ea://` to the bootstrap, not the UI's Play button.
+            steam_app_id: None,
         },
     )
     .await

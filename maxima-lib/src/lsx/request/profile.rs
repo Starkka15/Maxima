@@ -39,15 +39,23 @@ pub async fn handle_profile_request(
     debug!("Got profile for {} {:?}", &name, path);
 
     // When the game was launched from a Steam context, the user IS a Steam
-    // subscriber for this title — the EntitlementSource in GetAllGameInfo
-    // is already "STEAM", and TF2's DRM stub treats a contradiction between
-    // those two fields (entitlement says Steam, profile says "not a Steam
-    // subscriber") as a tamper signal and triggers "Engine Error: File
-    // corruption detected".
+    // subscriber for this title — and the EntitlementSource in GetAllGameInfo
+    // also reports "STEAM" so we keep the two consistent here. TF2's DRM stub
+    // treats any contradiction between those two fields (e.g. entitlement
+    // says Steam, profile says "not a Steam subscriber") as a tamper signal
+    // and shows "Engine Error: File corruption detected".
     //
-    // Detect by env var SteamAppId which maxima-cli sets when invoked via a
-    // `link2ea://launchgame/<numeric>?platform=steam` URL.
-    let is_steam_launch = std::env::var("SteamAppId").is_ok();
+    // Read the launch context from `Maxima.playing()` — populated by
+    // `launch::start_game` with `LaunchOptions.steam_app_id`. This used to
+    // read `env::var("SteamAppId")` directly, which worked when maxima-cli
+    // set the env var on its own process, but stopped working once
+    // `launch::start_game` started setting it on the spawned game's Command
+    // only (not the parent serve process where this handler runs).
+    let is_steam_launch = maxima
+        .playing()
+        .as_ref()
+        .and_then(|p| p.steam_app_id().as_ref())
+        .is_some();
 
     make_lsx_handler_response!(Response, GetProfileResponse, {
        attr_Persona: name.to_owned(),

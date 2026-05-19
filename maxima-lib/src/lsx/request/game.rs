@@ -65,6 +65,27 @@ pub async fn handle_all_game_info_request(
         )
     };
 
+    // EntitlementSource must agree with `IsSteamSubscriber` in
+    // `GetProfileResponse` — TF2's DRM stub treats any contradiction
+    // (e.g. "STEAM" + IsSteamSubscriber=false) as a tamper signal and
+    // shows "Engine Error: File corruption detected". Both are now
+    // sourced from `ActiveGameContext.steam_app_id` (the original
+    // Steam App ID that triggered this launch, if any).
+    let entitlement_source: String = {
+        let arc = state.write().await.maxima_arc();
+        let maxima = arc.lock().await;
+        let is_steam = maxima
+            .playing()
+            .as_ref()
+            .and_then(|p| p.steam_app_id().as_ref())
+            .is_some();
+        if is_steam {
+            "STEAM".to_string()
+        } else {
+            "EA".to_string()
+        }
+    };
+
     make_lsx_handler_response!(Response, GetAllGameInfoResponse, {
         attr_FullGamePurchased: true,
         attr_FullGameReleased: true,
@@ -74,7 +95,7 @@ pub async fn handle_all_game_info_request(
         attr_Expiration: "0000-00-00T00:00:00".to_string(),
         attr_UpToDate: true,
         attr_HasExpiration: false,
-        attr_EntitlementSource: "STEAM".to_string(),
+        attr_EntitlementSource: entitlement_source,
         attr_AvailableVersion: version,
         attr_DisplayName: title,
         attr_FreeTrial: false,
