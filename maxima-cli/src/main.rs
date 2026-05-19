@@ -568,9 +568,11 @@ async fn startup(args: Args) -> Result<()> {
 
             // Steam-Play detection: if the original slug was a numeric
             // Steam App ID, surface it via `LaunchOptions.steam_app_id`.
-            // `launch::start_game` handles the SteamAppId/SteamGameId env
-            // vars + `-noOriginStartup -multiple` arg injection in one
-            // place — see the LaunchOptions doc comment.
+            // `launch::start_game` uses that to set SteamAppId/SteamGameId
+            // env vars on the spawned game — see the LaunchOptions doc
+            // comment. Per-game launch args (-noOriginStartup, -multiple,
+            // etc.) are the caller's responsibility: pass via --game-args
+            // or MAXIMA_LAUNCH_ARGS.
             let steam_app_id = STEAM_APP_ID_PATTERN.is_match(&slug).then(|| slug.clone());
 
             start_game(

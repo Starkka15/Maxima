@@ -322,8 +322,8 @@ Everything below is on top of upstream `master` at `cbde5f0`. Categorized so we 
 - **`Mode::Launch`** (legacy path B) now:
   - Resolves slug via EA library lookup, then EA-offer passthrough, then `STEAM_GAMES` table fallback for Steam-only owners with unlinked accounts.
   - Sets `SteamAppId` / `SteamGameId` / `SteamClientLaunch` / `SteamPath` env vars when slug matches `<1..=10 digits>` (Steam App ID pattern).
-  - Auto-injects `-noOriginStartup -multiple` launch args for Steam-launched games (Wine/Origin compatibility).
   - Resolves Steam install path via `lookup_steam_game` + `resolve_steam_install_path` (registry + `libraryfolders.vdf` parse) when no `--game-path` is given.
+  - Per-game launch args (e.g. `-noOriginStartup` for Northstar, `-multiple` for Source-engine titles) are NOT auto-injected. Callers pass them via `--game-args`, `MAXIMA_LAUNCH_ARGS`, or `cmd_params` on the `link2ea://` URL — Maxima stays universal.
 - `Mode::GetGameBySlug` actually prints slug/offer_id/content_id/display_name/installed (was a no-op stub upstream).
 
 #### Steam helpers — new module (`maxima-lib/src/steam.rs`)
@@ -860,6 +860,28 @@ When TF2 emits `link2ea://`, bootstrap forwards to the running `serve` and exits
 ## Changelog (most recent first)
 
 History of significant changes since this fork was forked. Not a substitute for `git log` but useful for "when did X land" questions.
+
+### 2026-05-19 — drop TF2-specific launch-arg auto-injection from the universal path
+
+`launch::start_game` no longer auto-inserts `-noOriginStartup -multiple` when `LaunchOptions.steam_app_id` is `Some(...)`. Those flags are TF2/Northstar/Source-engine-specific and were leaking into a path that's supposed to work for every EA-on-Steam title.
+
+What's removed:
+- The conditional block in [maxima-lib/src/core/launch.rs](maxima-lib/src/core/launch.rs) that prepended `-noOriginStartup` and `-multiple` to `game_args` whenever a Steam App ID was present.
+- The matching point #4 in the `LaunchOptions.steam_app_id` doc comment.
+- Stale references to the injection in [maxima-lib/src/auth_server.rs](maxima-lib/src/auth_server.rs) and [maxima-cli/src/main.rs](maxima-cli/src/main.rs).
+
+What's kept (universally useful, not game-specific):
+- `SteamAppId` / `SteamGameId` env vars on the spawned game — required by `SteamAPI_Init` for any EA-on-Steam title, without them the game exits with code 100010 "Steam not detected".
+- `SteamClientLaunch=1` / `SteamPath` defaults.
+- `EAEntitlementSource` / `EAExternalSource` / `EALaunchOwner` flipped to `"Steam"` when launched from a Steam context.
+
+How callers supply the flags now:
+- CLI: `maxima-cli launch <slug> --game-args -noOriginStartup --game-args -multiple`
+- Env: `MAXIMA_LAUNCH_ARGS="-noOriginStartup -multiple"`
+- Protocol: `link2ea://launchgame/<offer>?cmd_params=-noOriginStartup%20-multiple` (URL-decoded and split by [auth_server.rs::handle_authorize](maxima-lib/src/auth_server.rs))
+- Draconis already passes both flags in its Northstar invocation (`steam.exe -applaunch 1237970 -novid -northstar -noOriginStartup -multiple`), so Draconis vanilla and Northstar flows are unaffected.
+
+Why now: validated on 2026-05-19 that `maxima-cli launch Origin.OFR.50.0001456` against the `maxima-ui`-installed TF2 reaches the Main Menu cleanly (full LSX trace including `GetProfile`, `GetAuthCode`, `QueryEntitlements`, `SetPresence`, `QueryFriends`). The launch path doesn't need TF2-specific defaults; what TF2 needed for Northstar can come from the caller.
 
 ### 2026-05-19 — `maxima-ui` works on macOS/CrossOver: wgpu renderer + busy-loop fix
 

@@ -371,9 +371,11 @@ async fn handle_authorize(
         cloud_saves: true,
         // Threading the original Steam App ID (if any) through to
         // `launch.rs` makes it set SteamAppId/SteamGameId env vars on
-        // the spawned game and auto-inject -noOriginStartup / -multiple
-        // launch args — without this TF2 from Steam exits with code
-        // 100010 "Steam not detected".
+        // the spawned game — without these the game exits with code
+        // 100010 "Steam not detected". Per-game launch args (e.g.
+        // -noOriginStartup, -multiple) must come from the caller via
+        // `cmd_params` or `MAXIMA_LAUNCH_ARGS`; we no longer inject
+        // any TF2-specific defaults.
         steam_app_id,
     };
 

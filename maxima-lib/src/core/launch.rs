@@ -95,21 +95,21 @@ pub struct LaunchOptions {
     ///
     /// Passing `Some(steam_app_id)` causes `start_game` to:
     ///   1. Set `EAEntitlementSource` / `EAExternalSource` / `EALaunchOwner`
-    ///      to `"Steam"` instead of `"EA"` so TF2's DRM stub sees a launch
+    ///      to `"Steam"` instead of `"EA"` so the DRM stub sees a launch
     ///      context consistent with where it's being run from.
     ///   2. Set `SteamAppId` / `SteamGameId` env vars on the spawned game
-    ///      (required by the Steam DRM stub — without these TF2 exits
+    ///      (required by the Steam DRM stub — without these the game exits
     ///      immediately with code 100010 "Steam not detected").
     ///   3. Default `SteamClientLaunch=1` and `SteamPath=...` if the
     ///      parent env doesn't already provide them.
-    ///   4. Inject `-noOriginStartup -multiple` into `arguments` (the
-    ///      `-noOriginStartup` flag skips Northstar/TF2's Origin-startup
-    ///      wait that hangs forever in Wine; `-multiple` avoids the
-    ///      "another instance already running" race between Steam's
-    ///      verification probe and our spawn).
     ///
     /// `None` (the default) is the EA-Desktop-style launch path — env
     /// vars stay `"EA"` and no Steam-specific setup happens.
+    ///
+    /// Note: per-game launch args (e.g. `-noOriginStartup` for Northstar,
+    /// `-multiple` for Source-engine titles) are NOT auto-injected. Callers
+    /// who need them pass them via `arguments`, `MAXIMA_LAUNCH_ARGS`, or
+    /// `cmd_params` on the `link2ea://` URL.
     pub steam_app_id: Option<String>,
 }
 
@@ -365,27 +365,7 @@ pub async fn start_game(
         game_args.append(&mut parse_arguments(args.as_str()));
     }
 
-    // Steam-Play context: auto-inject `-noOriginStartup -multiple` if not
-    // already present. The two flags are required for EA-on-Steam titles
-    // (notably TF2) under Wine — see the `LaunchOptions.steam_app_id`
-    // doc comment for the why. We add them BEFORE building bootstrap_args
-    // so the bootstrap-spawned child gets them via the base64 payload.
     let is_steam_launch = options.steam_app_id.is_some();
-    if is_steam_launch {
-        if !game_args
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case("-noOriginStartup"))
-        {
-            game_args.insert(0, "-noOriginStartup".to_string());
-        }
-        if !game_args
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case("-multiple"))
-        {
-            game_args.insert(0, "-multiple".to_string());
-        }
-        info!("Steam-Play context; final game args: {:?}", game_args);
-    }
 
     if !bootstrap_path()?.exists() {
         return Err(LaunchError::BootstrapMissing);
