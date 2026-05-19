@@ -695,7 +695,7 @@ The remaining branches (`feat/server`, `feature/umu-launcher`, `feat/new-ci`, et
 
 ### "Engine Error: File corruption detected" after `IsProgressiveInstallationAvailableResponse`
 
-**Status as of 2026-05-18.** Symptom-level workaround landed via the split-brain architecture; root cause still not isolated.
+**Status as of 2026-05-19.** Root cause identified — **Steam CEG (Custom Executable Generation) validation failing under Wine's `ntdll-Junction_Points` patch.** Intractable from Maxima's layer; the validation runs inside `Titanfall2.exe` against Wine's `ntdll` before any LSX request we control. Workaround on macOS/CrossOver: install via `maxima-ui` to a non-Steam path so the binary doesn't carry CEG. See the "Update 2026-05-19 (later) — root cause: Steam CEG + Wine `ntdll-Junction_Points`" sub-section below for the full evidence. The investigation narrative is preserved unchanged below for context.
 
 **Symptom.** When `maxima-cli launch` (Path B) is the LSX server for a Steam-launched TF2, the game completes Challenge → ChallengeAccepted → GetConfig → GetProfile → GetSetting → GetGameInfo → GetAllGameInfo → IsProgressiveInstallationAvailable, then closes the LSX connection and shows the "File corruption detected" engine error. Never reaches `RequestLicense` or `GetAuthCode`.
 
@@ -780,6 +780,34 @@ Caveats:
 
 Do not delete this section until the user confirms TF2 launches reliably end-to-end.
 
+### Update 2026-05-19 (later) — root cause: Steam CEG + Wine `ntdll-Junction_Points`
+
+Final empirical test: `maxima-cli launch Origin.OFR.50.0001456 --game-path "C:\Program Files (x86)\Steam\steamapps\common\Titanfall2\Titanfall2.exe"` against the Steam install. LSX flow proceeds exactly through the same stop point documented in the original symptom — Challenge → ChallengeAccepted → GetConfig → GetProfile → GetSetting → GetGameInfo → GetAllGameInfo → IsProgressiveInstallationAvailable → connection closed → "File corruption detected".
+
+Compared to the **maxima-ui-installed** copy (no Steam involvement) which reaches `RequestLicense` → `GetAuthCode` → `QueryEntitlements` → `SetPresence` → game runs. Same Maxima, same `serve`, same LSX, same account, same EA env vars. **Only the binary differs.**
+
+The smoking gun: [NorthstarProton's `protonprep-valve-staging.sh`](https://github.com/R2NorthstarTools/NorthstarProton/blob/master/patches/protonprep-valve-staging.sh) explicitly disables the wine-staging patch `ntdll-Junction_Points` with the comment:
+
+> `ntdll-Junction_Points - breaks CEG drm`
+
+CEG (Custom Executable Generation) is Steam's per-user DRM. At install time Steam customizes `Titanfall2.exe` with a signature derived from the buyer's SteamID. At launch, the running exe validates that signature against the on-disk install via filesystem operations that the `ntdll-Junction_Points` wine patch breaks. When validation fails, the game emits a generic "File corruption" dialog and exits.
+
+This explains every prior negative result:
+- Toggling `IsSubscriber`, `IsSteamSubscriber`, `EntitlementSource`, `EAExternalSource`, hardcoded vs echoed `ItemId`, etc. never moved the symptom — those all live on the LSX side, **after** CEG fails internally.
+- The catornot patch and the split-brain `serve` architecture didn't help — they couldn't fix something happening before any Maxima code runs.
+- The `maxima-ui` install works because its binary is the EA original (no CEG signing) downloaded from Origin servers, not the Steam-custom-signed copy.
+
+**What Maxima can't do.** The CEG validation runs inside `Titanfall2.exe` against Wine's `ntdll`, before any LSX call we control. There's no Maxima-layer hook that intercepts it.
+
+**What Maxima now does (v0.8.0).** When `path_override` resolves to a path inside `steamapps\common\`, `launch::start_game` emits a `WARN` log explaining the CEG situation and recommending `maxima-ui` install. `--game-path` also now accepts a directory (resolves the exe via `STEAM_GAMES`), so users who hit the bug at least get a clean log line instead of a silent "Game stopped" exit.
+
+**What would actually fix it.**
+- CodeWeavers patching CrossOver to revert `ntdll-Junction_Points` for TF2 — needs upstream action.
+- A Wine runtime without that patch (Proton works, but doesn't run on macOS).
+- Stripping CEG from `Titanfall2.exe` — legally questionable and complex; not pursued.
+
+The official Maxima-Draconis recommendation on macOS/CrossOver is therefore: **install via `maxima-ui` to a non-Steam path**, not via Steam.
+
 ---
 
 ## Pending code quality items
@@ -860,6 +888,16 @@ When TF2 emits `link2ea://`, bootstrap forwards to the running `serve` and exits
 ## Changelog (most recent first)
 
 History of significant changes since this fork was forked. Not a substitute for `git log` but useful for "when did X land" questions.
+
+### 2026-05-19 (later) — `--game-path` accepts directory + Steam CEG warning + root-cause docs
+
+Three changes in `launch::start_game` and CLAUDE.md, in service of the same goal: make the macOS/CrossOver story honest about what Maxima can and can't fix.
+
+- **`--game-path` accepts a directory.** [maxima-lib/src/core/launch.rs](maxima-lib/src/core/launch.rs) used to take `path_override` literally — if a user passed `…\steamapps\common\Titanfall2` (the install dir) instead of `…\steamapps\common\Titanfall2\Titanfall2.exe`, bootstrap silently failed to spawn (can't execute a directory) and the user saw a bare "Game stopped" with no error. Now the resolver detects a directory, looks up the exe name via `lookup_steam_game_by_offer` in the `STEAM_GAMES` table, and logs the resolved path. If the offer isn't in `STEAM_GAMES`, an explicit `error!` line tells the user to pass the full exe path.
+- **Steam CEG warning.** When the resolved game path is inside `steamapps\common\`, `start_game` now emits a `WARN` log that names the root cause (Steam CEG + wine-staging's `ntdll-Junction_Points` patch) and points users to `maxima-ui` install. The warning fires regardless of host OS — on native Windows it's harmless (CEG works there); on macOS/CrossOver it's the heads-up that saves the next user from spending a week debugging LSX traces.
+- **CLAUDE.md root-cause documentation.** The "Engine Error: File corruption detected" section now leads with the resolution (Steam CEG validation under Wine's `ntdll-Junction_Points` patch, intractable from Maxima's layer, workaround is `maxima-ui` install). A new "Update 2026-05-19 (later)" sub-section explains the evidence trail: matching LSX stop-point pattern between two installs, NorthstarProton's explicit `# ntdll-Junction_Points - breaks CEG drm` patch removal, and why all prior LSX-side hypotheses missed.
+
+Validation: the path-override directory case now produces a clean `info!` line ("resolved exe to … via STEAM_GAMES") instead of the silent bootstrap failure. The warning fires correctly when path is in `steamapps\common\` (verified with both file and directory inputs).
 
 ### 2026-05-19 — drop TF2-specific launch-arg auto-injection from the universal path
 

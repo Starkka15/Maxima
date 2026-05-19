@@ -22,6 +22,7 @@ use crate::{
         Maxima,
     },
     ooa::{needs_license_update, request_and_save_license, LicenseAuth, LicenseError},
+    steam::lookup_steam_game_by_offer,
     util::{
         native::{NativeError, SafeParent, SafeStr},
         registry::bootstrap_path,
@@ -272,7 +273,39 @@ pub async fn start_game(
 
     // Need to move this into Maxima and have a "current game" system
     let path = if let Some(game_path_override) = options.path_override {
-        PathBuf::from(&game_path_override)
+        let p = PathBuf::from(&game_path_override);
+        if p.is_dir() {
+            // User passed an install directory, not the executable. Resolve
+            // the exe filename via the STEAM_GAMES table — it's the only
+            // place Maxima carries reliable per-title exe-name mappings for
+            // non-Origin installs (Steam install dirs don't have an Origin
+            // manifest we could otherwise read).
+            match offer
+                .as_ref()
+                .and_then(|o| lookup_steam_game_by_offer(o.offer_id().as_str()))
+            {
+                Some(entry) => {
+                    let exe = p.join(entry.exe_name);
+                    info!(
+                        "game_path '{}' is a directory; resolved exe to '{}' via STEAM_GAMES",
+                        p.display(),
+                        exe.display()
+                    );
+                    exe
+                }
+                None => {
+                    error!(
+                        "game_path '{}' is a directory but offer '{}' is not in the \
+                         STEAM_GAMES table — pass the full path to the .exe instead.",
+                        p.display(),
+                        offer.as_ref().map(|o| o.offer_id().as_str()).unwrap_or("?")
+                    );
+                    return Err(LaunchError::GamePath);
+                }
+            }
+        } else {
+            p
+        }
     } else if !online_offline {
         match offer {
             Some(ref offer) => offer.execute_path(false).await?.clone(),
@@ -287,6 +320,29 @@ pub async fn start_game(
     let path = case_insensitive_path(path.clone());
     let path = path.safe_str()?;
     info!("Game path: {}", path);
+
+    // Heads-up for users hitting Steam CEG (Custom Executable Generation)
+    // failures under Wine. The exe Steam ships for EA-on-Steam titles like
+    // Titanfall 2 is signed per-user with CEG, and CEG's filesystem
+    // verification trips wine-staging's `ntdll-Junction_Points` patch —
+    // which CrossOver inherits — surfacing in-game as
+    // "Engine Error: File corruption detected". Maxima can't fix that from
+    // its layer: the validation runs inside the game exe against `ntdll`
+    // before the LSX `RequestLicense` request we control. NorthstarProton
+    // works around it by reverting that wine patch in their custom Proton
+    // build; on macOS/CrossOver the practical workaround is to install via
+    // maxima-ui to a non-Steam path so the binary doesn't carry CEG.
+    let path_lower = path.to_lowercase();
+    if path_lower.contains("\\steamapps\\common\\") || path_lower.contains("/steamapps/common/") {
+        warn!(
+            "Game path is inside a Steam library (steamapps/common/...). On macOS/CrossOver \
+             and other Wine runtimes, Steam-installed copies of EA-on-Steam titles commonly \
+             trigger 'Engine Error: File corruption detected' because Steam CEG validation \
+             fails under Wine's ntdll Junction_Points patch. If you hit this, install via \
+             maxima-ui to a non-Steam path. See CLAUDE.md 'CEG / Steam-installed games' for \
+             details."
+        );
+    }
 
     #[cfg(unix)]
     mx_linux_setup().await?;
