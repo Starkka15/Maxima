@@ -411,6 +411,10 @@ impl BridgeThread {
             }
             let request = backend_cmd_listener.try_recv();
             if request.is_err() {
+                if matches!(request, Err(std::sync::mpsc::TryRecvError::Disconnected)) {
+                    break 'outer Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
                 continue;
             }
 

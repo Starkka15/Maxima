@@ -65,7 +65,7 @@ pub async fn begin_oauth_login_flow<'a>(context: &mut AuthContext<'a>) -> Result
             read_res = stdin_reader.read_line(&mut stdin_line) => {
                 let _ = read_res?;
                 let line = stdin_line.trim();
-                
+
                 // Try parsing as URL first
                 let mut found_code = false;
                 if let Some((_, qs)) = line.split_once("?") {
@@ -78,7 +78,7 @@ pub async fn begin_oauth_login_flow<'a>(context: &mut AuthContext<'a>) -> Result
                         }
                     }
                 }
-                
+
                 if found_code {
                     return Ok(());
                 }
@@ -90,12 +90,12 @@ pub async fn begin_oauth_login_flow<'a>(context: &mut AuthContext<'a>) -> Result
                         .redirect(reqwest::redirect::Policy::none())
                         .build()
                         .unwrap();
-                        
+
                     let url = context.nucleus_auth_url(JUNO_PC_CLIENT_ID, "code")?;
                     // Clean up the cookie string if the user pasted "remid=..."
                     let cookie_val = if line.starts_with("remid=") { &line[6..] } else { line };
                     let cookie_header = format!("remid={}", cookie_val);
-                    
+
                     if let Ok(res) = client.get(&url).header("Cookie", cookie_header).send().await {
                         if res.status().is_redirection() {
                             if let Some(location) = res.headers().get("location") {
@@ -115,7 +115,7 @@ pub async fn begin_oauth_login_flow<'a>(context: &mut AuthContext<'a>) -> Result
                         }
                     }
                 }
-                
+
                 if !line.is_empty() {
                     println!("Invalid URL or cookie. Please try again.");
                 }

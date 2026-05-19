@@ -78,7 +78,7 @@ pub enum BasicPresence {
     Online,
 }
 
-#[derive(Clone, Builder, Getters, Debug)]
+#[derive(Clone, Builder, Getters, Debug, PartialEq, Eq)]
 pub struct RichPresence {
     basic: BasicPresence,
     status: String,

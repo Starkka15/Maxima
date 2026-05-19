@@ -109,6 +109,7 @@ async fn main() {
     }
 
     let native_options = eframe::NativeOptions {
+        renderer: eframe::Renderer::Wgpu,
         viewport: ViewportBuilder::default()
             .with_inner_size([1280.0, 720.0])
             .with_min_inner_size([940.0, 480.0])
@@ -314,6 +315,11 @@ pub struct MaximaEguiApp {
     installer_state: InstallModalState,
     /// User Settings for the frontend
     settings: FrontendSettings,
+    /// Workaround for wgpu+MoltenVK swapchain init under CrossOver: the first
+    /// swapchain is created in a `VK_SUBOPTIMAL_KHR` state and renders black
+    /// until a resize forces recreation. We nudge the window 1px on the first
+    /// frame to trigger that recreation automatically.
+    swapchain_nudged: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, EnumIter)]
@@ -490,6 +496,7 @@ impl MaximaEguiApp {
             install_queue: HashMap::new(),
             installer_state: InstallModalState::new(&settings),
             settings,
+            swapchain_nudged: false,
         }
     }
 }
@@ -529,7 +536,7 @@ fn custom_window_frame(
     use egui::*;
 
     let panel_frame = egui::Frame {
-        fill: Color32::RED,
+        fill: Color32::TRANSPARENT,
         rounding: 0.0.into(),
         stroke: Stroke::NONE,
         outer_margin: Margin {
@@ -1030,6 +1037,16 @@ impl eframe::App for MaximaEguiApp {
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         puffin::profile_function!();
+        if !self.swapchain_nudged {
+            let current = ctx
+                .input(|i| i.viewport().inner_rect)
+                .map(|r| r.size())
+                .unwrap_or_else(|| egui::vec2(1280.0, 720.0));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                current + egui::vec2(1.0, 0.0),
+            ));
+            self.swapchain_nudged = true;
+        }
         bridge_processor::frontend_processor(self, ctx);
         event_processor::frontend_processor(self, ctx);
 

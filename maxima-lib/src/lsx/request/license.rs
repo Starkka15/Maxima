@@ -1,5 +1,5 @@
-use std::env;
 use log::{debug, info};
+use std::env;
 
 use crate::{
     core::{auth::hardware::HardwareInfo, launch::LaunchMode},

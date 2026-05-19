@@ -457,9 +457,7 @@ pub async fn start_game(
     // own runtime; we default-fill them from the parent env (if Steam
     // really did launch us) or to safe constants otherwise.
     if let Some(ref app_id) = options.steam_app_id {
-        child
-            .env("SteamAppId", app_id)
-            .env("SteamGameId", app_id);
+        child.env("SteamAppId", app_id).env("SteamGameId", app_id);
         let inherited_client_launch = env::var("SteamClientLaunch").ok();
         child.env(
             "SteamClientLaunch",

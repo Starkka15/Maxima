@@ -81,8 +81,7 @@ use crate::core::{
     Maxima,
 };
 use crate::steam::{
-    lookup_steam_game, lookup_steam_game_by_offer, resolve_steam_install_path,
-    STEAM_APP_ID_PATTERN,
+    lookup_steam_game, lookup_steam_game_by_offer, resolve_steam_install_path, STEAM_APP_ID_PATTERN,
 };
 
 /// Default port for the authorize HTTP server. LSX is 3216; we pick
@@ -208,12 +207,7 @@ async fn handle_connection_inner(
     if method == "POST" && path_and_query.starts_with("/authorize") {
         let offer_id = extract_query_param(&path_and_query, "offer_id");
         let cmd_params = extract_query_param(&path_and_query, "cmd_params");
-        return match handle_authorize(
-            offer_id.as_deref(),
-            cmd_params.as_deref(),
-            maxima_arc,
-        )
-        .await
+        return match handle_authorize(offer_id.as_deref(), cmd_params.as_deref(), maxima_arc).await
         {
             Ok(()) => {
                 let body = serde_json::to_vec(&OkResponse { status: "ok" })

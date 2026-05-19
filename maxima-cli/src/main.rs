@@ -18,11 +18,7 @@ use maxima::{
 };
 
 use maxima::{
-    content::{
-        downloader::ZipDownloader,
-        manager::QueuedGameBuilder,
-        ContentService,
-    },
+    content::{downloader::ZipDownloader, manager::QueuedGameBuilder, ContentService},
     core::{
         auth::{
             context::AuthContext,
@@ -43,8 +39,12 @@ use maxima::{
     },
     ooa,
     rtm::client::BasicPresence,
-    steam::{lookup_steam_game, resolve_steam_install_path, EA_OFFER_ID_PATTERN, STEAM_APP_ID_PATTERN},
-    util::{log::init_logger_named, native::take_foreground_focus, registry::check_registry_validity},
+    steam::{
+        lookup_steam_game, resolve_steam_install_path, EA_OFFER_ID_PATTERN, STEAM_APP_ID_PATTERN,
+    },
+    util::{
+        log::init_logger_named, native::take_foreground_focus, registry::check_registry_validity,
+    },
 };
 
 lazy_static! {
@@ -171,8 +171,8 @@ fn ensure_console_attached() {
     use winapi::um::fileapi::{CreateFileA, OPEN_EXISTING};
     use winapi::um::handleapi::INVALID_HANDLE_VALUE;
     use winapi::um::processenv::SetStdHandle;
-    use winapi::um::wincon::GetConsoleWindow;
     use winapi::um::winbase::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    use winapi::um::wincon::GetConsoleWindow;
     use winapi::um::winnt::{FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE};
 
     unsafe {
@@ -461,32 +461,32 @@ async fn startup(args: Args) -> Result<()> {
         } => {
             let offer_id = if login.is_none() {
                 let mut maxima = maxima_arc.lock().await;
-                
+
                 // First try standard slug
                 let mut found_offer_id = None;
                 if let Ok(Some(offer)) = maxima.mut_library().game_by_base_slug(&slug).await {
                     found_offer_id = Some(offer.offer_id().clone());
                 }
-                
+
                 // Then try base offer
                 if found_offer_id.is_none() {
                     if let Ok(Some(offer)) = maxima.mut_library().game_by_base_offer(&slug).await {
                         found_offer_id = Some(offer.offer_id().clone());
                     }
                 }
-                
-                // If still not found, do an exhaustive search across all properties 
+
+                // If still not found, do an exhaustive search across all properties
                 // (useful for Steam App IDs or content IDs)
                 if found_offer_id.is_none() {
                     if let Ok(games) = maxima.mut_library().games().await {
                         for game in games {
                             let base = game.base_offer();
-                            if base.slug() == &slug || 
-                               base.offer_id() == &slug || 
-                               base.product().id() == &slug || 
-                               base.product().origin_offer_id() == &slug || 
-                               base.offer().content_id() == &slug ||
-                               base.product().product().id() == &slug 
+                            if base.slug() == &slug
+                                || base.offer_id() == &slug
+                                || base.product().id() == &slug
+                                || base.product().origin_offer_id() == &slug
+                                || base.offer().content_id() == &slug
+                                || base.product().product().id() == &slug
                             {
                                 found_offer_id = Some(base.offer_id().clone());
                                 break;
@@ -494,7 +494,7 @@ async fn startup(args: Args) -> Result<()> {
                         }
                     }
                 }
-                
+
                 if let Some(id) = found_offer_id {
                     id
                 } else if EA_OFFER_ID_PATTERN.is_match(&slug) {
@@ -544,7 +544,8 @@ async fn startup(args: Args) -> Result<()> {
             // about the Steam install. Discover the actual location from
             // Steam's registry + libraryfolders.vdf and pass it as an
             // explicit game_path override.
-            let resolved_game_path = if game_path.is_none() && STEAM_APP_ID_PATTERN.is_match(&slug) {
+            let resolved_game_path = if game_path.is_none() && STEAM_APP_ID_PATTERN.is_match(&slug)
+            {
                 lookup_steam_game(&slug)
                     .and_then(resolve_steam_install_path)
                     .and_then(|p| p.to_str().map(|s| s.to_owned()))
@@ -570,9 +571,7 @@ async fn startup(args: Args) -> Result<()> {
             // `launch::start_game` handles the SteamAppId/SteamGameId env
             // vars + `-noOriginStartup -multiple` arg injection in one
             // place — see the LaunchOptions doc comment.
-            let steam_app_id = STEAM_APP_ID_PATTERN
-                .is_match(&slug)
-                .then(|| slug.clone());
+            let steam_app_id = STEAM_APP_ID_PATTERN.is_match(&slug).then(|| slug.clone());
 
             start_game(
                 &offer_id,
@@ -1244,7 +1243,9 @@ async fn serve_lsx(maxima_arc: LockedMaxima, no_rtm: bool) -> Result<()> {
         }
     }
 
-    info!("Serving LSX. Launch your game externally (Steam / Draconis / etc.); press Ctrl-C to stop.");
+    info!(
+        "Serving LSX. Launch your game externally (Steam / Draconis / etc.); press Ctrl-C to stop."
+    );
 
     // Park indefinitely. Tick `maxima.update()` so when a game launched
     // via `/authorize` exits, `update_playing_status` notices the

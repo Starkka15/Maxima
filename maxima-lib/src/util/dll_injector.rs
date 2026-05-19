@@ -53,10 +53,8 @@ impl DllInjector {
             }
 
             let _process_guard = ProcessHandleGuard(process_handle);
-            let dll_path_wide: Vec<u16> = OsStr::new(dll_path)
-                .encode_wide()
-                .chain(once(0))
-                .collect();
+            let dll_path_wide: Vec<u16> =
+                OsStr::new(dll_path).encode_wide().chain(once(0)).collect();
             let dll_path_size = dll_path_wide.len() * mem::size_of::<u16>();
 
             let remote_memory = VirtualAllocEx(

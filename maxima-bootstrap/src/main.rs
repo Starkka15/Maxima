@@ -3,8 +3,8 @@
 //extern crate windows_service;
 
 use std::env::current_exe;
-use std::path::{Path, PathBuf};
 use std::error::Error;
+use std::path::{Path, PathBuf};
 use std::string::FromUtf8Error;
 use thiserror::Error;
 use tokio::process::Command;
@@ -54,8 +54,12 @@ fn is_valid_origin_offer_id(s: &str) -> bool {
     if parts.next() != Some("OFR") {
         return false;
     }
-    let Some(major) = parts.next() else { return false };
-    let Some(minor) = parts.next() else { return false };
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    let Some(minor) = parts.next() else {
+        return false;
+    };
     if parts.next().is_some() {
         return false;
     }
@@ -78,14 +82,13 @@ fn is_valid_steam_app_id(s: &str) -> bool {
 /// invocation. Best-effort; failures are silently ignored.
 fn log_event(line: &str) {
     let path = std::env::temp_dir().join("maxima_execution.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         use std::io::Write;
-        let _ = writeln!(
-            file,
-            "[{:?}] {}",
-            std::time::SystemTime::now(),
-            line
-        );
+        let _ = writeln!(file, "[{:?}] {}", std::time::SystemTime::now(), line);
     }
 }
 
@@ -262,11 +265,23 @@ pub(crate) enum RunError {
 #[tokio::main]
 async fn main() -> Result<(), RunError> {
     // Immediate entry log
-    if let Ok(temp_dir) = std::env::var("TEMP").map(PathBuf::from).or_else(|_| Ok::<PathBuf, RunError>(std::env::temp_dir())) {
+    if let Ok(temp_dir) = std::env::var("TEMP")
+        .map(PathBuf::from)
+        .or_else(|_| Ok::<PathBuf, RunError>(std::env::temp_dir()))
+    {
         let debug_log = temp_dir.join("maxima_execution.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&debug_log) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&debug_log)
+        {
             use std::io::Write;
-            let _ = writeln!(file, "BOOTSTRAP MAIN START at {:?} | Raw Args: {:?}", std::time::SystemTime::now(), std::env::args().collect::<Vec<_>>());
+            let _ = writeln!(
+                file,
+                "BOOTSTRAP MAIN START at {:?} | Raw Args: {:?}",
+                std::time::SystemTime::now(),
+                std::env::args().collect::<Vec<_>>()
+            );
         }
     }
 
@@ -311,26 +326,54 @@ async fn handle_launch_args() -> Result<bool, RunError> {
         })
         .err()
         .unwrap_or("Success".to_string());
-        
+
     // Unconditional debug log to verify execution (APPEND)
     let temp_dir = std::env::temp_dir();
     let debug_log = temp_dir.join("maxima_execution.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&debug_log) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&debug_log)
+    {
         use std::io::Write;
-        let _ = writeln!(file, "Maxima Bootstrap executed at {:?}\nArgs: {:?}\nResult: {}\n---", std::time::SystemTime::now(), args, str_result);
+        let _ = writeln!(
+            file,
+            "Maxima Bootstrap executed at {:?}\nArgs: {:?}\nResult: {}\n---",
+            std::time::SystemTime::now(),
+            args,
+            str_result
+        );
     }
 
     if str_result != "Success" {
         let log_path = temp_dir.join("maxima_bootstrap_error.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
             use std::io::Write;
-            let _ = writeln!(file, "Maxima Bootstrap Error at {:?}: {}", std::time::SystemTime::now(), str_result);
+            let _ = writeln!(
+                file,
+                "Maxima Bootstrap Error at {:?}: {}",
+                std::time::SystemTime::now(),
+                str_result
+            );
         }
-        
+
         // Try a very simple path as well
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\maxima_debug_error.log") {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("C:\\maxima_debug_error.log")
+        {
             use std::io::Write;
-            let _ = writeln!(file, "Maxima Bootstrap Error at {:?}: {}", std::time::SystemTime::now(), str_result);
+            let _ = writeln!(
+                file,
+                "Maxima Bootstrap Error at {:?}: {}",
+                std::time::SystemTime::now(),
+                str_result
+            );
         }
     }
 
@@ -368,14 +411,26 @@ async fn platform_launch(args: BootstrapLaunchArgs) -> Result<(), NativeError> {
 
     let temp_dir = std::env::temp_dir();
     let debug_log = temp_dir.join("maxima_execution.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&debug_log) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&debug_log)
+    {
         use std::io::Write;
-        let _ = writeln!(file, "PLATFORM_LAUNCH: Executing {:?} with args {:?}", args.path, args.args);
+        let _ = writeln!(
+            file,
+            "PLATFORM_LAUNCH: Executing {:?} with args {:?}",
+            args.path, args.args
+        );
     }
 
     let status = child.spawn()?.wait().await?;
     if !status.success() {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Game exited with code: {:?}", status.code())).into());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Game exited with code: {:?}", status.code()),
+        )
+        .into());
     }
     Ok(())
 }
@@ -412,10 +467,7 @@ async fn run(args: &[String]) -> Result<bool, RunError> {
             //
             // The offer id is the first path segment after the action.
             let url = Url::parse(arg)?;
-            let segments: Vec<&str> = url
-                .path_segments()
-                .map(|c| c.collect())
-                .unwrap_or_default();
+            let segments: Vec<&str> = url.path_segments().map(|c| c.collect()).unwrap_or_default();
             if segments.is_empty() {
                 return Ok(false);
             }

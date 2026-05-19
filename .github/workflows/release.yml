@@ -151,6 +151,7 @@ jobs:
             See [README](https://github.com/AA-EION/Maxima-Draconis#setup-on-macos) for setup instructions.
           draft: false
           prerelease: false
+          generate_release_notes: true
           files: |
             ./artifacts/MaximaHelper.zip
             ./artifacts/MaximaSetup.exe

@@ -13,7 +13,6 @@
 ///   - Call `/lock/authorize` with a `Vec<CloudSyncRequest>`, creating details that match the file and keeping track of them for later
 ///   - Push the files to the endpoints, along with a manifest outlining the files you uploaded and/or that are already there.
 /// - Call `/lock/delete`
-
 use super::{
     auth::storage::LockedAuthStorage, endpoints::API_CLOUDSYNC, launch::LaunchMode,
     library::OwnedOffer,
@@ -506,7 +505,7 @@ impl<'a> CloudSyncLock<'a> {
 
                     len as u64
                 }
-                WriteData::Text {text, .. } => {
+                WriteData::Text { text, .. } => {
                     req = req.body(text.to_owned());
                     text.len() as u64
                 }

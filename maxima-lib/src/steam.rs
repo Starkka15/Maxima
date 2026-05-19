@@ -45,17 +45,15 @@ pub struct SteamGameEntry {
     pub exe_name: &'static str,
 }
 
-pub const STEAM_GAMES: &[SteamGameEntry] = &[
-    SteamGameEntry {
-        steam_app_id: "1237970",
-        // Note: NOT Origin.OFR.50.0002694 — that's Apex Legends. TF2's real
-        // offer ID is Origin.OFR.50.0001456, confirmed against a real EA
-        // library dump ("titanfall-2 - Titanfall 2 - Origin.OFR.50.0001456").
-        origin_offer_id: "Origin.OFR.50.0001456",
-        install_subdir: "Titanfall2",
-        exe_name: "Titanfall2.exe",
-    },
-];
+pub const STEAM_GAMES: &[SteamGameEntry] = &[SteamGameEntry {
+    steam_app_id: "1237970",
+    // Note: NOT Origin.OFR.50.0002694 — that's Apex Legends. TF2's real
+    // offer ID is Origin.OFR.50.0001456, confirmed against a real EA
+    // library dump ("titanfall-2 - Titanfall 2 - Origin.OFR.50.0001456").
+    origin_offer_id: "Origin.OFR.50.0001456",
+    install_subdir: "Titanfall2",
+    exe_name: "Titanfall2.exe",
+}];
 
 pub fn lookup_steam_game(steam_app_id: &str) -> Option<&'static SteamGameEntry> {
     STEAM_GAMES.iter().find(|g| g.steam_app_id == steam_app_id)
@@ -67,7 +65,9 @@ pub fn lookup_steam_game(steam_app_id: &str) -> Option<&'static SteamGameEntry> 
 /// URL mid-run) and needs to find the on-disk path even if the EA library
 /// lookup fails.
 pub fn lookup_steam_game_by_offer(origin_offer_id: &str) -> Option<&'static SteamGameEntry> {
-    STEAM_GAMES.iter().find(|g| g.origin_offer_id == origin_offer_id)
+    STEAM_GAMES
+        .iter()
+        .find(|g| g.origin_offer_id == origin_offer_id)
 }
 
 /// Resolve where a Steam-installed EA game lives on disk. Returns the full
@@ -102,10 +102,7 @@ pub fn resolve_steam_install_path(game: &SteamGameEntry) -> Option<PathBuf> {
 
     // 2. Common defaults (covers fresh Wine bottles where the registry key
     //    may not have been written yet, or when running outside Wine)
-    for default in &[
-        "C:\\Program Files (x86)\\Steam",
-        "C:\\Program Files\\Steam",
-    ] {
+    for default in &["C:\\Program Files (x86)\\Steam", "C:\\Program Files\\Steam"] {
         let p = PathBuf::from(default);
         if p.exists() && !steam_roots.contains(&p) {
             steam_roots.push(p);

@@ -74,9 +74,21 @@ maxima-service/      Windows background service — registry setup, DLL
                      other targets). Not exercised in the Draconis flow.
 maxima-tui/          Terminal UI (upstream, ratatui-based). Shipped in the
                      installer but not invoked by Draconis yet.
-maxima-ui/           Graphical UI (upstream, eframe/egui). Shipped in the
-                     installer but not invoked by Draconis yet.
-maxima-resources/    Shared assets — logo, translations.
+maxima-ui/           Graphical UI (upstream, eframe/egui). Patched in this
+                     fork: wgpu renderer (glow can't get a GL 3.3 core
+                     context under Wine on macOS); two CPU-burning busy
+                     loops fixed; red-placeholder background swapped to
+                     transparent so the dark theme shows; friend-presence
+                     event spam dedup'd in the event thread. Validated
+                     end-to-end on CrossOver: login + library + install +
+                     launch (TF2). Shipped in the installer; not invoked
+                     by Draconis yet.
+maxima-resources/    Logo assets (`logo.ico`, `logo.png`) + `winres`-based
+                     build-time helper that embeds Windows .exe metadata
+                     (icon, CompanyName, FileDescription, etc.) when
+                     building on Windows; no-op on other targets. Used as
+                     a `[build-dependencies]` entry by every frontend
+                     crate. (Translations live in `maxima-ui`, not here.)
 MaximaHelper/        Native macOS Swift app (build.sh + Info.plist +
                      Sources/main.swift). Bridges qrc:// from the host
                      browser into the bottle via http://127.0.0.1:31033.
@@ -364,6 +376,13 @@ Everything below is on top of upstream `master` at `cbde5f0`. Categorized so we 
 - `init_logger_named(name)` variant — names the per-process log file (`maxima-cli.log` vs `maxima-bootstrap.log`).
 - All logger output is mirrored to a file in addition to stdout. Default: `%LOCALAPPDATA%\Maxima\Logs\<name>.log` on Windows, `$XDG_DATA_HOME/maxima/logs/<name>.log` on unix. Override via `MAXIMA_LOG_FILE`. Each session writes a `===== maxima log session opened (pid=…) =====` header.
 
+#### UI runtime (`maxima-ui`)
+- **Renderer switched glow → wgpu** ([maxima-ui/Cargo.toml](maxima-ui/Cargo.toml), [maxima-ui/src/main.rs](maxima-ui/src/main.rs)). Root cause: eframe 0.28's glow path asks glutin for an OpenGL 3.3 Core context without `WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB`, which Wine's `macdrv` rejects ("OS X only supports forward-compatible 3.2+ contexts" → `ERROR_INVALID_VERSION_ARB`). Glutin then tries GLES fallback, but Wine's CrossOver build doesn't expose `WGL_EXT_create_context_es_profile` and `EGL not compiled in!`. eframe 0.28 doesn't expose a knob to set the forward-compat flag, so the cleaner path is wgpu. Added `"wgpu"` to eframe features and set `renderer: eframe::Renderer::Wgpu` in `NativeOptions`. wgpu picks Vulkan via MoltenVK 1.2.10 on Apple Silicon. **The custom glow renderers (`AppBgRenderer`, `GameViewBgRenderer`) auto-disable** because their constructors early-return `None` via `cc.gl.as_ref()?`, and all call sites are `if let Some(...)`. Background gradients disappear silently on macOS; the rest of the UI works. Could be upstreamed.
+- **Swapchain nudge workaround for wgpu+MoltenVK 1.2.10** ([maxima-ui/src/main.rs](maxima-ui/src/main.rs)). MoltenVK creates the initial swapchain in `VK_SUBOPTIMAL_KHR` and renders black until something forces a swapchain recreate (a window resize works). Workaround: send `ViewportCommand::InnerSize(current + 1px, 0)` on the first `update()` call, tracked by a `swapchain_nudged: bool` field on `MaximaEguiApp`. UI shows content from frame 0 on. Harmless on non-Wine targets (1px resize at startup is invisible). macOS/CrossOver-specific in motivation but applied unconditionally to keep things simple.
+- **Busy-loop fixes** ([maxima-ui/src/bridge_thread.rs:412](maxima-ui/src/bridge_thread.rs:412), [maxima-ui/src/ui_image.rs:213](maxima-ui/src/ui_image.rs:213)) — addresses upstream issue [#41](https://github.com/ArmchairDevelopers/Maxima/issues/41) (~200% CPU at idle). Both threads called `try_recv()` in a tight loop with no sleep on `Empty`, pegging two cores. Fix: added `tokio::time::sleep(5ms)` / `(10ms)` on the `Empty` branch and a proper `break` on `Disconnected` (previously also looped forever post-shutdown). Idle CPU drops from ~200% to single digits. Upstreambar.
+- **Central panel background fix** ([maxima-ui/src/main.rs:539](maxima-ui/src/main.rs:539)). Upstream set `panel_frame.fill = Color32::RED` on the `CentralPanel`, relying on `AppBgRenderer` to paint a gradient on top and mask it. With wgpu the glow-only `AppBgRenderer::new(cc)` returns `None` (no GL context), so the raw red showed through and the UI looked like a placeholder error screen. Changed to `Color32::TRANSPARENT` so the underlying `window_fill` (black, configured in `Visuals`) shows. Clean dark UI under wgpu, no behaviour change under glow.
+- **Friend-presence event dedup** ([maxima-lib/src/rtm/client.rs:81](maxima-lib/src/rtm/client.rs:81), [maxima-ui/src/event_thread.rs](maxima-ui/src/event_thread.rs)). Upstream `EventThread::run` looped every 500ms and, for **every** friend in the moka cache, emitted a `FriendStatusResponse` event **and** called `request_repaint()` inside the loop — even when the presence hadn't changed. With 16 friends online that's ~32 forced repaints per second when nothing is changing, which keeps the UI rendering continuously and burns CPU/GPU. Fix: derive `PartialEq, Eq` on `RichPresence`, keep a `HashMap<String, RichPresence>` of last-emitted presence, only emit + repaint when the new presence differs from the cached one. Idle-with-friends-online drops to **0 repaints per second** from the event thread. Upstreambar.
+
 #### Env-driven overrides
 - `MAXIMA_DENUVO_TOKEN` — short-circuits `RequestLicense` in the LSX handler and returns this token verbatim. Useful for offline debugging.
 - `MAXIMA_LSX_PORT` — overrides the LSX listen port (default 3216).
@@ -571,6 +590,37 @@ nc -zv 127.0.0.1 3216
 nc -zv 127.0.0.1 13219
 ```
 
+### Capturing Wine debug logs in CrossOver
+
+CrossOver's `cxstart` detaches Wine into its own process group, so stdout/stderr from the spawned binary do **not** reach your shell. Two gotchas you'll hit if you try the upstream-Wine recipes:
+
+1. **`cxstart` is not in `$PATH` by default.** It lives at `/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/cxstart`. Either export that dir into `$PATH` or use the full path.
+2. **`WINEDEBUG` is overridden by CrossOver** with its own bottle-config default. The env var that actually wins is **`CX_DEBUGMSG`** (same syntax as `WINEDEBUG`: comma-separated `+channel` entries).
+
+To capture full Wine traces from a detached cxstart-launched process, set `CX_LOG` (output file path) and `CX_DEBUGMSG` (channels):
+
+```bash
+export PATH="/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin:$PATH"
+
+CX_LOG=/tmp/maxima.cxlog \
+CX_DEBUGMSG=+wgl,+opengl \
+cxstart --bottle "Titanfall 2" -- 'C:\Program Files\Maxima\maxima.exe'
+```
+
+Useful `CX_DEBUGMSG` channels for the kinds of bugs we hit here:
+- `+wgl,+opengl` — WGL context creation, GL version info, extension list (used to diagnose the eframe glow failure).
+- `+seh,+unwind` — exception/crash unwinding (already on by default in CrossOver's bottle env).
+- `+module,+loaddll` — DLL load order, useful when an injection or LoadLibrary fails.
+- `+process` — `GetEnvironmentVariable` traces, useful when something's reading or failing to read an env var.
+
+For wgpu-internal logging, pass `RUST_LOG` via `cxstart --env`:
+
+```bash
+cxstart --bottle "Titanfall 2" --env "RUST_LOG=wgpu_core=info,wgpu_hal=info" -- 'C:\Program Files\Maxima\maxima.exe'
+```
+
+The maxima.log file inside the bottle is at `~/Library/Application Support/CrossOver/Bottles/<bottle>/drive_c/users/crossover/AppData/Local/Maxima/Logs/maxima.log` and gets a `===== maxima log session opened (pid=…) =====` header per process start.
+
 ### Steam vs vanilla launch contract (Draconis ↔ here)
 
 Draconis v0.4.0+:
@@ -700,6 +750,34 @@ Do not delete this section until the user confirms TF2 runs end-to-end.
 2. Try the same launch with `MAXIMA_DENUVO_TOKEN=<anything>` set on the `serve` instance.
 3. Diff the LSX trace from a working Windows session against the failing macOS session, especially `GetAllGameInfoResponse` fields.
 
+### Update 2026-05-19 — `maxima-ui` install-then-launch bypasses the symptom
+
+A meaningful data point: when TF2 is **installed via `maxima-ui`** (its own download path, custom install dir, not Steam's `steamapps/common/Titanfall2`) and then launched **directly by Maxima** (no Steam involvement at all), TF2 starts and runs without ever showing the "File corruption" error.
+
+What's different about the install-via-UI path compared to Steam-installed-then-Maxima-auth:
+
+| Aspect | Steam install + Steam launch + Maxima auth | Maxima-UI install + Maxima launch |
+|--------|--------------------------------------------|-----------------------------------|
+| Who runs `Titanfall2.exe` | `steam.exe -applaunch 1237970` → Steam wrapper → TF2 | `maxima` (via bootstrap) directly |
+| `SteamAppId` env var | Set (1237970) | Unset |
+| `SteamClientLaunch` env var | Set (1) | Unset |
+| `EAExternalSource` / `EAEntitlementSource` | `Steam` | `EA` |
+| Steam DRM IPC (`SteamAPI_Init`) | TF2 invokes it during boot | TF2 doesn't take the Steam DRM code path |
+| Result on macOS/CrossOver | "Engine Error: File corruption detected" | TF2 runs |
+
+The simplest reading: **the corruption symptom is rooted in TF2's Steam DRM IPC failing under Wine, not in anything Maxima does on the LSX/EA-auth side.** "File corruption" is the engine's misleading default error message when `SteamAPI_Init()` returns a failure (this is a well-known pattern in EA-on-Steam titles — the engine maps Steam init failures to a generic file-integrity error).
+
+This is consistent with the earlier negative results: toggling `IsSubscriber`, `IsSteamSubscriber`, `EntitlementSource`, `EAExternalSource`, hardcoded vs echoed `ItemId`, etc. never moved the symptom, because all of those live on the LSX side, *after* TF2 has already failed its Steam init.
+
+Implications:
+- A user with TF2 only on Steam can side-step the bug by **re-downloading via `maxima-ui` to a non-Steam path** and launching that copy through Maxima. Lose Steam-cloud-saves and the launch-from-Steam-library UX, but get a working TF2 on macOS/CrossOver.
+- A proper fix for the Steam-launched case would need to make `SteamAPI_Init` succeed under CrossOver Wine. That's a Wine/`steam.exe`/IPC problem, not a Maxima one.
+- The catornot patch and the split-brain `serve` architecture were probably never the bottleneck — they just couldn't fix something happening *before* Maxima got a chance.
+
+Caveats:
+- Only "TF2 boots and shows the main menu" was confirmed. Multiplayer servers and Northstar interaction not validated through the maxima-UI install path.
+- The `maxima-cli launch` path also sets Steam env vars when the slug looks numeric ([maxima-cli/src/main.rs](maxima-cli/src/main.rs)); a `--no-steam` flag (or unconditionally using the `Origin.OFR.…` offer-id path) would let users launch Steam-installed TF2 via CLI without invoking Steam IPC. Pending empirical test (the user uninstalled the Steam-TF2 bottle before we could confirm).
+
 Do not delete this section until the user confirms TF2 launches reliably end-to-end.
 
 ---
@@ -719,7 +797,7 @@ Tracked from PR #4 (Gemini review) and reaffirmed during the Session 2026-05-18 
 
 ## Known remaining gaps
 
-- **`maxima-tui` / `maxima-ui`** — built and shipped in the installer, but Draconis doesn't invoke them. The UI doesn't have `/authorize` wired up yet (would be a one-liner in `bridge_thread`); for now only `maxima-cli serve` provides the auth server. If we want a graphical "Maxima is running" indicator on macOS/CrossOver, that's the obvious next step.
+- **`maxima-tui` / `maxima-ui`** — built and shipped in the installer; Draconis doesn't invoke them yet. **`maxima-ui` is functional on macOS/CrossOver as of 2026-05-19** (wgpu renderer + busy-loop fix; install + launch of TF2 validated end-to-end through the UI's own download path). Still missing: `/authorize` server wired up in the UI (would be a one-liner — call `start_auth_server()` alongside `start_lsx()` in `bridge_thread`); for now only `maxima-cli serve` provides the auth server. If we want a graphical "Maxima is running" indicator on macOS/CrossOver, that's the next step.
 - **`origin2://` without an `offerIds` param** — the handler passes an empty string and the auth server returns 400. A better fallback (e.g. reading `productId`, or per-game hardcoded table) is a future improvement.
 - **DLL injection on macOS / CrossOver** — `maxima-service`'s injector is Windows-only by design. Wine doesn't support `CreateRemoteThread`-style injection. The service is installed by NSIS but its injection path is never exercised in the Draconis flow.
 - **Cloud saves, downloads, friends** — implemented upstream and present in the codebase, but untested in the Draconis / CrossOver configuration.
@@ -782,6 +860,23 @@ When TF2 emits `link2ea://`, bootstrap forwards to the running `serve` and exits
 ## Changelog (most recent first)
 
 History of significant changes since this fork was forked. Not a substitute for `git log` but useful for "when did X land" questions.
+
+### 2026-05-19 — `maxima-ui` works on macOS/CrossOver: wgpu renderer + busy-loop fix
+
+Three changes in `maxima-ui` to make the upstream graphical UI usable in a CrossOver bottle. All upstreambar; none require macOS-specific infrastructure.
+
+- **Renderer: glow → wgpu** ([maxima-ui/Cargo.toml:12](maxima-ui/Cargo.toml:12), [maxima-ui/src/main.rs:112](maxima-ui/src/main.rs:112)). eframe 0.28's glow path asks Wine for an OpenGL 3.3 Core context, which `macdrv` rejects with `ERROR_INVALID_VERSION_ARB` ("OS X only supports forward-compatible 3.2+ contexts"). The GLES fallback also fails — Wine's CrossOver build doesn't expose `WGL_EXT_create_context_es_profile` and `EGL not compiled in!`. Added `"wgpu"` to eframe features and `renderer: eframe::Renderer::Wgpu` in `NativeOptions`. wgpu picks Vulkan via MoltenVK 1.2.10 on Apple Silicon. The custom `AppBgRenderer` / `GameViewBgRenderer` (glow-only) auto-disable via their existing `cc.gl.as_ref()?` early-return; all call sites are `if let Some(...)`, so background gradients silently disappear on macOS without UI errors.
+- **Swapchain nudge for wgpu+MoltenVK** ([maxima-ui/src/main.rs](maxima-ui/src/main.rs)). MoltenVK 1.2.10 creates the initial swapchain in `VK_SUBOPTIMAL_KHR` and renders black until a swapchain recreate happens (user-initiated resize triggers one). Workaround: programmatic 1px `ViewportCommand::InnerSize` on the first `update()` call, tracked via `swapchain_nudged: bool` on `MaximaEguiApp`. UI shows content from frame 0 on. Harmless on non-Wine targets.
+- **Busy-loop fixes** ([maxima-ui/src/bridge_thread.rs:412](maxima-ui/src/bridge_thread.rs:412), [maxima-ui/src/ui_image.rs:213](maxima-ui/src/ui_image.rs:213)) — addresses upstream issue [#41](https://github.com/ArmchairDevelopers/Maxima/issues/41). Both threads spun in tight `try_recv()` loops with no sleep on `Empty`, pegging two cores (~200% CPU at idle). Added `tokio::time::sleep` of 5ms (bridge) / 10ms (image) on the `Empty` branch, plus proper `break` on `Disconnected` (previously also looped forever post-shutdown). Idle CPU drops to single digits.
+- **Central panel fill RED → TRANSPARENT** ([maxima-ui/src/main.rs:539](maxima-ui/src/main.rs:539)). Upstream relied on `AppBgRenderer` painting a gradient over the red placeholder; with wgpu that renderer is `None` and the red shows raw. Transparent fill lets the configured `window_fill` (black) show through.
+- **Friend-presence event dedup** ([maxima-lib/src/rtm/client.rs:81](maxima-lib/src/rtm/client.rs:81), [maxima-ui/src/event_thread.rs](maxima-ui/src/event_thread.rs)). `EventThread::run` emitted a `FriendStatusResponse` and called `request_repaint()` for every friend in the moka cache every 500ms whether they'd changed or not — ~32 forced repaints/sec with 16 online friends. Derived `PartialEq, Eq` on `RichPresence`, cached previous presence per friend, only emit + repaint on diff. Idle event-thread repaints drop to 0.
+
+Validation: installed TF2 end-to-end via `maxima-ui` on macOS/CrossOver (login → game list → install with custom path → wait for download → launch). TF2 ran. **First time `maxima-ui` has been verified to work on this fork's target.**
+
+Diagnostics gotchas discovered during the debug session (now in the Diagnostics section):
+- `cxstart` is not in `$PATH` — lives at `/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/cxstart`.
+- `WINEDEBUG` is overridden by CrossOver; **`CX_DEBUGMSG`** is the env var that actually wins.
+- `CX_LOG` captures Wine traces even from detached cxstart-launched processes.
 
 ### 2026-05-18 — split-brain auth: bootstrap as router, `/authorize` as service (with launch)
 

@@ -282,7 +282,8 @@ impl HardwareInfo {
         let mut gpu_pnp_id: Option<String> = None;
         let output = Command::new("system_profiler")
             .args(["SPDisplaysDataType", "-json"])
-            .output().unwrap();
+            .output()
+            .unwrap();
         if output.status.success() {
             let json = String::from_utf8_lossy(&output.stdout);
             let result: SPDisplaysDataType = serde_json::from_str(&json).unwrap();
@@ -298,7 +299,10 @@ impl HardwareInfo {
         }
 
         let mut disk_sn = String::from("None");
-        let output = Command::new("diskutil").args(["info", "/"]).output().unwrap();
+        let output = Command::new("diskutil")
+            .args(["info", "/"])
+            .output()
+            .unwrap();
         // Check if the command was successful
         if output.status.success() {
             // Convert the output bytes to a UTF-8 string

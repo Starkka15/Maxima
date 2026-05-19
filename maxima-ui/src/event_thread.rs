@@ -1,4 +1,5 @@
 use egui::Context;
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 
 use crate::bridge_thread::BackendError;
@@ -9,6 +10,7 @@ use maxima::core::{
     },
     LockedMaxima,
 };
+use maxima::rtm::client::RichPresence;
 
 // TODO(headassbtw): integrate this into the enum too (out of scope for the PR i wrote this in)
 pub struct EventThreadFriendStatusResponse {
@@ -79,22 +81,38 @@ impl EventThread {
         rtm.subscribe(&players).await?;
         drop(maxima);
 
+        // Cache last-emitted presence per friend so we only push events (and
+        // repaint requests) when something actually changed. Upstream emitted
+        // every friend's presence on every 500ms tick and called
+        // request_repaint inside the loop — 16 friends = ~32 wasted repaints
+        // per second when nothing was changing.
+        let mut previous_presences: HashMap<String, RichPresence> = HashMap::new();
+
         'outer: loop {
             let mut maxima = maxima_arc.lock().await;
             maxima.rtm().heartbeat().await?;
 
+            let mut any_changed = false;
             {
                 let store = maxima.rtm().presence_store().lock().await;
                 for entry in store.iter() {
+                    let id: String = entry.0.as_ref().clone();
+                    let presence: RichPresence = entry.1;
+                    if previous_presences.get(&id) == Some(&presence) {
+                        continue;
+                    }
                     let _ = rtm_responder.send(MaximaEventResponse::FriendStatusResponse(
                         EventThreadFriendStatusResponse {
-                            id: entry.0.to_string(),
-                            presence: entry.1,
+                            id: id.clone(),
+                            presence: presence.clone(),
                         },
                     ));
-                    // This can cause excessive repainting if it keeps updating friends we know about
-                    egui::Context::request_repaint(&ctx);
+                    previous_presences.insert(id, presence);
+                    any_changed = true;
                 }
+            }
+            if any_changed {
+                egui::Context::request_repaint(&ctx);
             }
 
             drop(maxima);

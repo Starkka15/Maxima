@@ -212,6 +212,7 @@ impl UIImageCache {
                     if error == std::sync::mpsc::TryRecvError::Disconnected {
                         break 'outer;
                     }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
                 Ok(request) => match request {
                     UIImageCacheLoaderCommand::ProvideRemote(needle, target) => {
