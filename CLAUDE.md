@@ -326,7 +326,10 @@ Everything below is on top of upstream `master` at `cbde5f0`. Categorized so we 
   - Per-game launch args (e.g. `-noOriginStartup` for Northstar, `-multiple` for Source-engine titles) are NOT auto-injected. Callers pass them via `--game-args`, `MAXIMA_LAUNCH_ARGS`, or `cmd_params` on the `link2ea://` URL — Maxima stays universal.
 - `Mode::GetGameBySlug` actually prints slug/offer_id/content_id/display_name/installed (was a no-op stub upstream).
 - **`Mode::ListGames { json }`** — when `--json` is passed, emits a JSON array on stdout (slug, name, offer_id, content_id, installed, install_path, version, has_cloud_save, extra_offers) and suppresses the logger's stdout output for the duration of the command. Designed for Draconis pre-flight detection: "what does Maxima know about this user's library, in machine-readable form?". File-sink logging is unaffected, so debugging traces still land in `%LOCALAPPDATA%\Maxima\Logs\maxima-cli.log`. Per-title-specific detection (TF2 binaries, Northstar markers, etc.) is intentionally kept out of Maxima — that's the consumer's job, since Maxima needs to remain universal across EA titles.
-- **`Mode::Install { slug, path, build_id?, json }`** — non-interactive install driver. Resolves `slug` against the EA library (same chain as `Mode::Launch` minus the unlinked-Steam passthrough), picks the live build (or `--build-id` override), queues via `QueuedGameBuilder` + `install_now`, then polls every second until `content_manager().current()` returns None. In `--json` mode emits JSONL on stdout: `{"event":"progress","percent":N,"build_id":"…"}` per tick, terminator `{"event":"done","elapsed_secs":…,…}` on success or `{"event":"error","message":"…"}` on failure (also non-zero exit). Designed so Draconis can drive a real-time install progress bar without scraping log lines. Same flow the interactive "Install Game" menu uses; this is just the headless CLI form.
+- **`Mode::Install { slug, path, build_id?, replace_files, only_listed_files, json }`** — non-interactive install driver. Resolves `slug` against the EA library (same chain as `Mode::Launch` minus the unlinked-Steam passthrough), picks the live build (or `--build-id` override), optionally deletes a comma-separated list of files passed via `--replace-files` (relative to `--path`, with `..` segments rejected), then either:
+  - **Default** — queues via `QueuedGameBuilder` + `install_now` and polls every second until `content_manager().current()` returns None. Re-downloads anything the size-only entry-state check marks `Borked`. Use for fresh installs and missing-file recovery.
+  - **`--only-listed-files`** — bypasses `install_now` entirely. Pulls just the files named in `--replace-files` directly from the build's zip manifest via `ZipDownloader::download_single_file` (the same primitive `Mode::DownloadSpecificFile` uses), leaves every other file on disk alone. Designed for surgical replace ops like the Steam-CEG fix where the user has a working install except for a handful of corrupted/DRM-touched binaries. Without this flag, applying a Steam-CEG fix against a TF2 install re-downloads ~50% of the manifest because Steam-vs-EA distribution sizes legitimately differ for many files; with the flag, it's seconds and ~few MB.
+- In `--json` mode emits JSONL on stdout: `{"event":"progress","percent":N,"build_id":"…"}` per tick (default) or `{"event":"progress","current_file":"…","files_done":i,"total_files":n}` (strict), terminator `{"event":"done","elapsed_secs":…,…}` on success or `{"event":"error","message":"…"}` on failure (also non-zero exit). Designed so Draconis can drive a real-time install progress bar without scraping log lines. Same install flow the interactive "Install Game" menu uses; this is just the headless CLI form.
 
 #### Steam helpers — new module (`maxima-lib/src/steam.rs`)
 - Lifted from `maxima-cli/src/main.rs` so the auth server can use it too. Contains:
@@ -698,7 +701,7 @@ The remaining branches (`feat/server`, `feature/umu-launcher`, `feat/new-ci`, et
 
 ### "Engine Error: File corruption detected" after `IsProgressiveInstallationAvailableResponse`
 
-**Status as of 2026-05-19.** Root cause identified — **Steam CEG (Custom Executable Generation) validation failing under Wine's `ntdll-Junction_Points` patch.** Intractable from Maxima's layer; the validation runs inside `Titanfall2.exe` against Wine's `ntdll` before any LSX request we control. Workaround on macOS/CrossOver: install via `maxima-ui` to a non-Steam path so the binary doesn't carry CEG. See the "Update 2026-05-19 (later) — root cause: Steam CEG + Wine `ntdll-Junction_Points`" sub-section below for the full evidence. The investigation narrative is preserved unchanged below for context.
+**Status as of 2026-05-19 — RESOLVED.** Root cause confirmed empirically: **Steam CEG (Custom Executable Generation) signing on `Titanfall2.exe` / `Titanfall2_trial.exe` triggers Wine's `ntdll-Junction_Points` patch path during runtime validation**, surfacing in-game as the generic "File corruption" dialog. **Fix shipped in v0.11.0** via `maxima-cli install --replace-files "Titanfall2.exe,Titanfall2_trial.exe" --only-listed-files` against the Steam install dir — replaces just the two CEG-signed launcher binaries with the EA originals (~3 MB download, <60 s, leaves the rest of the install untouched). Game then runs end-to-end through the full LSX flow (`GetProfile` → `QueryEntitlements` → `SetPresence` → Main Menu). See the "Update 2026-05-19 (later) — root cause" and "Update 2026-05-19 (CEG fix confirmed end-to-end)" sub-sections below for the diagnostic trail and the final confirmation. The investigation narrative is preserved below for context.
 
 **Symptom.** When `maxima-cli launch` (Path B) is the LSX server for a Steam-launched TF2, the game completes Challenge → ChallengeAccepted → GetConfig → GetProfile → GetSetting → GetGameInfo → GetAllGameInfo → IsProgressiveInstallationAvailable, then closes the LSX connection and shows the "File corruption detected" engine error. Never reaches `RequestLicense` or `GetAuthCode`.
 
@@ -811,6 +814,27 @@ This explains every prior negative result:
 
 The official Maxima-Draconis recommendation on macOS/CrossOver is therefore: **install via `maxima-ui` to a non-Steam path**, not via Steam.
 
+### Update 2026-05-19 (CEG fix confirmed end-to-end)
+
+**Steam install + targeted binary replace now works.** The hypothesis from the prior sub-section is empirically proven. Test from this session:
+
+1. Steam install of TF2 at `C:\Program Files (x86)\Steam\steamapps\common\Titanfall2`. Northstar files alongside. Previously, every launch path produced the "File corruption" dialog after `IsProgressiveInstallationAvailable`.
+2. Ran `maxima-cli install titanfall-2 --path "<above>" --replace-files "Titanfall2.exe,Titanfall2_trial.exe" --only-listed-files`. Took <60 seconds, downloaded ~3 MB from EA's CDN. Both Steam-signed CEG binaries replaced with the EA originals; **every other file in the Steam install left untouched** (Northstar's `wsock32.dll` proxy, `R2Northstar/`, `bin/`, `Core/`, etc. all preserved).
+3. Ran `maxima-cli launch Origin.OFR.50.0001456 --game-path "<above>\Titanfall2.exe"`. **Game reached Main Menu.** Full LSX trace: Challenge → GetConfig → GetProfile → GetSetting → GetGameInfo → GetAllGameInfo → IsProgressiveInstallationAvailable → **`RequestLicense` → `GetAuthCode` → `QueryEntitlements` (9 entitlements returned) → `SetPresence` ("Main Menu", RTM updated) → `QueryFriends` (16 friends) → `GetInternetConnectedState` → second `GetAuthCode`** → user closed game cleanly → `Game stopped`.
+
+This is the same LSX sequence the `maxima-ui`-installed copy produces. Same install dir as the broken Steam test, same env vars, same Maxima version — only those two binaries differed. CEG on the launcher exes is therefore both **necessary** (replacing them is sufficient to fix the symptom) and **sufficient** (no other file in the install needs touching) to cause/cure the corruption.
+
+**Updated recommendation on macOS/CrossOver.** Both paths now work and Draconis will support both:
+
+| Source | Maxima setup | Notes |
+|---|---|---|
+| Maxima-installed (any path) | install via `maxima-ui` or `maxima-cli install` | No CEG ever, simplest. |
+| EA-Desktop-installed | `locate-game` + `launch` | No CEG. |
+| Steam-installed | "Apply Maxima fix" → `maxima-cli install --replace-files "Titanfall2.exe,Titanfall2_trial.exe" --only-listed-files` | Surgical; keeps Steam install layout, Northstar files, save games. |
+| Epic Games-installed | TBD (no test access yet) | Likely same pattern as Steam if Epic also CEG-signs. |
+
+The Steam path is now first-class instead of "you should re-install via maxima-ui". Draconis's wizard CEG dialog will offer it as "Apply Maxima fix" and run the `maxima-cli install … --only-listed-files` invocation for the user.
+
 ---
 
 ## Pending code quality items
@@ -891,6 +915,27 @@ When TF2 emits `link2ea://`, bootstrap forwards to the running `serve` and exits
 ## Changelog (most recent first)
 
 History of significant changes since this fork was forked. Not a substitute for `git log` but useful for "when did X land" questions.
+
+### 2026-05-19 (CEG fix shipped) — `install --replace-files` + `--only-listed-files`
+
+Two new flags on `Mode::Install` that together implement the surgical Steam-CEG fix. Empirically validated 2026-05-19: a TF2 install from Steam (`steamapps\common\Titanfall2`) ran end-to-end through the LSX flow (`GetProfile` → `QueryEntitlements` → `SetPresence` → `QueryFriends` → game reaches Main Menu) after replacing **just `Titanfall2.exe` and `Titanfall2_trial.exe`** with the EA originals via this command. Same install dir, same env vars, same Maxima — only those two binaries differed. **CEG on the launcher exes is now confirmed as the sole root cause of the "File corruption detected" symptom on macOS/CrossOver**, and the fix is ~3-5 MB of download in <60 seconds, not the full ~30 GB re-install.
+
+- **`--replace-files <p1,p2,...>`** on `Mode::Install` ([maxima-cli/src/main.rs](maxima-cli/src/main.rs)) — comma-separated list of file paths relative to `--path` that are deleted before the install runs. Validation: rejects entries with `..` segments, empty segments, or absolute paths. Skips entries that resolve to directories / symlinks (with a `warn!`). Missing entries are a no-op (`debug!` only).
+- **`--only-listed-files`** — restricts the install to **only** the files in `--replace-files`, bypassing `install_now` entirely. Pulls each named entry from the build's zip manifest via `ZipDownloader::download_single_file` (the same primitive `Mode::DownloadSpecificFile` already uses) and leaves every other file on disk alone. Without this flag, applying a Steam-CEG fix would still re-download ~50% of the TF2 manifest (~15 GB) because the size-only `initial_state` check legitimately disagrees with Steam-packaged files on many entries; **with the flag, the fix is exactly two HTTP range requests against EA's CDN**.
+- Logging: human mode logs `info!("Deleting <path> (replace-files)")` per delete, then `info!("Downloading <file> (i/n)")` per replace (strict mode); `--json` mode emits `{"event":"progress","current_file":"…","files_done":i,"total_files":n}` per file and a terminator `{"event":"done","files_replaced":[…]}` on success.
+
+Working CEG-fix invocation against a Steam install:
+
+```bat
+maxima-cli.exe install titanfall-2 ^
+  --path "C:\Program Files (x86)\Steam\steamapps\common\Titanfall2" ^
+  --replace-files "Titanfall2.exe,Titanfall2_trial.exe" ^
+  --only-listed-files
+```
+
+Why both flags shipped together: empirical evidence from a partial first-attempt test (without `--only-listed-files`) showed `install_now` re-downloading ~50% of the manifest against a Steam dir — Steam-vs-EA size mismatches across legitimate-but-differently-packaged files are common enough that "delete + re-install" alone isn't usable for the in-place CEG fix. The strict-mode flag isolates the actual remediation to just the CEG-touched binaries. The `--replace-files`-only mode is still useful for cases where the user genuinely wants a full re-install with specific files force-refreshed (e.g. corruption recovery on a Maxima-installed copy).
+
+The downloader's CRC32 path remains commented out ([downloader.rs:316-329](maxima-lib/src/content/downloader.rs); `"We must be calculating the hash incorrectly or something"`). If/when that's fixed, the strict-mode flag remains useful as an "I know exactly which files to refresh, skip the verify entirely" optimization. Until then, it's the only way to do an in-place targeted replace without re-downloading half the game.
 
 ### 2026-05-19 (still going) — non-interactive `install` subcommand
 
