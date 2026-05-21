@@ -6,10 +6,11 @@ use std::{
     },
 };
 
+use chrono::Utc;
 use derive_builder::Builder;
 use derive_getters::Getters;
 use futures::StreamExt;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -32,6 +33,48 @@ use crate::{
 };
 
 const QUEUE_FILE: &str = "download_queue.json";
+
+/// Filename of the completion marker written into a game's install
+/// directory when ContentManager observes the download as `is_done()`.
+///
+/// External launchers (notably Draconis on macOS/CrossOver) poll for
+/// this file's presence to decide that an install is **truly**
+/// complete — not just that the game's exe exists. "Exe exists" can
+/// be true mid-download for size-padded files or partially-extracted
+/// zip entries; the marker is only written after the downloader
+/// settled.
+///
+/// Schema is JSON with a `schema` integer for forward-compat. See
+/// `InstallMarker` for the v1 fields.
+pub const INSTALL_MARKER_FILENAME: &str = "FInstall.txt";
+
+/// Contents of the install-completion marker file (`FInstall.txt`).
+/// Written into the game's install directory by `ContentManager::update`
+/// after a download transitions to `is_done()`.
+///
+/// Public so other crates in the workspace (and external consumers via
+/// `maxima-lib` as a dependency) can deserialize the marker without
+/// redefining the schema. Forward-compat: callers should accept any
+/// `schema >= 1` and ignore unknown fields.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct InstallMarker {
+    /// Forward-compat schema version. Consumers should accept >=1 and
+    /// ignore unknown fields.
+    pub schema: u32,
+    /// The offer the install was queued against (e.g.
+    /// `Origin.OFR.50.0001456` for Titanfall 2).
+    pub offer_id: String,
+    /// The build that landed on disk (lets consumers tell whether the
+    /// installed copy matches the current live build later).
+    pub build_id: String,
+    /// Absolute path the install was written to. Self-describing —
+    /// callers can verify the file is the one they expected.
+    pub install_path: String,
+    /// RFC 3339 UTC timestamp.
+    pub completed_at: String,
+    /// `maxima-lib` package version that wrote this marker. Cosmetic.
+    pub maxima_lib_version: String,
+}
 
 #[derive(Default, Builder, Getters, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueuedGame {
@@ -364,9 +407,33 @@ impl ContentManager {
 
         if let Some(current) = &self.current {
             if current.is_done() {
+                // Snapshot the finished QueuedGame *before* clearing
+                // queue.current — we need its `path` to write the
+                // `FInstall.txt` marker, which Draconis (and any
+                // future external orchestrator) polls to detect
+                // truly-complete installs.
+                let finished = self.queue.current.clone();
+
                 event = Some(MaximaEvent::InstallFinished(current.offer_id.to_owned()));
                 self.current = None;
                 self.queue.current = None;
+
+                if let Some(game) = finished {
+                    // Best-effort: a missing marker isn't fatal (the
+                    // install itself succeeded — files are on disk).
+                    // External callers that depend on it will simply
+                    // not see the "done" signal and may need to
+                    // re-trigger or fall back to file-presence checks.
+                    if let Err(err) = write_install_marker(&game).await {
+                        warn!(
+                            "Failed to write {} for offer_id={} at {}: {}",
+                            INSTALL_MARKER_FILENAME,
+                            game.offer_id,
+                            game.path.display(),
+                            err
+                        );
+                    }
+                }
 
                 if let Some(game) = self.queue.queued.pop() {
                     self.install_now(game).await?;
@@ -378,4 +445,35 @@ impl ContentManager {
 
         Ok(event)
     }
+}
+
+/// Write `<install_path>/FInstall.txt` describing a just-completed
+/// install. Idempotent — overwrites any prior marker (re-installs
+/// land here too, so the freshest install wins).
+///
+/// Returns the same `std::io::Error` family `tokio::fs` does;
+/// callers should log + ignore (we don't want a failed marker write
+/// to bubble up as an install-finished failure given the install
+/// itself succeeded).
+async fn write_install_marker(game: &QueuedGame) -> std::io::Result<()> {
+    let marker = InstallMarker {
+        schema: 1,
+        offer_id: game.offer_id.clone(),
+        build_id: game.build_id.clone(),
+        install_path: game.path.to_string_lossy().into_owned(),
+        completed_at: Utc::now().to_rfc3339(),
+        maxima_lib_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let body = serde_json::to_string_pretty(&marker)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+    // The install path itself should already exist (the downloader
+    // wrote files into it). `create_dir_all` is defensive — covers
+    // the edge case of an empty manifest where the dir wasn't touched.
+    fs::create_dir_all(&game.path).await?;
+
+    let marker_path = game.path.join(INSTALL_MARKER_FILENAME);
+    fs::write(&marker_path, body).await?;
+    info!("Wrote install marker: {}", marker_path.display());
+    Ok(())
 }
