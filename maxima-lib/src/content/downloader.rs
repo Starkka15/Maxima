@@ -6,6 +6,7 @@ use std::{
     prelude,
     sync::{Arc, Mutex},
     task,
+    time::Duration,
 };
 
 use crate::{
@@ -332,31 +333,87 @@ impl<'a> EntryDownloadRequest<'a> {
     }
 
     async fn download(&mut self) -> Result<(), DownloadError> {
-        let mut tries = 0;
-        while tries < 5 {
+        // Total attempts = 1 initial + up to MAX_RETRIES retries. Five
+        // attempts is enough to ride out Akamai's intermittent
+        // "connection closed before message completed" failures (which
+        // hit individual range requests every few hundred files on
+        // long-running installs) without spinning forever on a CDN
+        // that's genuinely down.
+        const MAX_RETRIES: u32 = 5;
+        let mut last_err: Option<DownloaderError> = None;
+
+        for attempt in 0..=MAX_RETRIES {
             // State serialization is disabled for now.
             //let start = self.decoder.write_in_pos() as i64;
-
             let start = 0;
+            let end = *self.entry.compressed_size();
 
             debug!(
-                "Downloading {} from {} to {} ({})",
+                "Downloading {} from {} to {} ({}) — attempt {}/{}",
                 self.entry.name(),
                 start,
                 self.entry.compressed_size(),
-                self.entry.uncompressed_size()
+                self.entry.uncompressed_size(),
+                attempt + 1,
+                MAX_RETRIES + 1,
             );
-            let end = *self.entry.compressed_size();
 
-            let result = self.download_range(start, end).await;
-            if result.is_ok() {
-                break;
+            match self.download_range(start, end).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    if attempt < MAX_RETRIES {
+                        // Exponential backoff with light jitter so a
+                        // CDN tantrum doesn't have every parallel
+                        // download retry in lockstep. Base: 500ms,
+                        // 1s, 2s, 4s, 8s for the 5 retries. Jitter
+                        // adds 0-250ms.
+                        let base_ms = 500u64.saturating_mul(1 << attempt);
+                        let jitter_ms = rand::random::<u64>() % 250;
+                        let delay = Duration::from_millis(base_ms + jitter_ms);
+                        warn!(
+                            "{} attempt {}/{} failed ({}); retrying in {:?}",
+                            self.entry.name(),
+                            attempt + 1,
+                            MAX_RETRIES + 1,
+                            err,
+                            delay,
+                        );
+                        last_err = Some(err);
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        // Final attempt failed — surface the error
+                        // instead of swallowing it. Previously
+                        // `download()` returned `Ok(())` even after
+                        // 5 failures, so the caller thought the file
+                        // was on disk; the install completed-bytes
+                        // counter never advanced and `is_done()`
+                        // returned false forever (silent stuck
+                        // state). Returning the error lets the
+                        // higher-level install flow handle it (log,
+                        // mark `Borked`, retry on next pass, etc.).
+                        error!(
+                            "{} failed after {} attempts: {}",
+                            self.entry.name(),
+                            MAX_RETRIES + 1,
+                            err,
+                        );
+                        last_err = Some(err);
+                    }
+                }
             }
-
-            tries += 1;
         }
 
-        Ok(())
+        // We only reach here if the for-loop exhausted without
+        // returning Ok. The last error is guaranteed to be Some
+        // (we always assign before falling through the else arm
+        // on attempt == MAX_RETRIES).
+        Err(match last_err.expect("last_err always set on failure path") {
+            DownloaderError::Download(d) => d,
+            other => DownloadError::ChunkCopy {
+                entry: self.entry.name().clone(),
+                error: std::io::Error::new(std::io::ErrorKind::Other, other.to_string()),
+            },
+        })
     }
 
     /// End is not inclusive
