@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     prelude,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     task,
     time::Duration,
 };
@@ -332,104 +335,6 @@ impl<'a> EntryDownloadRequest<'a> {
         Ok(EntryDownloadState::Complete)
     }
 
-    async fn download(&mut self) -> Result<(), DownloadError> {
-        // Total attempts = 1 initial + up to MAX_RETRIES retries. Five
-        // attempts is enough to ride out Akamai's intermittent
-        // "connection closed before message completed" failures (which
-        // hit individual range requests every few hundred files on
-        // long-running installs) without spinning forever on a CDN
-        // that's genuinely down.
-        const MAX_RETRIES: u32 = 5;
-        let mut last_err: Option<DownloaderError> = None;
-
-        for attempt in 0..=MAX_RETRIES {
-            // State serialization is disabled for now.
-            //let start = self.decoder.write_in_pos() as i64;
-            let start = 0;
-            let end = *self.entry.compressed_size();
-
-            debug!(
-                "Downloading {} from {} to {} ({}) — attempt {}/{}",
-                self.entry.name(),
-                start,
-                self.entry.compressed_size(),
-                self.entry.uncompressed_size(),
-                attempt + 1,
-                MAX_RETRIES + 1,
-            );
-
-            match self.download_range(start, end).await {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    if attempt < MAX_RETRIES {
-                        // Exponential backoff with light jitter so a
-                        // CDN tantrum doesn't have every parallel
-                        // download retry in lockstep. Base: 500ms,
-                        // 1s, 2s, 4s, 8s for the 5 retries. Jitter
-                        // adds 0-250ms.
-                        let base_ms = 500u64.saturating_mul(1 << attempt);
-                        let jitter_ms = rand::random::<u64>() % 250;
-                        let delay = Duration::from_millis(base_ms + jitter_ms);
-                        warn!(
-                            "{} attempt {}/{} failed ({}); retrying in {:?}",
-                            self.entry.name(),
-                            attempt + 1,
-                            MAX_RETRIES + 1,
-                            err,
-                            delay,
-                        );
-                        last_err = Some(err);
-                        tokio::time::sleep(delay).await;
-                    } else {
-                        // Final attempt failed — surface the error
-                        // instead of swallowing it. Previously
-                        // `download()` returned `Ok(())` even after
-                        // 5 failures, so the caller thought the file
-                        // was on disk; the install completed-bytes
-                        // counter never advanced and `is_done()`
-                        // returned false forever (silent stuck
-                        // state). Returning the error lets the
-                        // higher-level install flow handle it (log,
-                        // mark `Borked`, retry on next pass, etc.).
-                        error!(
-                            "{} failed after {} attempts: {}",
-                            self.entry.name(),
-                            MAX_RETRIES + 1,
-                            err,
-                        );
-                        last_err = Some(err);
-                    }
-                }
-            }
-        }
-
-        // We only reach here if the for-loop exhausted without
-        // returning Ok. The last error is guaranteed to be Some
-        // (we always assign before falling through the else arm
-        // on attempt == MAX_RETRIES).
-        //
-        // Preserve the original error type per variant — collapsing
-        // everything to `ChunkCopy { error: std::io::Error }` loses
-        // the `reqwest::Error` context that callers may want for
-        // logging / classifying transient network failures. Gemini
-        // caught this on PR #15 review.
-        Err(match last_err.expect("last_err always set on failure path") {
-            DownloaderError::Download(d) => d,
-            DownloaderError::Request(error) => DownloadError::ChunkDownload {
-                entry: self.entry.name().clone(),
-                error,
-            },
-            DownloaderError::Io(error) => DownloadError::ChunkCopy {
-                entry: self.entry.name().clone(),
-                error,
-            },
-            other => DownloadError::ChunkCopy {
-                entry: self.entry.name().clone(),
-                error: std::io::Error::new(std::io::ErrorKind::Other, other.to_string()),
-            },
-        })
-    }
-
     /// End is not inclusive
     pub async fn download_range(&mut self, start: i64, end: i64) -> Result<(), DownloaderError> {
         let offset = self.entry.data_offset();
@@ -470,6 +375,22 @@ impl<'a> EntryDownloadRequest<'a> {
 
         let result = tokio::io::copy(&mut stream_reader, &mut wrapper).await;
         if let Err(err) = result {
+            return Err(DownloaderError::Download(DownloadError::ChunkCopy {
+                entry: self.entry.name().clone(),
+                error: err,
+            }));
+        }
+
+        // Explicit `shutdown()` to flush the buffered writer chain
+        // (BufWriter inside AsyncWriterWrapper → ZLibDeflateDecoder's
+        // BufWriter<File>). `tokio::io::copy` doesn't flush on completion;
+        // letting the wrapper drop is also not a flush (tokio's
+        // AsyncWrite has no Drop-time flush guarantee). Without this,
+        // the final buffered bytes — possibly the entire deflate
+        // tail — never reach disk, and a "successful" file ends up
+        // truncated. Gemini caught this on PR #19 review.
+        use tokio::io::AsyncWriteExt;
+        if let Err(err) = wrapper.shutdown().await {
             return Err(DownloaderError::Download(DownloadError::ChunkCopy {
                 entry: self.entry.name().clone(),
                 error: err,
@@ -575,13 +496,20 @@ impl ZipDownloader {
     ) -> Result<usize, DownloaderError> {
         let file_path = self.path.join(entry.name());
 
-        if !file_path.exists() {
-            if !file_path.safe_parent()?.exists() {
-                create_dir_all(&file_path.safe_parent()?).await?;
+        // Directory entry / parent-not-yet-created handling.
+        // `tokio::fs::try_exists` instead of sync `Path::exists` —
+        // we're hot in the `buffer_unordered(16)` install loop and
+        // a sync `stat()` blocks the runtime worker thread. Gemini
+        // caught this on PR #19 review.
+        if !tokio::fs::try_exists(&file_path).await.unwrap_or(false) {
+            let parent = file_path.safe_parent()?;
+            if !tokio::fs::try_exists(&parent).await.unwrap_or(false) {
+                create_dir_all(&parent).await?;
             }
 
-            if entry.name().ends_with("/") && !file_path.exists() {
-                // This is a folder, create the dir
+            if entry.name().ends_with("/")
+                && !tokio::fs::try_exists(&file_path).await.unwrap_or(false)
+            {
                 debug!("{} is a directory", entry.name());
                 create_dir(file_path).await?;
                 return Ok(0);
@@ -593,63 +521,147 @@ impl ZipDownloader {
             return Ok(0);
         }
 
-        let offset = entry.data_offset();
-        debug!("Type: {:?}", entry.compression_type());
-        debug!("Compressed Size: {}", entry.compressed_size());
-        debug!("Offset: {}", offset);
-
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(&file_path)
-            .await?;
-
         let context = DownloadContext {
             id: self.id.to_owned(),
             path: self.path.clone(),
         };
 
-        let state = EntryDownloadRequest::state(&context, entry).await?;
-        if state == EntryDownloadState::Complete {
-            if let Some(callback) = callback {
-                callback(*entry.compressed_size() as usize);
-            }
-            return Ok(0);
-        }
-
-        if state == EntryDownloadState::Borked {
-            warn!("Found borked file {}", entry.name());
-            file.set_len(*entry.uncompressed_size() as u64).await?;
-        }
-
-        let writer = tokio::io::BufWriter::new(file);
-
-        let mut decoder: Box<dyn DownloadDecoder> = match entry.compression_type() {
-            CompressionType::None => Box::new(NoopDecoder::new(writer)),
-            CompressionType::Deflate => Box::new(ZLibDeflateDecoder::new(writer)),
-        };
-
-        if state == EntryDownloadState::Resumable {
-            let state_file = zstate_path(&self.id, &entry.name())?;
-            if state_file.exists() {
-                let mut buf = Bytes::from(tokio::fs::read(state_file).await?);
-                decoder.restore_state(&mut buf);
-            } else {
-                tokio::fs::create_dir_all(state_file.safe_parent()?).await?;
+        // Pre-flight: is the file already on disk at the right size?
+        // (Re-running the same install over a previously-completed
+        // dir should short-circuit.) `state()` opens the file read-only,
+        // so this works even before the retry loop opens the writer.
+        if tokio::fs::try_exists(&file_path).await.unwrap_or(false) {
+            if let Ok(EntryDownloadState::Complete) =
+                EntryDownloadRequest::state(&context, entry).await
+            {
+                if let Some(cb) = callback {
+                    cb(*entry.compressed_size() as usize);
+                }
+                return Ok(0);
             }
         }
 
-        let mut request = EntryDownloadRequest::new(
-            &context,
-            &self.url,
-            entry,
-            self.client.clone(),
-            decoder,
-            callback,
-        );
+        // Retry loop. Each attempt opens a fresh file (truncated) and
+        // a fresh decoder. Why all this ceremony per attempt:
+        //
+        //   1. **Decoder poisoning** — `ZLibDeflateDecoder` holds zlib
+        //      stream state. When attempt N fails mid-stream, the
+        //      decoder has consumed partial bytes. Reusing it for
+        //      attempt N+1 feeds a fresh deflate stream into a
+        //      poisoned decoder → "invalid stored block lengths"
+        //      errors that look like CDN corruption but are really
+        //      our own state-machine bug. Discovered while debugging
+        //      `r2/sound/general_stream_patch_2.mstr` failing on
+        //      attempts 2-5 with consistent deflate errors after a
+        //      first-attempt `IncompleteBody`.
+        //
+        //   2. **File not truncated** — without `.truncate(true)`,
+        //      partial bytes from attempt N stay on disk past where
+        //      attempt N+1's writer stops. Even when the decode
+        //      succeeded, the file would carry trailing garbage.
+        //
+        //   3. **Bytes over-counting** — the `BytesDownloadedCallback`
+        //      fires on every chunk via `ByteCountingStream`, regardless
+        //      of whether the attempt eventually succeeds. With the
+        //      caller's counter being incremented from every retry's
+        //      partial bytes, a single 6-retry file pushed `completed_bytes`
+        //      well past `total_bytes`. Combined with `is_done() == `
+        //      (also fixed in this PR), this kept installs hung forever.
+        //      Fix: per-attempt local counter, committed to the caller's
+        //      callback only when the attempt succeeds.
+        const MAX_RETRIES: u32 = 5;
+        let end = *entry.compressed_size();
+        let mut last_err: Option<DownloaderError> = None;
 
-        request.download().await?;
-        Ok(0)
+        for attempt in 0..=MAX_RETRIES {
+            // Fresh file each attempt — `.truncate(true)` clears any
+            // partial bytes the previous attempt left behind.
+            let file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&file_path)
+                .await?;
+            let writer = tokio::io::BufWriter::new(file);
+
+            // Fresh decoder — never reuse one that already consumed
+            // partial bytes from a failed attempt.
+            let decoder: Box<dyn DownloadDecoder> = match entry.compression_type() {
+                CompressionType::None => Box::new(NoopDecoder::new(writer)),
+                CompressionType::Deflate => Box::new(ZLibDeflateDecoder::new(writer)),
+            };
+
+            // Per-attempt byte counter. Only commits to the caller's
+            // shared counter on SUCCESS — failed attempts' streamed
+            // bytes don't pollute `completed_bytes`.
+            let attempt_committed = Arc::new(AtomicUsize::new(0));
+            let attempt_committed_cb = attempt_committed.clone();
+            let attempt_callback: Option<BytesDownloadedCallback> = Some(Box::new(move |bytes| {
+                attempt_committed_cb.fetch_add(bytes, Ordering::SeqCst);
+            }));
+
+            let mut request = EntryDownloadRequest::new(
+                &context,
+                &self.url,
+                entry,
+                self.client.clone(),
+                decoder,
+                attempt_callback,
+            );
+
+            debug!(
+                "Downloading {} (compressed={}, uncompressed={}) — attempt {}/{}",
+                entry.name(),
+                entry.compressed_size(),
+                entry.uncompressed_size(),
+                attempt + 1,
+                MAX_RETRIES + 1,
+            );
+
+            match request.download_range(0, end).await {
+                Ok(()) => {
+                    // Successful attempt — commit bytes once to the
+                    // caller's counter.
+                    if let Some(cb) = callback.as_ref() {
+                        cb(attempt_committed.load(Ordering::SeqCst));
+                    }
+                    return Ok(0);
+                }
+                Err(err) => {
+                    if attempt < MAX_RETRIES {
+                        // Exponential backoff with jitter (500ms / 1s /
+                        // 2s / 4s / 8s base, +0-250ms jitter).
+                        let base_ms = 500u64.saturating_mul(1 << attempt);
+                        let jitter_ms = rand::random::<u64>() % 250;
+                        let delay = Duration::from_millis(base_ms + jitter_ms);
+                        warn!(
+                            "{} attempt {}/{} failed ({}); retrying in {:?}",
+                            entry.name(),
+                            attempt + 1,
+                            MAX_RETRIES + 1,
+                            err,
+                            delay,
+                        );
+                        last_err = Some(err);
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        // Final attempt failed — propagate so the
+                        // install flow can surface it (and so the
+                        // caller's `completed_bytes` stays accurate
+                        // for files we genuinely couldn't download).
+                        error!(
+                            "{} failed after {} attempts: {}",
+                            entry.name(),
+                            MAX_RETRIES + 1,
+                            err,
+                        );
+                        last_err = Some(err);
+                    }
+                }
+            }
+        }
+
+        Err(last_err.expect("last_err always set on failure path"))
     }
 }
 

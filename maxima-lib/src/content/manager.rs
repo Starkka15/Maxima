@@ -321,7 +321,20 @@ impl GameDownloader {
     }
 
     pub fn is_done(&self) -> bool {
-        self.completed_bytes.load(Ordering::SeqCst) == self.total_bytes
+        // `>=` (not `==`): the per-file `BytesDownloadedCallback` adds to
+        // `completed_bytes` on every successful chunk read inside
+        // `ByteCountingStream`. When a file's download is retried (see
+        // `EntryDownloadRequest::download` — up to 6 attempts on a single
+        // file under the v0.12.1 retry layer), each attempt streams bytes
+        // through that callback before its eventual outcome — so the
+        // counter ends up at `N × bytes_per_attempt` for an N-retry file
+        // rather than exactly `compressed_size`. With `==` semantics, a
+        // single retried file pushed the counter past `total_bytes` and
+        // `is_done()` returned false forever — install hung silently
+        // forever after "Installation finished!" landed in the log.
+        // Found while debugging a TF2 install where `general_stream_patch_2.mstr`
+        // hit 6 retries and over-counted by ~25MB.
+        self.completed_bytes.load(Ordering::SeqCst) >= self.total_bytes
     }
 
     pub fn percentage_done(&self) -> f64 {
