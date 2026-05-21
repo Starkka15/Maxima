@@ -513,7 +513,19 @@ impl BridgeThread {
                         .build_id(build.build_id().to_owned())
                         .path(path.to_owned())
                         .build()?;
-                    Ok(maxima.content_manager().add_install(game).await?)
+                    let add_result = maxima.content_manager().add_install(game).await;
+                    // Surface the new queue state to the UI immediately
+                    // — without this, `installing_now` stays None until
+                    // some OTHER install finishes (because the only
+                    // existing `update_queue` call is on
+                    // `InstallFinished`). Today the install modal
+                    // worked around it by pre-populating `installing_now`
+                    // synchronously in the click handler; with this
+                    // emission the workaround becomes unnecessary, and
+                    // headless callers (e.g. `AutoInstallSlug` from
+                    // `--install`) also get a populated download list.
+                    Self::update_queue(maxima.content_manager(), backend_responder.clone());
+                    Ok(add_result?)
                 }
                 MaximaLibRequest::AutoInstallSlug(slug, path) => {
                     // External `--install <slug>` flow. Resolve the
@@ -579,7 +591,34 @@ impl BridgeThread {
                             .build()?;
                         {
                             let mut maxima = maxima_arc.lock().await;
-                            maxima.content_manager().add_install(game).await?;
+                            // Capture the result BEFORE calling
+                            // `update_queue`. `add_install` can
+                            // partially mutate the in-memory queue
+                            // (`install_direct` writes `current` to
+                            // disk via `queue.save` before failing on
+                            // downloader init), so the UI needs the
+                            // refreshed view of `current + queued`
+                            // even on the error path — otherwise it
+                            // can show stale state. Matches the
+                            // InstallGameRequest pattern above.
+                            // Gemini caught the previous version's
+                            // `?` short-circuit on PR #16 review.
+                            let add_result =
+                                maxima.content_manager().add_install(game).await;
+                            // Surface the new queue state to the UI
+                            // immediately so `installing_now` lands
+                            // populated and `DownloadProgressChanged`
+                            // events have somewhere to write their
+                            // bytes counter. Without this, the UI's
+                            // Downloads view stays empty even though
+                            // bytes ARE coming down — exactly the
+                            // symptom an earlier `--install` test
+                            // reproduced.
+                            Self::update_queue(
+                                maxima.content_manager(),
+                                backend_responder.clone(),
+                            );
+                            add_result?;
                         }
                         info!(
                             "AutoInstallSlug: queued install of '{}' -> {:?}",

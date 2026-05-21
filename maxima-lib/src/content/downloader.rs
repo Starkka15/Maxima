@@ -407,8 +407,22 @@ impl<'a> EntryDownloadRequest<'a> {
         // returning Ok. The last error is guaranteed to be Some
         // (we always assign before falling through the else arm
         // on attempt == MAX_RETRIES).
+        //
+        // Preserve the original error type per variant — collapsing
+        // everything to `ChunkCopy { error: std::io::Error }` loses
+        // the `reqwest::Error` context that callers may want for
+        // logging / classifying transient network failures. Gemini
+        // caught this on PR #15 review.
         Err(match last_err.expect("last_err always set on failure path") {
             DownloaderError::Download(d) => d,
+            DownloaderError::Request(error) => DownloadError::ChunkDownload {
+                entry: self.entry.name().clone(),
+                error,
+            },
+            DownloaderError::Io(error) => DownloadError::ChunkCopy {
+                entry: self.entry.name().clone(),
+                error,
+            },
             other => DownloadError::ChunkCopy {
                 entry: self.entry.name().clone(),
                 error: std::io::Error::new(std::io::ErrorKind::Other, other.to_string()),
