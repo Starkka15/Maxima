@@ -152,7 +152,7 @@
 !define PRODUCT_NAME "Maxima"
 !define PRODUCT_PUBLISHER "Armchair Developers"
 !define PRODUCT_WEB_SITE "https://github.com/ArmchairDevelopers/Maxima"
-!define PRODUCT_VERSION "0.12.1"
+!define PRODUCT_VERSION "0.12.2"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
 
