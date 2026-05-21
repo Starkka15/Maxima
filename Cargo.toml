@@ -10,6 +10,18 @@ members = [
     "maxima-resources",
 ]
 
+# Inherited by ship-binary crates via `version.workspace = true`.
+# Bumped at every release tag — single source of truth so we don't
+# drift again the way maxima-cli / maxima-bootstrap / maxima-service
+# / maxima-tui / maxima-ui did between #6 and v0.12.1.
+#
+# `maxima-lib` and `maxima-resources` opt out (they pin their own
+# version on purpose — maxima-lib is a library whose version we
+# embed in `FInstall.txt`'s `maxima_lib_version` field, and
+# `maxima-resources` is a build-time helper crate).
+[workspace.package]
+version = "0.12.1"
+
 [profile.release]
 strip = true
 

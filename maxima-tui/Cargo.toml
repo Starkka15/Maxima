@@ -1,6 +1,6 @@
 [package]
 name = "maxima-tui"
-version = "0.1.0"
+version.workspace = true
 authors = ["Sean Kahler <sean@battleda.sh>"]
 edition = "2021"
 
