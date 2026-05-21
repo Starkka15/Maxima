@@ -17,9 +17,7 @@
 ---
 
 > [!WARNING]
-> **This is a beta. Titanfall 2 doesn't reliably launch yet under this configuration** — the LSX/authorize plumbing works end-to-end but TF2 still shows "Engine Error: File corruption detected" in our reference test environment. The likely root cause (Steam DRM IPC or hardware-hash mismatch in the `.dlf` license file) is documented in [`CLAUDE.md`](./CLAUDE.md) and we're actively iterating.
->
-> This fork is a fork of [ArmchairDevelopers/Maxima](https://github.com/ArmchairDevelopers/Maxima), primarily maintained for [Draconis](https://github.com/AA-EION/Draconis) on macOS/CrossOver. The code is still portable to the other OSes upstream supports (native Linux + Windows), but only the macOS/CrossOver path is actively tested. If you want vanilla Maxima on Linux or native Windows, **the upstream repo is a better fit.**
+> **Beta — primarily maintained for [Draconis](https://github.com/AA-EION/Draconis) on macOS/CrossOver.** TF2 reaches Main Menu reproducibly under the supported configuration (Steam install + Maxima CEG fix, OR Maxima-direct install). The code is still portable to the other OSes upstream supports (native Linux + Windows), but only the macOS/CrossOver path is actively tested. If you want vanilla Maxima on Linux or native Windows, **the [upstream repo](https://github.com/ArmchairDevelopers/Maxima) is a better fit.**
 
 **Maxima-Draconis is an open-source replacement for the EA Desktop / Origin launcher.** It handles the EA authentication handshake and license resolution that EA-published games (specifically: Titanfall 2) require at startup. On macOS, it runs entirely **inside a CrossOver or Wine bottle** — it is a Windows application, not a native Mac app. The only Mac-native piece is `MaximaHelper.app`, a lightweight background agent that bridges EA's `qrc://` OAuth redirect from your browser into the bottle.
 
@@ -164,21 +162,11 @@ cargo check --target x86_64-pc-windows-gnu -p maxima-lib -p maxima-cli -p maxima
 
 ## Northstar online play
 
-Northstar works with Maxima, but requires two things:
+Northstar works with Maxima. The trick is using `NorthstarLauncher.exe -noOriginStartup` — that flag tells the Northstar binary to skip the hardcoded `Origin.exe` wait (Origin doesn't exist in Wine), which would otherwise hang forever. Draconis applies the flag automatically; the launch is wrapped in `maxima-cli launch titanfall-2 --game-path "...\NorthstarLauncher.exe" --game-args -noOriginStartup` so Maxima provides EA auth and Northstar's `wsock32.dll` proxy provides the engine hooks.
 
-**1. Launch via Steam, not via `NorthstarLauncher.exe`.**
-`NorthstarLauncher.exe` hard-codes a call to `Origin.exe` which doesn't exist in Wine. Pass the `-northstar` flag to Steam instead so it invokes `Titanfall2.exe` directly with the Northstar hooks loaded:
+Vanilla TF2 with Northstar installed in the same bottle also goes through `NorthstarLauncher.exe`, just with the extra `--game-args -vanilla` flag to skip mod loading. Northstar's `wsock32.dll` proxy applies engine fixes even in vanilla mode, so there's no reason to bypass it.
 
-```
-steam.exe -applaunch 1237970 -northstar -noOriginStartup -multiple
-```
-
-Draconis already does this automatically.
-
-**2. Add `-noOriginStartup -multiple` to your Northstar launch arguments.**
-Without `-noOriginStartup`, Northstar tries to start Origin at launch, which hangs forever in Wine since there is no Origin install. `-multiple` lets the game launch even when Steam thinks another instance is already running (avoids a race during the link2ea handoff).
-
-Thanks to [catornot](https://github.com/catornot) for identifying this and for contributing the external-LSX patch that makes online play work in this fork. See [catornot/flightcore-ng#wine_run.rs](https://github.com/catornot/flightcore-ng/blob/221e4444b6f1813c2401deed9f21d95494bad1ed/flightcore-ng-core/src/dev/wine/wine_run.rs#L23-L31) for reference.
+Thanks to [catornot](https://github.com/catornot) for identifying the `-noOriginStartup` requirement and for contributing the external-LSX patch that makes online play work in this fork. See [catornot/flightcore-ng#wine_run.rs](https://github.com/catornot/flightcore-ng/blob/221e4444b6f1813c2401deed9f21d95494bad1ed/flightcore-ng-core/src/dev/wine/wine_run.rs#L23-L31) for reference.
 
 ---
 
@@ -186,24 +174,21 @@ Thanks to [catornot](https://github.com/catornot) for identifying this and for c
 
 ### What works
 
+- **End-to-end TF2 launch on macOS/CrossOver via the CEG fix** (v0.11.0+). User reproducible: a Steam install of TF2 reaches Main Menu through the full LSX flow (`GetProfile` → `RequestLicense` → `GetAuthCode` → `QueryEntitlements` → `SetPresence`) after `maxima-cli install titanfall-2 --path "<steam_install>" --replace-files "Titanfall2.exe,Titanfall2_trial.exe" --only-listed-files` replaces just the two CEG-signed launcher binaries. ~3 MB download.
+- **Headless install flow via `maxima.exe --install <slug> --install-path <abs>`** (v0.12.0+). Draconis spawns Maxima with these args; user logs into EA in their host browser; the UI auto-navigates to the Downloads view and downloads the game. `FInstall.txt` marker written to the install dir when `ContentManager` confirms `is_done()`.
 - `maxima-cli serve` brings up LSX + the authorize HTTP server reliably inside the bottle.
 - `maxima-bootstrap` correctly forwards `link2ea://` / `origin2://` to a running `serve` and falls back to spawning `maxima-cli launch` when nothing's listening.
 - OAuth login (browser → `MaximaHelper.app` → `qrc://` → bottle) completes end-to-end.
 - The `remid` cookie paste fallback works for browsers where `qrc://` is blocked.
-- `STEAM_GAMES` table + Steam install discovery works for Titanfall 2.
 - License preflight + `.dlf` write to `…/EA Services/License/` is exercised by every authorize call.
+- Downloader retries transient Akamai failures with exponential backoff (v0.12.1+) instead of bailing on the first dropped connection.
 - Cross-compiles and CI green on Linux + Windows + macOS.
-
-### What's NOT confirmed working
-
-- **End-to-end TF2 launch on macOS/CrossOver**. With everything wired up correctly, TF2 still trips its `Engine Error: File corruption detected` check in our test environment. The split-brain (`serve` + `/authorize`) architecture was the latest attempt to sidestep this; user-side verification is still pending. The remaining hypotheses (Steam DRM IPC, `.dlf` hardware-hash mismatch, a local file-integrity check we haven't isolated) are documented in [`CLAUDE.md`](./CLAUDE.md) under "Open issues".
 
 ### Known limitations
 
 - **Steam-only TF2 owners**: If your TF2 EA license isn't linked to your EA account (Steam-only ownership), the EA library lookup fails and Maxima falls back to the `STEAM_GAMES` static table. For the cleanest experience, link your accounts at [ea.com](https://www.ea.com) — takes about 30 seconds and resolves the warning permanently.
 - **Offline mode**: Implemented but not exposed in Draconis UI. License files live at `C:/ProgramData/Electronic Arts/EA Services/License/` and are valid for roughly two weeks.
-- **`NorthstarLauncher.exe`**: Incompatible with this setup. Northstar mode works via `steam.exe -applaunch 1237970 -northstar`.
-- **`maxima-tui` / `maxima-ui`**: Shipped in the installer but Draconis doesn't invoke them. The UI hasn't been wired up to the `/authorize` HTTP endpoint yet — only `maxima-cli serve` provides it for now.
+- **`maxima-tui`**: Shipped in the installer but Draconis doesn't invoke it. `maxima-ui` (the graphical client) is now driven via `--install` for Draconis-orchestrated installs, but its standalone Login/Library/Play surface still hasn't been wired up to the `/authorize` HTTP endpoint — only `maxima-cli serve` provides it for now.
 - **DLL injection on Wine**: `maxima-service`'s injector is Windows-only by design — Wine doesn't support `CreateRemoteThread` injection. The service is installed by NSIS but its injection path is never exercised in the Draconis flow.
 - **`STEAM_GAMES` table is TF2-only**: Other EA-on-Steam titles would not resolve via the fallback. Extend `maxima-lib/src/steam.rs` per title you want to support.
 - **Cloud saves, downloads, friends**: Implemented upstream and present in the codebase, but untested in the Draconis / CrossOver configuration.
