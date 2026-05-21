@@ -85,6 +85,12 @@ pub enum MaximaLibRequest {
     InstallGameRequest(String, PathBuf),
     LocateGameRequest(String),
     ShutdownRequest,
+    /// External-command auto-install (driven by `maxima --install <slug>
+    /// --install-path <path>`). Resolves the slug to an offer_id via
+    /// the EA library and immediately queues an install against it.
+    /// Failure (slug not in library, no live build) surfaces as a
+    /// `NonFatalError` so the UI stays interactive.
+    AutoInstallSlug(String, PathBuf),
 }
 
 pub enum MaximaLibResponse {
@@ -508,6 +514,80 @@ impl BridgeThread {
                         .path(path.to_owned())
                         .build()?;
                     Ok(maxima.content_manager().add_install(game).await?)
+                }
+                MaximaLibRequest::AutoInstallSlug(slug, path) => {
+                    // External `--install <slug>` flow. Resolve the
+                    // slug against the user's EA library, then queue
+                    // an install against the live build at the given
+                    // path.
+                    //
+                    // Wrapped in an async block so any `?` propagation
+                    // exits *this* block — landing in `action` as Err
+                    // and triggering the `NonFatalError` send below —
+                    // rather than killing the entire `BridgeThread::run`
+                    // (which would surface as a CriticalError and
+                    // freeze the UI).
+                    //
+                    // The lock is dropped between each network-bound
+                    // step so other backend requests (game-detail
+                    // fetches, friend status updates, …) aren't
+                    // serialized behind a multi-second install setup.
+                    async {
+                        // 1. Resolve slug -> offer_id.
+                        let offer_id_opt = {
+                            let mut maxima = maxima_arc.lock().await;
+                            let offer =
+                                maxima.mut_library().game_by_base_slug(&slug).await?;
+                            offer.map(|o| o.offer_id().clone())
+                        };
+                        let Some(offer_id) = offer_id_opt else {
+                            warn!(
+                                "AutoInstallSlug: '{}' not in library — UI stays interactive",
+                                slug
+                            );
+                            return Ok(());
+                        };
+                        info!(
+                            "AutoInstallSlug: resolved '{}' -> {}",
+                            slug, offer_id
+                        );
+
+                        // 2. Pick the live build (network call —
+                        //    `available_builds` hits EA's CDN).
+                        let build_id_opt = {
+                            let mut maxima = maxima_arc.lock().await;
+                            let builds = maxima
+                                .content_manager()
+                                .service()
+                                .available_builds(&offer_id)
+                                .await?;
+                            builds.live_build().map(|b| b.build_id().to_owned())
+                        };
+                        let Some(build_id) = build_id_opt else {
+                            warn!(
+                                "AutoInstallSlug: no live build for '{}'",
+                                offer_id
+                            );
+                            return Ok(());
+                        };
+
+                        // 3. Enqueue install at the user-supplied path.
+                        let game = QueuedGameBuilder::default()
+                            .offer_id(offer_id.clone())
+                            .build_id(build_id)
+                            .path(path.clone())
+                            .build()?;
+                        {
+                            let mut maxima = maxima_arc.lock().await;
+                            maxima.content_manager().add_install(game).await?;
+                        }
+                        info!(
+                            "AutoInstallSlug: queued install of '{}' -> {:?}",
+                            offer_id, path
+                        );
+                        Ok::<(), BackendError>(())
+                    }
+                    .await
                 }
                 MaximaLibRequest::StartGameRequest(info, settings) => {
                     Ok(start_game_request(maxima_arc.clone(), info, settings).await?)

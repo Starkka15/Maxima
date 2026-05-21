@@ -58,7 +58,62 @@ const ACCENT_COLOR: Color32 = Color32::from_rgb(8, 171, 244);
 const APP_MARGIN: Vec2 = vec2(12.0, 12.0); //TODO: user setting
 const FRIEND_INGAME_COLOR: Color32 = Color32::from_rgb(39, 106, 252); // temp
 
-#[derive(Parser, Debug, Copy, Clone)]
+/// Write panics to `%LOCALAPPDATA%\Maxima\Logs\maxima.panic.log`
+/// (Windows) or `$XDG_DATA_HOME/maxima/logs/maxima.panic.log` (unix)
+/// in addition to stderr. Without this, panics in worker threads or
+/// during tokio runtime construction can leave no trace — exactly the
+/// failure mode that made the user-reported "Maxima UI thread crash"
+/// hard to diagnose. Mirrored from `maxima-cli`'s install_panic_hook.
+fn install_panic_hook() {
+    let log_path: Option<std::path::PathBuf> = {
+        #[cfg(windows)]
+        {
+            std::env::var_os("LOCALAPPDATA")
+                .or_else(|| std::env::var_os("APPDATA"))
+                .map(std::path::PathBuf::from)
+                .map(|p| p.join("Maxima").join("Logs").join("maxima.panic.log"))
+        }
+        #[cfg(unix)]
+        {
+            std::env::var_os("XDG_DATA_HOME")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
+                })
+                .map(|p| p.join("maxima").join("logs").join("maxima.panic.log"))
+        }
+    };
+
+    std::panic::set_hook(Box::new(move |info| {
+        // Best-effort: never let the panic hook itself panic.
+        if let Some(ref path) = log_path {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = writeln!(
+                    file,
+                    "\n===== PANIC at {:?} (pid={}) =====\n{}\n{}",
+                    std::time::SystemTime::now(),
+                    std::process::id(),
+                    info,
+                    std::backtrace::Backtrace::force_capture(),
+                );
+                let _ = file.flush();
+            }
+        }
+        // Also try stderr (works when launched from a console).
+        eprintln!("FATAL: {}", info);
+    }));
+}
+
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(short, long)]
@@ -69,12 +124,56 @@ struct Args {
     no_login: bool,
     #[arg(short, long)]
     allow_bf3: bool,
+
+    /// External-command: on startup, log in (if not already) then
+    /// auto-queue an install of this game slug. The UI navigates to
+    /// the Downloads view so the user sees progress. Used by external
+    /// launchers (e.g. Draconis) that want to drive a headless-feel
+    /// install without the user manually clicking through the library.
+    ///
+    /// Requires `--install-path`. The slug is resolved against the
+    /// user's EA library; if it isn't owned, the request becomes a
+    /// non-fatal error and the UI stays interactive so the user can
+    /// fix the situation (link Steam account, etc.).
+    #[arg(long, value_name = "SLUG")]
+    install: Option<String>,
+
+    /// Absolute Windows path where the game should be installed.
+    /// Required when `--install` is set. Forwarded verbatim to
+    /// `ContentManager::add_install`, which writes `FInstall.txt`
+    /// here when the download settles.
+    #[arg(long, value_name = "PATH")]
+    install_path: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() {
+/// Plain `fn main` (rather than `#[tokio::main]`) so the panic hook
+/// can be installed BEFORE the tokio runtime is constructed. Tokio
+/// init can itself panic under Wine (IOCP setup, network init); the
+/// previous `#[tokio::main]` form built the runtime before any user
+/// code, defeating any panic capture.
+fn main() {
+    install_panic_hook();
     init_logger();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    runtime.block_on(async_main());
+}
+
+async fn async_main() {
     let mut args = Args::parse();
+
+    // Validate --install / --install-path combo: both or neither.
+    if args.install.is_some() && args.install_path.is_none() {
+        eprintln!("error: --install requires --install-path");
+        std::process::exit(2);
+    }
+    if args.install.is_none() && args.install_path.is_some() {
+        eprintln!("error: --install-path requires --install");
+        std::process::exit(2);
+    }
 
     if !std::env::var("MAXIMA_PACKAGED").is_ok_and(|var| var == "1") {
         if let Err(err) = check_desktop_icon() {
@@ -122,14 +221,20 @@ async fn main() {
             ),
         ..Default::default()
     };
+    // `Args` is no longer `Copy` (it now carries `Option<PathBuf>` and
+    // `Option<String>` for the `--install` / `--install-path` pair),
+    // so the closure needs a separate handle to it apart from what's
+    // moved into `MaximaEguiApp::new`. Clone is cheap (a few Strings)
+    // and keeps the existing `args.no_login` post-init check intact.
+    let args_for_closure = args.clone();
     eframe::run_native(
         "Maxima",
         native_options,
         Box::new(move |cc| {
-            let app = MaximaEguiApp::new(cc, args);
+            let app = MaximaEguiApp::new(cc, args_for_closure.clone());
             // Run initialization code that needs access to the UI here, but DO NOT run any long-runtime functions here,
             // as it's before the UI is shown
-            if args.no_login {
+            if args_for_closure.no_login {
                 return Ok(Box::new(app));
             }
 
@@ -320,6 +425,14 @@ pub struct MaximaEguiApp {
     /// until a resize forces recreation. We nudge the window 1px on the first
     /// frame to trigger that recreation automatically.
     swapchain_nudged: bool,
+
+    /// Pending external-command install request, populated from the
+    /// `--install <slug>` + `--install-path <path>` CLI args at
+    /// startup. Stays `Some` until the login completes and we've
+    /// dispatched `AutoInstallSlug` to the bridge_thread — then
+    /// `take()`-d so we don't re-fire it on later login state
+    /// changes. `None` for a normal interactive launch.
+    pub pending_install: Option<(String, PathBuf)>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, EnumIter)]
@@ -458,9 +571,19 @@ impl MaximaEguiApp {
 
         let (img_cache, remote_provider_channel) = UIImageCache::new(cc.egui_ctx.clone());
 
+        // Capture small scalars + the install pair off `args` before
+        // moving it into the struct field — `Args` is no longer `Copy`
+        // (carries `Option<PathBuf>` for `--install-path` now), so
+        // any post-move reads would fail to compile.
+        let debug_flag = args.debug;
+        let pending_install: Option<(String, PathBuf)> = match (args.install.clone(), args.install_path.clone()) {
+            (Some(slug), Some(path)) => Some((slug, path)),
+            _ => None,
+        };
+
         Self {
             args,
-            debug: args.debug,
+            debug: debug_flag,
             game_view_bar: GameViewBar {
                 genre_filter: GameViewBarGenre::AllGames,
                 platform_filter: GameViewBarPlatform::AllPlatforms,
@@ -497,6 +620,7 @@ impl MaximaEguiApp {
             installer_state: InstallModalState::new(&settings),
             settings,
             swapchain_nudged: false,
+            pending_install,
         }
     }
 }
