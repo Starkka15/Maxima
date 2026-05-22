@@ -59,7 +59,12 @@ enum Mode {
         #[arg(long)]
         game_path: Option<String>,
 
-        #[arg(long)]
+        /// Extra arguments forwarded to the game executable. Repeated:
+        /// `--game-args -noOriginStartup --game-args -vanilla`. Values
+        /// starting with `-` are common (Northstar's `-noOriginStartup`,
+        /// Source's `-novid`, etc.), so `allow_hyphen_values = true`
+        /// stops clap from interpreting them as flags.
+        #[arg(long, allow_hyphen_values = true)]
         game_args: Vec<String>,
 
         /// When set, offer_id must be a content ID, and the only authenticated

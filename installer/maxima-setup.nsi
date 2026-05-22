@@ -152,9 +152,23 @@
 !define PRODUCT_NAME "Maxima"
 !define PRODUCT_PUBLISHER "Armchair Developers"
 !define PRODUCT_WEB_SITE "https://github.com/ArmchairDevelopers/Maxima"
-!define PRODUCT_VERSION "0.12.2"
+!define PRODUCT_VERSION "0.12.3"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
+
+;---------- File-properties metadata ----------
+; Surfaced in Windows Explorer's right-click → Properties → Details
+; tab (FileVersion / ProductVersion / etc.). Without these, the
+; installer's Properties dialog shows blank metadata. VIProductVersion
+; requires a four-part x.y.z.w version; we pad PRODUCT_VERSION with .0
+; for the build component.
+VIProductVersion "${PRODUCT_VERSION}.0"
+VIAddVersionKey "ProductName"     "${PRODUCT_NAME}"
+VIAddVersionKey "ProductVersion"  "${PRODUCT_VERSION}"
+VIAddVersionKey "FileVersion"     "${PRODUCT_VERSION}"
+VIAddVersionKey "FileDescription" "${PRODUCT_NAME} Installer"
+VIAddVersionKey "CompanyName"     "${PRODUCT_PUBLISHER}"
+VIAddVersionKey "LegalCopyright"  "GPL-3.0-or-later"
 
 ; Binary directory - override at compile time with /DBIN_DIR="..."
 ; Default is the macOS cross-compilation path (installer/build.sh).
