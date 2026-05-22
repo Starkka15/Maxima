@@ -142,6 +142,37 @@ enum Mode {
         #[arg(long)]
         json: bool,
     },
+    /// Walk the manifest for a game's live build and report which
+    /// files on disk don't match the expected size. Designed to catch
+    /// partial installs (the v0.12.1 decoder-poisoning bug + any
+    /// future class of broken-content-with-right-size cases will need
+    /// hash verification once we deduce EA's manifest CRC32 format).
+    ///
+    /// With `--repair`, broken files are re-downloaded via the same
+    /// `--replace-files --only-listed-files` primitive as the
+    /// Steam-CEG fix: surgical, only the broken entries, no whole-
+    /// game re-download.
+    Verify {
+        /// Slug / offer_id / content_id, resolved against the EA
+        /// library the same way `install` and `launch` resolve theirs.
+        slug: String,
+        /// Absolute path of the existing install dir.
+        #[arg(long)]
+        path: String,
+        /// After listing broken files, immediately re-download them
+        /// via `install --replace-files --only-listed-files`. No-op
+        /// if the verify pass finds nothing wrong.
+        #[arg(long)]
+        repair: bool,
+        /// Emit JSONL on stdout. Events:
+        ///   `{"event":"progress","phase":"verify","files_checked":i,"total_files":n}`
+        ///   `{"event":"verify_done","ok":N,"broken":[...]}`
+        ///   `{"event":"progress","phase":"repair","current_file":"X","files_done":i,"total_files":m}`
+        ///   `{"event":"done","verified":N,"broken":N,"repaired":M}`
+        ///   `{"event":"error","message":"..."}` (also exits non-zero)
+        #[arg(long)]
+        json: bool,
+    },
     CloudSync {
         game_slug: String,
 
@@ -352,7 +383,9 @@ fn install_panic_hook() {
 fn json_mode(args: &Args) -> bool {
     matches!(
         args.mode,
-        Some(Mode::ListGames { json: true }) | Some(Mode::Install { json: true, .. })
+        Some(Mode::ListGames { json: true })
+            | Some(Mode::Install { json: true, .. })
+            | Some(Mode::Verify { json: true, .. })
     )
 }
 
@@ -693,6 +726,12 @@ async fn startup(args: Args) -> Result<()> {
             )
             .await
         }
+        Mode::Verify {
+            slug,
+            path,
+            repair,
+            json,
+        } => verify_game(maxima_arc.clone(), &slug, &path, repair, json).await,
         Mode::CloudSync { game_slug, write } => {
             do_cloud_sync(maxima_arc.clone(), &game_slug, write).await
         }
@@ -1618,6 +1657,290 @@ async fn install_game(
             elapsed.subsec_millis(),
             install_path.display()
         );
+    }
+
+    Ok(())
+}
+
+/// Walk the build manifest for `slug` and report which on-disk files
+/// don't match the expected `uncompressed_size`. With `repair = true`,
+/// feed the broken list into `install_game(--replace-files
+/// --only-listed-files)` for a surgical re-fetch.
+///
+/// Why size-only (for now):
+///   * EA's manifest stores a `crc32` field but the value upstream
+///     Maxima computes from on-disk bytes never matches what's in the
+///     manifest. The hash-check code was commented out by upstream
+///     with the note "We must be calculating the hash incorrectly or
+///     something." Until that's deduced, hash verification would
+///     false-positive on every entry. Size-only catches:
+///       - missing files (file doesn't exist)
+///       - truncated files (size < expected)
+///       - over-sized files (size > expected)
+///     It misses:
+///       - same-size content corruption (e.g. the v0.12.1 decoder-
+///         poisoning bug, now fixed in v0.12.2). Users in that
+///         pre-fix bottle state can target the known-bad file via
+///         `install --replace-files <name> --only-listed-files`
+///         directly.
+async fn verify_game(
+    maxima_arc: LockedMaxima,
+    slug: &str,
+    path: &str,
+    repair: bool,
+    json: bool,
+) -> Result<()> {
+    use std::io::Write;
+    use tokio::fs;
+
+    let start_ts = std::time::Instant::now();
+    let emit_error = |msg: &str| {
+        if json {
+            let _ = writeln!(
+                std::io::stdout(),
+                "{}",
+                serde_json::json!({"event": "error", "message": msg})
+            );
+            let _ = std::io::stdout().flush();
+        }
+    };
+
+    let install_path = PathBuf::from(path);
+    if !install_path.is_absolute() {
+        let msg = format!("--path must be absolute, got '{}'", path);
+        emit_error(&msg);
+        bail!(msg);
+    }
+    if !fs::try_exists(&install_path).await.unwrap_or(false) {
+        let msg = format!("install path '{}' doesn't exist", install_path.display());
+        emit_error(&msg);
+        bail!(msg);
+    }
+
+    // Slug → offer_id resolution. Same chain as `install_game` minus
+    // the unlinked-Steam passthrough fallbacks: for verify we genuinely
+    // need the manifest, so we must hit the EA library.
+    let offer_id = {
+        let mut maxima = maxima_arc.lock().await;
+        let mut found: Option<String> = None;
+        if let Ok(Some(offer)) = maxima.mut_library().game_by_base_slug(slug).await {
+            found = Some(offer.offer_id().clone());
+        }
+        if found.is_none() {
+            if let Ok(Some(offer)) = maxima.mut_library().game_by_base_offer(slug).await {
+                found = Some(offer.offer_id().clone());
+            }
+        }
+        if found.is_none() {
+            if let Ok(games) = maxima.mut_library().games().await {
+                for game in games {
+                    let base = game.base_offer();
+                    if base.slug() == slug
+                        || base.offer_id() == slug
+                        || base.product().id() == slug
+                        || base.product().origin_offer_id() == slug
+                        || base.offer().content_id() == slug
+                        || base.product().product().id() == slug
+                    {
+                        found = Some(base.offer_id().clone());
+                        break;
+                    }
+                }
+            }
+        }
+        match found {
+            Some(id) => id,
+            None => {
+                let msg = format!("No owned offer found for '{}'", slug);
+                emit_error(&msg);
+                bail!(msg);
+            }
+        }
+    };
+
+    // Resolve the live build + fetch the manifest. We don't need a
+    // `QueuedGame` or `add_install` — just the metadata, which the
+    // `ZipDownloader::new` constructor pulls down as a side effect.
+    let (manifest_url, build_id) = {
+        let maxima = maxima_arc.lock().await;
+        let content_service = ContentService::new(maxima.auth_storage().clone());
+        let builds = content_service.available_builds(&offer_id).await?;
+        let build = match builds.live_build() {
+            Some(b) => b,
+            None => {
+                let msg = format!("No live build for offer '{}'", offer_id);
+                emit_error(&msg);
+                bail!(msg);
+            }
+        };
+        let build_id = build.build_id().to_owned();
+        let url = content_service
+            .download_url(&offer_id, Some(&build_id))
+            .await?;
+        (url.url().to_owned(), build_id)
+    };
+
+    let downloader = ZipDownloader::new(&offer_id, &manifest_url, &install_path).await?;
+    let entries = downloader.manifest().entries();
+    let total = entries.len();
+
+    if !json {
+        info!(
+            "Verifying {} files for '{}' (build {})",
+            total, offer_id, build_id
+        );
+    }
+
+    // Walk entries, compare sizes. Progress emitted every ~5% of total
+    // (or every 100 files for smaller manifests) so JSON consumers
+    // get a steady cadence without flooding.
+    let mut broken: Vec<String> = Vec::new();
+    let progress_every = std::cmp::max(total / 20, 100);
+    for (i, entry) in entries.iter().enumerate() {
+        // Skip directory entries (manifest sometimes lists trailing-
+        // slash names) and zero-byte entries (uncompressed_size == 0).
+        let name = entry.name();
+        if name.ends_with('/') || *entry.uncompressed_size() == 0 {
+            continue;
+        }
+        let file_path = install_path.join(name);
+        let expected = *entry.uncompressed_size();
+        let actual = match fs::metadata(&file_path).await {
+            Ok(meta) => meta.len() as i64,
+            Err(_) => -1, // missing
+        };
+        if actual != expected {
+            if !json {
+                if actual < 0 {
+                    warn!("Missing: {}", name);
+                } else {
+                    warn!("Size mismatch: {} (got {}, expected {})", name, actual, expected);
+                }
+            }
+            broken.push(name.clone());
+        }
+        if json && (i + 1) % progress_every == 0 {
+            let _ = writeln!(
+                std::io::stdout(),
+                "{}",
+                serde_json::json!({
+                    "event": "progress",
+                    "phase": "verify",
+                    "files_checked": i + 1,
+                    "total_files": total,
+                })
+            );
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    if json {
+        let _ = writeln!(
+            std::io::stdout(),
+            "{}",
+            serde_json::json!({
+                "event": "verify_done",
+                "ok": total - broken.len(),
+                "broken": &broken,
+                "total": total,
+            })
+        );
+        let _ = std::io::stdout().flush();
+    } else {
+        info!(
+            "Verify done — {}/{} ok, {} broken",
+            total - broken.len(),
+            total,
+            broken.len()
+        );
+    }
+
+    // If nothing's broken, we're done (success either way).
+    if broken.is_empty() {
+        if json {
+            let _ = writeln!(
+                std::io::stdout(),
+                "{}",
+                serde_json::json!({
+                    "event": "done",
+                    "verified": total,
+                    "broken": 0,
+                    "repaired": 0,
+                    "elapsed_secs": start_ts.elapsed().as_secs_f64(),
+                })
+            );
+            let _ = std::io::stdout().flush();
+        }
+        return Ok(());
+    }
+
+    // --repair: feed broken into the existing install --replace-files
+    // --only-listed-files pipeline. `install_game` emits its own
+    // JSONL events when invoked with `json = true`, so the consumer
+    // sees a continuous stream across the verify → repair handoff.
+    if repair {
+        if !json {
+            info!("Repairing {} broken file(s)…", broken.len());
+        }
+        // Re-emit a transition event so JSON consumers can switch
+        // their UI phase without parsing install_game's events
+        // ambiguously (install_game uses `"phase":"download"` /
+        // `"current_file"` of its own).
+        if json {
+            let _ = writeln!(
+                std::io::stdout(),
+                "{}",
+                serde_json::json!({
+                    "event": "progress",
+                    "phase": "repair",
+                    "files_done": 0,
+                    "total_files": broken.len(),
+                })
+            );
+            let _ = std::io::stdout().flush();
+        }
+
+        install_game(
+            maxima_arc.clone(),
+            slug,
+            path,
+            None,           // live build — same one we just verified against
+            &broken,        // replace_files = list of broken
+            true,           // only_listed_files
+            json,
+        )
+        .await?;
+
+        if json {
+            let _ = writeln!(
+                std::io::stdout(),
+                "{}",
+                serde_json::json!({
+                    "event": "done",
+                    "verified": total,
+                    "broken": broken.len(),
+                    "repaired": broken.len(),
+                    "elapsed_secs": start_ts.elapsed().as_secs_f64(),
+                })
+            );
+            let _ = std::io::stdout().flush();
+        }
+    } else if json {
+        // No --repair: end with a `done` event but flagging broken
+        // count so the consumer can decide whether to follow up with
+        // an explicit repair invocation.
+        let _ = writeln!(
+            std::io::stdout(),
+            "{}",
+            serde_json::json!({
+                "event": "done",
+                "verified": total,
+                "broken": broken.len(),
+                "repaired": 0,
+                "elapsed_secs": start_ts.elapsed().as_secs_f64(),
+            })
+        );
+        let _ = std::io::stdout().flush();
     }
 
     Ok(())
