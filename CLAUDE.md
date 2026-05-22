@@ -916,6 +916,18 @@ When TF2 emits `link2ea://`, bootstrap forwards to the running `serve` and exits
 
 History of significant changes since this fork was forked. Not a substitute for `git log` but useful for "when did X land" questions.
 
+### 2026-05-22 — `maxima-cli launch -- ...` trailing-args separator
+
+`Mode::Launch` gains a `trailing_args: Vec<String>` field tagged with clap's `last = true` ([maxima-cli/src/main.rs](maxima-cli/src/main.rs)). Anything after a literal `--` on the command line is collected verbatim (no flag interpretation) and concatenated onto whatever was supplied via `--game-args` before being forwarded to the game. Both forms now work:
+
+```
+maxima-cli launch X --game-args -noOriginStartup --game-args -multiple
+maxima-cli launch X -- -noOriginStartup -multiple
+maxima-cli launch X --game-args -noOriginStartup -- -multiple   # also fine; order preserved
+```
+
+Motivated by repeated repetition of `--game-args` in Draconis-style invocations. `--game-args` (with `allow_hyphen_values = true` from PR #21) still works as before, so existing scripts are unaffected. Internal merge: `--game-args` values first, then trailing args appended.
+
 ### 2026-05-21 — v0.12.1: downloader retry + DownloadQueueUpdate on enqueue + on-disk version sync
 
 Three follow-ups to v0.12.0, all observed while testing the new `maxima.exe --install` flow end-to-end through the Draconis wizard.
@@ -1001,7 +1013,8 @@ What's kept (universally useful, not game-specific):
 - `EAEntitlementSource` / `EAExternalSource` / `EALaunchOwner` flipped to `"Steam"` when launched from a Steam context.
 
 How callers supply the flags now:
-- CLI: `maxima-cli launch <slug> --game-args -noOriginStartup --game-args -multiple`
+- CLI (repeated `--game-args`): `maxima-cli launch <slug> --game-args -noOriginStartup --game-args -multiple`
+- CLI (trailing `--`): `maxima-cli launch <slug> -- -noOriginStartup -multiple` (both forms can also be mixed; trailing args are appended to any `--game-args` already supplied)
 - Env: `MAXIMA_LAUNCH_ARGS="-noOriginStartup -multiple"`
 - Protocol: `link2ea://launchgame/<offer>?cmd_params=-noOriginStartup%20-multiple` (URL-decoded and split by [auth_server.rs::handle_authorize](maxima-lib/src/auth_server.rs))
 - Draconis already passes both flags in its Northstar invocation (`steam.exe -applaunch 1237970 -novid -northstar -noOriginStartup -multiple`), so Draconis vanilla and Northstar flows are unaffected.

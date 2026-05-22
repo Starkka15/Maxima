@@ -64,6 +64,13 @@ enum Mode {
         /// starting with `-` are common (Northstar's `-noOriginStartup`,
         /// Source's `-novid`, etc.), so `allow_hyphen_values = true`
         /// stops clap from interpreting them as flags.
+        ///
+        /// For convenience, any args after a literal `--` are also
+        /// forwarded to the game (see `trailing_args`), so both forms
+        /// work:
+        ///   `maxima-cli launch X --game-args -noOriginStartup --game-args -multiple`
+        ///   `maxima-cli launch X -- -noOriginStartup -multiple`
+        /// Both lists are concatenated (game_args first, then trailing).
         #[arg(long, allow_hyphen_values = true)]
         game_args: Vec<String>,
 
@@ -72,6 +79,14 @@ enum Mode {
         /// in place of your real username, and any online LSX requests will fail
         #[arg(long)]
         login: Option<String>,
+
+        /// Trailing positional args after `--`. clap's `last = true`
+        /// collects everything past the `--` separator without flag
+        /// interpretation, which makes it natural to pass a series of
+        /// game flags without repeating `--game-args` for each one.
+        /// Merged with `game_args` before being forwarded to the game.
+        #[arg(last = true)]
+        trailing_args: Vec<String>,
     },
     ListGames {
         /// Emit a JSON array on stdout (with log output suppressed) instead
@@ -521,19 +536,12 @@ async fn startup(args: Args) -> Result<()> {
 
     native_setup().await?;
 
-    let skip_login = {
-        if let Some(Mode::Launch {
-            game_path: _,
-            game_args: _,
-            slug: _,
-            ref login,
-        }) = args.mode
-        {
-            login.is_some()
-        } else {
-            false
-        }
-    };
+    // `--login <content_id>` short-circuits the OAuth flow: only the
+    // license server needs auth, so we skip loading persistent auth
+    // storage and run with a dummy local user. `matches!` lets us
+    // ignore the rest of the Launch fields cleanly — they don't
+    // affect this decision.
+    let skip_login = matches!(args.mode, Some(Mode::Launch { login: Some(_), .. }));
 
     let options = MaximaOptionsBuilder::default()
         .load_auth_storage(!skip_login)
@@ -578,7 +586,13 @@ async fn startup(args: Args) -> Result<()> {
             game_path,
             game_args,
             login,
+            trailing_args,
         } => {
+            // Merge the explicit `--game-args` repetitions with the
+            // post-`--` trailing args. `--game-args` first so order is
+            // predictable for callers that mix both styles.
+            let mut game_args = game_args;
+            game_args.extend(trailing_args);
             let offer_id = if login.is_none() {
                 let mut maxima = maxima_arc.lock().await;
 
