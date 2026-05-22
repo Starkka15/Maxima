@@ -916,6 +916,15 @@ When TF2 emits `link2ea://`, bootstrap forwards to the running `serve` and exits
 
 History of significant changes since this fork was forked. Not a substitute for `git log` but useful for "when did X land" questions.
 
+### 2026-05-22 — v0.13.0: verify + repair, trailing-args separator, dependency hardening
+
+Ship-binary version bumped from `0.12.3` → `0.13.0` (workspace + NSIS). What's new since v0.12.3:
+
+- **`maxima-cli verify <slug> --path <abs> [--repair] [--json]`** ([#22](https://github.com/AA-EION/Maxima-Draconis/pull/22)) — size-only file verifier and auto-repair driver. Resolves slug → live build (or `--build-id`), walks the zip manifest, and compares each file's on-disk size to the manifest's `uncompressed_size`. Missing entries and size-mismatches are reported as broken. With `--repair`, the broken set is fed straight into `install_game(--replace-files <list> --only-listed-files)`, so only the corrupted files re-download — same surgical primitive the v0.11.0 Steam-CEG fix introduced. `--json` mode emits structured progress (`{"event":"progress","phase":"verify","files_checked":i,"total_files":n}`), a summary (`{"event":"verify_done","ok":N,"broken":[…],"total":n}`), and a terminator (`{"event":"done","verified":n,"broken":i,"repaired":j,"elapsed_secs":f}` or `{"event":"error","message":"…"}`); plain mode prints periodic `info!` lines. Stopgap until CRC32 verification gets unstuck (upstream commented it out with "We must be calculating the hash incorrectly").
+- **`maxima-cli launch -- <trailing args>`** ([#23](https://github.com/AA-EION/Maxima-Draconis/pull/23)) — `Mode::Launch` gains a `trailing_args` field with clap's `last = true`. Anything after a literal `--` is collected verbatim (no flag interpretation) and concatenated onto `--game-args`. Both forms work; both can be mixed. Avoids the repeated `--game-args` boilerplate in Draconis-style multi-flag invocations. `--game-args` still works for callers that prefer the explicit form.
+
+Other follow-ups since v0.12.3 are non-shipping (Gemini-review cleanups, docs sync). Full Gemini review applied to both PRs before merge per the post-#21 protocol — no pending suggestions left unaddressed.
+
 ### 2026-05-22 — `maxima-cli launch -- ...` trailing-args separator
 
 `Mode::Launch` gains a `trailing_args: Vec<String>` field tagged with clap's `last = true` ([maxima-cli/src/main.rs](maxima-cli/src/main.rs)). Anything after a literal `--` on the command line is collected verbatim (no flag interpretation) and concatenated onto whatever was supplied via `--game-args` before being forwarded to the game. Both forms now work:
