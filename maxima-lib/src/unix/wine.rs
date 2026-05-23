@@ -387,6 +387,110 @@ fn extract_archive<R: Read + Sized>(
     Ok(())
 }
 
+/// Clean up any interrupted WiX Burn-engine installations (vcredist etc.) that
+/// left a `/burn.runonce` entry in Wine's RunOnce registry key and a `state.rsm`
+/// checkpoint in the Package Cache. A Burn install that is killed mid-run sets
+/// `Resume=dword:00000001` in its Uninstall key and adds a RunOnce entry; the
+/// next invocation then tries to resume from the (potentially corrupt) checkpoint
+/// and exits with code 1 instead of installing fresh.
+pub async fn cleanup_interrupted_burn_installs() -> Result<(), NativeError> {
+    let registry = parse_mx_wine_registry().await?;
+
+    let runonce_prefix_wow =
+        "software\\wow6432node\\microsoft\\windows\\currentversion\\runonce\\";
+    let runonce_prefix_plain = "software\\microsoft\\windows\\currentversion\\runonce\\";
+
+    let mut to_clean: Vec<(String, String)> = Vec::new();
+    for (full_key, value) in &registry {
+        if (!full_key.starts_with(runonce_prefix_wow)
+            && !full_key.starts_with(runonce_prefix_plain))
+            || !value.contains("burn.runonce")
+        {
+            continue;
+        }
+        let value_name = full_key.rsplit('\\').next().unwrap_or("").to_string();
+        if let Some(guid) = extract_burn_guid_from_command(value) {
+            info!(
+                "Found interrupted Burn install: RunOnce='{}' GUID={}",
+                value_name, guid
+            );
+            to_clean.push((value_name, guid));
+        }
+    }
+
+    if to_clean.is_empty() {
+        return Ok(());
+    }
+
+    // Delete state.rsm checkpoint files directly on the host filesystem
+    let prefix = wine_prefix_dir()?;
+    for (_, guid) in &to_clean {
+        let state_rsm = prefix
+            .join("drive_c")
+            .join("ProgramData")
+            .join("Package Cache")
+            .join(guid)
+            .join("state.rsm");
+        if state_rsm.exists() {
+            match tokio::fs::remove_file(&state_rsm).await {
+                Ok(()) => info!("Deleted Burn checkpoint: {}", state_rsm.display()),
+                Err(err) => warn!("Could not delete {}: {}", state_rsm.display(), err),
+            }
+        }
+    }
+
+    // Build a .reg file to clear Resume flags and delete RunOnce entries
+    let mut reg = "Windows Registry Editor Version 5.00\n\n".to_string();
+    for (value_name, guid) in &to_clean {
+        for key_prefix in &[
+            "HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+        ] {
+            reg.push_str(&format!("[{}\\{}]\n", key_prefix, guid));
+            reg.push_str("\"Resume\"=dword:00000000\n\n");
+        }
+        for key_prefix in &[
+            "HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+            "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+        ] {
+            reg.push_str(&format!("[{}]\n", key_prefix));
+            // "ValueName"=- is the .reg syntax for deleting a value
+            reg.push_str(&format!("\"{}\"=-\n\n", value_name));
+        }
+    }
+
+    let reg_path = maxima_dir()?.join("temp").join("burn_cleanup.reg");
+    tokio::fs::create_dir_all(reg_path.safe_parent()?).await?;
+    tokio::fs::write(&reg_path, reg.as_bytes()).await?;
+
+    run_wine_command(
+        "regedit",
+        Some(vec!["/S", reg_path.safe_str()?]),
+        None,
+        true,
+        CommandType::Run,
+    )
+    .await?;
+
+    tokio::fs::remove_file(&reg_path).await?;
+    invalidate_mx_wine_registry().await;
+
+    info!("Cleaned up {} interrupted Burn installation(s)", to_clean.len());
+    Ok(())
+}
+
+fn extract_burn_guid_from_command(command: &str) -> Option<String> {
+    let start = command.find('{')?;
+    let end = command[start..].find('}')? + start + 1;
+    let candidate = &command[start..end];
+    // A GUID with braces is {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx} = 38 chars
+    if candidate.len() == 38 {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
+}
+
 pub async fn setup_wine_registry() -> Result<(), NativeError> {
     let mut reg_content = "Windows Registry Editor Version 5.00\n\n".to_string();
     // This supports text values only at the moment

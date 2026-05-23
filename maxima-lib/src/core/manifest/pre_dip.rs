@@ -107,15 +107,26 @@ impl PreDiPManifest {
 
     #[cfg(unix)]
     pub async fn run_touchup(&self, install_path: &PathBuf) -> Result<(), ManifestError> {
+        use log::warn;
+
         use crate::{
             core::launch::mx_linux_setup,
             unix::{
                 fs::case_insensitive_path,
-                wine::{invalidate_mx_wine_registry, run_wine_command, CommandType},
+                wine::{
+                    cleanup_interrupted_burn_installs, invalidate_mx_wine_registry,
+                    run_wine_command, CommandType,
+                },
             },
         };
 
         mx_linux_setup().await?;
+
+        // Clear any interrupted WiX Burn installs (e.g. vcredist killed mid-run)
+        // so they start fresh rather than trying to resume from a corrupt checkpoint.
+        if let Err(err) = cleanup_interrupted_burn_installs().await {
+            warn!("Burn cleanup check failed (proceeding with touchup anyway): {err:?}");
+        }
 
         let install_path = PathBuf::from(remove_trailing_slash(
             install_path.to_str().ok_or(ManifestError::Decode)?,
@@ -132,8 +143,12 @@ impl PreDiPManifest {
 
     #[cfg(windows)]
     pub async fn run_touchup(&self, install_path: &PathBuf) -> Result<(), ManifestError> {
-        use crate::util::native::NativeError;
+        use crate::util::{native::NativeError, registry::cleanup_interrupted_burn_installs};
         use tokio::process::Command;
+
+        // Clear any interrupted WiX Burn installs (e.g. vcredist killed mid-run)
+        // so they start fresh rather than trying to resume from a corrupt checkpoint.
+        cleanup_interrupted_burn_installs();
 
         let args = self.collect_touchup_args(install_path)?;
         let path = install_path.join(&self.executable.file_path);
