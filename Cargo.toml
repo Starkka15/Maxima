@@ -20,7 +20,7 @@ members = [
 # embed in `FInstall.txt`'s `maxima_lib_version` field, and
 # `maxima-resources` is a build-time helper crate).
 [workspace.package]
-version = "0.13.0"
+version = "0.14.0"
 
 [profile.release]
 strip = true
