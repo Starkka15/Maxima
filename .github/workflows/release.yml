@@ -37,7 +37,11 @@ jobs:
         cache-on-failure: true
 
     - name: Build
-      run: cargo build --release --target x86_64-unknown-linux-musl
+      # Build ONLY maxima-cli. Building the whole workspace pulls in maxima-ui,
+      # whose rustix 0.37 dependency fails to compile on current nightly
+      # (`rustc_attrs` became reserved) — that would fail the release build. The
+      # CLI is the only artifact shipped to the GameVault EA extension anyway.
+      run: cargo build --release -p maxima-cli --target x86_64-unknown-linux-musl
       env:
         RUSTFLAGS: "-C target-feature=+crt-static"
 

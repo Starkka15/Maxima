@@ -525,6 +525,21 @@ pub async fn setup_wine_registry() -> Result<(), NativeError> {
                 ("ClientPath", "C:/Windows/System32/conhost.exe"),
             ],
         ),
+        // Plain `Origin` under Wow6432Node. Origin's install check runs in a
+        // 32-bit context, so a game reading HKLM\Software\Origin is redirected
+        // by the WoW64 registry to HKLM\Software\Wow6432Node\Origin. We already
+        // write the 64-bit `Software\Origin`, but titles like Mirror's Edge
+        // Catalyst read the 32-bit view and abort with "Origin is not
+        // installed" when this key is absent. OriginPath/ClientPath point at a
+        // real existing exe so any path check the game does still succeeds.
+        (
+            "HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Origin",
+            &[
+                ("InstallSuccessful", "true"),
+                ("ClientPath", "C:/Windows/System32/conhost.exe"),
+                ("OriginPath", "C:/Windows/System32/conhost.exe"),
+            ],
+        ),
     ];
 
     for (key, values) in entries.into_iter() {
@@ -553,6 +568,77 @@ pub async fn setup_wine_registry() -> Result<(), NativeError> {
     .await?;
 
     tokio::fs::remove_file(path).await?;
+
+    Ok(())
+}
+
+/// Write an EA game's `[HKLM\...\Install Dir]` registry key directly into the
+/// wine prefix, so `is_installed()` / `execute_path()` resolve the game without
+/// depending on its own `Touchup.exe` having succeeded. EA's touchup runs
+/// `DXSETUP.exe`, which fails under wine ("DirectX Setup Error: An internal
+/// error occurred") and aborts touchup BEFORE it writes this key -- yet the
+/// DirectX DLLs register fine via regsvr32 and Proton ships DirectX anyway, so
+/// the only thing actually lost is this key. We already know the install path
+/// and the key (from the manifest launcher template), so we just write it.
+///
+/// `registry_template` is the bracketed launcher path from the manifest, e.g.
+/// `[HKEY_LOCAL_MACHINE\SOFTWARE\EA Games\BFH\Install Dir]BFHWebHelper.exe`.
+/// Launchers that aren't a registry template (no brackets) are a no-op.
+pub async fn write_install_dir_registry(
+    registry_template: &str,
+    install_path: &std::path::Path,
+) -> Result<(), NativeError> {
+    let (Some(start), Some(end)) =
+        (registry_template.find('['), registry_template.find(']'))
+    else {
+        return Ok(());
+    };
+    let full = &registry_template[start + 1..end]; // HKLM\SOFTWARE\EA Games\BFH\Install Dir
+    let Some(sep) = full.rfind('\\') else {
+        return Ok(());
+    };
+    let key = &full[..sep]; // HKEY_LOCAL_MACHINE\SOFTWARE\EA Games\BFH
+    let value_name = &full[sep + 1..]; // Install Dir
+
+    let Some(unix) = install_path.to_str() else {
+        return Ok(());
+    };
+    // Exact form Touchup.exe writes: Z:<unix path>, backslashes, trailing sep.
+    let win_path = format!("Z:{}\\", unix.trim_end_matches('/').replace('/', "\\"));
+
+    // Also write the Wow6432Node sibling so 32-bit lookups resolve.
+    let wow_key = match key.strip_prefix("HKEY_LOCAL_MACHINE\\SOFTWARE\\") {
+        Some(rest) => format!("HKEY_LOCAL_MACHINE\\SOFTWARE\\Wow6432Node\\{}", rest),
+        None => key.to_string(),
+    };
+
+    let mut reg_content = "Windows Registry Editor Version 5.00\n\n".to_string();
+    for k in [key.to_string(), wow_key] {
+        reg_content.push_str(&format!("[{}]\n", k));
+        reg_content.push_str(&format!(
+            "\"{}\"=\"{}\"\n\n",
+            value_name,
+            win_path.replace('\\', "\\\\")
+        ));
+    }
+
+    let path = maxima_cache_dir()?.join("install_dir.reg");
+    {
+        let mut reg_file = tokio::fs::File::create(&path).await?;
+        reg_file.write_all(reg_content.as_bytes()).await?;
+    }
+
+    run_wine_command(
+        "regedit",
+        Some(vec!["/S", path.safe_str()?]),
+        None,
+        true,
+        CommandType::Run,
+    )
+    .await?;
+
+    tokio::fs::remove_file(path).await?;
+    invalidate_mx_wine_registry().await;
 
     Ok(())
 }

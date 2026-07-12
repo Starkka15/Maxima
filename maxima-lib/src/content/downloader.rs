@@ -573,15 +573,51 @@ impl ZipDownloader {
         let end = *entry.compressed_size();
         let mut last_err: Option<DownloaderError> = None;
 
+        // Uncompressed (stored) entries can be RESUMED: the bytes already on disk
+        // are a valid prefix of the final file, so a dropped connection only needs
+        // the missing tail re-fetched, not the whole file. This is essential for
+        // the multi-GB `.cas` archives — on a flaky link they never finish in one
+        // unbroken transfer, and the old truncate+restart-from-0 loop pins the
+        // install at ~0% forever (each attempt dies ~250MB into a 1GB file and
+        // starts over). Deflate entries CANNOT resume mid-stream: the zlib decoder
+        // carries stream state, and a fresh decoder fed a mid-stream byte offset
+        // produces garbage (the decoder-poisoning failure documented above), so
+        // they still restart from 0 each attempt.
+        let resumable = matches!(entry.compression_type(), CompressionType::None);
+
         for attempt in 0..=MAX_RETRIES {
-            // Fresh file each attempt — `.truncate(true)` clears any
-            // partial bytes the previous attempt left behind.
-            let file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&file_path)
-                .await?;
+            // Resume point: for a resumable entry, keep the on-disk prefix and
+            // fetch only [resume_from, end). Re-read the size every attempt so a
+            // partial retry advances the floor instead of throwing it away. 0 for
+            // Deflate (and for a missing/complete file) → full from-scratch fetch.
+            let resume_from: i64 = if resumable {
+                match tokio::fs::metadata(&file_path).await {
+                    Ok(m) if (m.len() as i64) < end => m.len() as i64,
+                    _ => 0,
+                }
+            } else {
+                0
+            };
+
+            // From-scratch attempt truncates (clears any partial bytes); a resume
+            // opens in append mode so existing bytes stay and new bytes extend the
+            // file. `.append(true)` forces every write to EOF — exactly the
+            // sequential tail the ranged request delivers.
+            let file = if resume_from > 0 {
+                OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .append(true)
+                    .open(&file_path)
+                    .await?
+            } else {
+                OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&file_path)
+                    .await?
+            };
             let writer = tokio::io::BufWriter::new(file);
 
             // Fresh decoder — never reuse one that already consumed
@@ -610,20 +646,28 @@ impl ZipDownloader {
             );
 
             debug!(
-                "Downloading {} (compressed={}, uncompressed={}) — attempt {}/{}",
+                "Downloading {} (compressed={}, uncompressed={}) — attempt {}/{}{}",
                 entry.name(),
                 entry.compressed_size(),
                 entry.uncompressed_size(),
                 attempt + 1,
                 MAX_RETRIES + 1,
+                if resume_from > 0 {
+                    format!(" (resuming from {resume_from})")
+                } else {
+                    String::new()
+                },
             );
 
-            match request.download_range(0, end).await {
+            match request.download_range(resume_from, end).await {
                 Ok(()) => {
-                    // Successful attempt — commit bytes once to the
-                    // caller's counter.
+                    // Successful attempt — commit the FULL file's bytes once to
+                    // the caller's counter: the prefix carried over from earlier
+                    // attempts (resume_from) plus this attempt's new bytes.
+                    // Earlier failed attempts committed nothing, so this is the
+                    // file's only contribution to completed_bytes.
                     if let Some(cb) = callback.as_ref() {
-                        cb(attempt_committed.load(Ordering::SeqCst));
+                        cb(attempt_committed.load(Ordering::SeqCst) + resume_from as usize);
                     }
                     return Ok(0);
                 }

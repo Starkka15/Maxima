@@ -86,6 +86,56 @@ impl OwnedOffer {
         .to_owned())
     }
 
+    /// Write this game's `[HKLM\...\Install Dir]` registry key directly, using
+    /// the offer's `installCheckOverride` template as the key and `install_path`
+    /// as the value. `is_installed()`/`execute_path()` resolve the game through
+    /// this key; EA's `Touchup.exe` is supposed to write it but its `DXSETUP.exe`
+    /// step fails under wine and aborts before it does, so we write it ourselves
+    /// at the end of install. No-op if the offer has no install-check override.
+    #[cfg(unix)]
+    pub async fn write_install_registry(
+        &self,
+        install_path: &std::path::Path,
+    ) -> Result<(), LibraryError> {
+        // Collect every [HKLM\...\<value>] template whose key must point at
+        // this install, then write them all. Three sources, because they can
+        // disagree on BOTH the value name AND the key path:
+        //
+        //  1/2. The offer's install-check / execute-path overrides. These can
+        //       use different VALUE names under the same key — EA Games titles
+        //       use "Install Dir" for both, but BioWare's Mass Effect 2 uses
+        //       "Path" for install-check and "Install Dir" for the exe path.
+        //       is_installed() reads the former, execute_path() the latter.
+        //
+        //  3. The LOCAL MANIFEST's execute paths (installerdata.xml <runtime>).
+        //     execute_path() reads the manifest FIRST and only falls back to
+        //     the offer override, and the manifest can name a DIFFERENT KEY
+        //     than the offer does. Burnout Paradise is the case in point: the
+        //     manifest key is "...EA Games\Burnout(TM) Paradise - The Ultimate
+        //     Box" (with " - ") while the offer install-check key omits the
+        //     dash. Writing only the offer key leaves is_installed() happy but
+        //     execute_path() unresolved → launch spawns a literal "[HKLM...]exe"
+        //     path and dies with NotFound. So write the manifest's key too.
+        let mut templates: Vec<String> = Vec::new();
+        if let Some(t) = self.offer.install_check_override() {
+            templates.push(t.clone());
+        }
+        if let Some(t) = self.offer.execute_path_override() {
+            templates.push(t.clone());
+        }
+        if let Ok(Some(manifest)) = self.local_manifest().await {
+            for trial in [false, true] {
+                if let Some(t) = manifest.execute_path(trial) {
+                    templates.push(t);
+                }
+            }
+        }
+        for template in templates {
+            crate::unix::wine::write_install_dir_registry(&template, install_path).await?;
+        }
+        Ok(())
+    }
+
     pub async fn execute_path(&self, trial: bool) -> Result<PathBuf, LibraryError> {
         let manifest = match self.local_manifest().await? {
             Some(manifest) => manifest,

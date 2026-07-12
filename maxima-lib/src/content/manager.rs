@@ -302,7 +302,25 @@ impl GameDownloader {
         info!("Files downloaded, running touchup...");
         let manifest = manifest::read(path.join(MANIFEST_RELATIVE_PATH)).await?;
 
-        manifest.run_touchup(path).await?;
+        // Touchup runs the title's EA installer (Touchup.exe) under wine to
+        // register DirectX/XAudio DLLs, install vcredist, and write registry
+        // keys. Launched under Proton (Steam or umu) those redistributables are
+        // already provided by the runtime, and we resolve the game exe path
+        // ourselves instead of reading the registry Install Dir key -- so
+        // touchup is largely redundant and, worse, some titles' Touchup.exe
+        // exits non-zero (Battlefield Hardline exits 1 after registering its
+        // xactengine DLLs), which used to abort an otherwise-complete install
+        // and leave it with no FInstall.txt. So: skip it entirely when
+        // MAXIMA_SKIP_TOUCHUP is set (faster installs), and never let a touchup
+        // failure fail the install -- log it and carry on; the game still runs.
+        if std::env::var("MAXIMA_SKIP_TOUCHUP").is_ok() {
+            info!("Skipping touchup (MAXIMA_SKIP_TOUCHUP set); Proton supplies the redistributables");
+        } else if let Err(e) = manifest.run_touchup(path).await {
+            warn!(
+                "Touchup failed ({e:?}); continuing anyway -- the game usually still \
+                 runs under Proton, which provides its own redistributables"
+            );
+        }
         info!("Installation finished!");
 
         completed_bytes.fetch_add(1, Ordering::SeqCst);

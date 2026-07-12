@@ -264,6 +264,22 @@ enum Mode {
         #[arg(long)]
         game_path: Option<String>,
     },
+    /// Write a game's `[HKLM\...\Install Dir]` registry key(s) for an
+    /// already-present install, WITHOUT downloading, verifying, or launching.
+    ///
+    /// `launch <slug>` gates on `is_installed()`, which resolves the offer's
+    /// install-check registry template through the Wine prefix. A game that was
+    /// installed by an older maxima (before the registry writer existed), or
+    /// whose prefix was reset, has files on disk but no key — so it launches as
+    /// "not installed". This makes the fix idempotent and cheap enough for a
+    /// launcher to run before every `launch`, so that state can't happen.
+    RegisterInstall {
+        /// Slug / offer_id / content_id, resolved like `install`/`launch`.
+        slug: String,
+        /// Absolute path of the existing install dir.
+        #[arg(long)]
+        path: String,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -791,6 +807,9 @@ async fn startup(args: Args) -> Result<()> {
         Mode::AuthEnv { slug, game_path } => {
             auth_env(maxima_arc.clone(), &slug, game_path).await
         }
+        Mode::RegisterInstall { slug, path } => {
+            register_install(maxima_arc.clone(), &slug, &path).await
+        }
     }?;
 
     Ok(())
@@ -920,7 +939,7 @@ async fn interactive_install_game(maxima_arc: LockedMaxima) -> Result<()> {
         maxima.update().await;
 
         if let Some(downloader) = maxima.content_manager().current() {
-            info!("Downloading: {}%/100%", downloader.percentage_done());
+            info!("Downloading: {:.2}%/100%", downloader.percentage_done());
         } else {
             break;
         }
@@ -1786,7 +1805,7 @@ async fn install_game(
             );
             let _ = std::io::stdout().flush();
         } else {
-            info!("Downloading: {}%/100%", percent);
+            info!("Downloading: {:.2}%/100%", percent);
         }
 
         if !still_downloading {
@@ -1817,6 +1836,60 @@ async fn install_game(
         );
     }
 
+    // Write the game's [HKLM\...\Install Dir] registry key so is_installed() /
+    // execute_path() can resolve it. EA's Touchup.exe normally writes it, but
+    // its DXSETUP step fails under wine and aborts before it does (and we may
+    // skip touchup entirely for speed), so make the install self-sufficient.
+    #[cfg(unix)]
+    {
+        let mut maxima = maxima_arc.lock().await;
+        if let Ok(Some(offer)) = maxima.mut_library().game_by_base_slug(slug).await {
+            if let Err(e) = offer.write_install_registry(&install_path).await {
+                warn!(
+                    "Could not write Install Dir registry key ({e:?}); maxima may \
+                     report the game as not installed"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Write a game's install-check / execute-path registry key(s) for an
+/// already-present install. Same registry write `install_game` does at the end
+/// of a fresh install, exposed standalone so a launcher can self-heal a game
+/// that was installed before the registry writer existed (or after a prefix
+/// reset) — `launch <slug>` then resolves it as installed. No download, verify,
+/// or launch. Idempotent: writing the same key twice is harmless.
+async fn register_install(maxima_arc: LockedMaxima, slug: &str, path: &str) -> Result<()> {
+    let install_path = std::path::PathBuf::from(path);
+    if !install_path.is_dir() {
+        bail!(
+            "register-install: path '{}' is not a directory",
+            install_path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        let mut maxima = maxima_arc.lock().await;
+        match maxima.mut_library().game_by_base_slug(slug).await? {
+            Some(offer) => {
+                offer.write_install_registry(&install_path).await?;
+                info!(
+                    "Registered install for '{}' at {}",
+                    slug,
+                    install_path.display()
+                );
+            }
+            None => bail!("register-install: no game found for slug '{}'", slug),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (&maxima_arc, slug);
+        info!("register-install: no-op on non-unix (installer writes the registry natively)");
+    }
     Ok(())
 }
 
