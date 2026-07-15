@@ -493,6 +493,11 @@ impl ZipDownloader {
         &self,
         entry: &ZipFileEntry,
         callback: Option<BytesDownloadedCallback>,
+        // Live per-chunk display counter (see GameDownloader::live_bytes). Advances
+        // as bytes stream, rolled back per failed non-resumable attempt so it never
+        // over-counts. Separate from `callback`, which commits whole files on
+        // success for the retry-safe `is_done()` total. None for one-off callers.
+        live_bytes: Option<Arc<AtomicUsize>>,
     ) -> Result<usize, DownloaderError> {
         let file_path = self.path.join(entry.name());
 
@@ -536,6 +541,11 @@ impl ZipDownloader {
             {
                 if let Some(cb) = callback {
                     cb(*entry.compressed_size() as usize);
+                }
+                // Already-complete file (re-run over an existing dir): count it
+                // toward the live display total too, else the bar under-reports.
+                if let Some(lb) = &live_bytes {
+                    lb.fetch_add(*entry.compressed_size() as usize, Ordering::SeqCst);
                 }
                 return Ok(0);
             }
@@ -599,6 +609,17 @@ impl ZipDownloader {
                 0
             };
 
+            // Seed the live display counter with a pre-existing on-disk prefix on
+            // the FIRST attempt only: those bytes (from a prior run/session) never
+            // streamed through the per-chunk callback, so without this the bar
+            // under-reports a resumed install. Later attempts' resume_from grew from
+            // THIS session's streamed bytes, already counted live — don't re-add.
+            if attempt == 0 && resume_from > 0 {
+                if let Some(lb) = &live_bytes {
+                    lb.fetch_add(resume_from as usize, Ordering::SeqCst);
+                }
+            }
+
             // From-scratch attempt truncates (clears any partial bytes); a resume
             // opens in append mode so existing bytes stay and new bytes extend the
             // file. `.append(true)` forces every write to EOF — exactly the
@@ -632,8 +653,14 @@ impl ZipDownloader {
             // bytes don't pollute `completed_bytes`.
             let attempt_committed = Arc::new(AtomicUsize::new(0));
             let attempt_committed_cb = attempt_committed.clone();
+            // Live display counter also ticks per chunk so the progress bar moves
+            // in real time. Rolled back below if a non-resumable attempt fails.
+            let live_for_chunk = live_bytes.clone();
             let attempt_callback: Option<BytesDownloadedCallback> = Some(Box::new(move |bytes| {
                 attempt_committed_cb.fetch_add(bytes, Ordering::SeqCst);
+                if let Some(lb) = &live_for_chunk {
+                    lb.fetch_add(bytes, Ordering::SeqCst);
+                }
             }));
 
             let mut request = EntryDownloadRequest::new(
@@ -672,6 +699,18 @@ impl ZipDownloader {
                     return Ok(0);
                 }
                 Err(err) => {
+                    // Roll this attempt's live-display bytes back out for a
+                    // NON-resumable (deflate) entry: the next attempt truncates and
+                    // restarts from 0 (or, on final failure, the file is incomplete),
+                    // so those streamed bytes must not linger in the display counter
+                    // or it drifts past the real total. Resumable entries KEEP their
+                    // bytes — they stay on disk as the next attempt's resume point,
+                    // and that attempt only streams (and counts) the remaining tail.
+                    if !resumable {
+                        if let Some(lb) = &live_bytes {
+                            lb.fetch_sub(attempt_committed.load(Ordering::SeqCst), Ordering::SeqCst);
+                        }
+                    }
                     if attempt < MAX_RETRIES {
                         // Exponential backoff with jitter (500ms / 1s /
                         // 2s / 4s / 8s base, +0-250ms jitter).

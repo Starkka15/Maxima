@@ -1119,7 +1119,7 @@ async fn download_specific_file(
     }
 
     let ele = entry.unwrap();
-    downloader.download_single_file(ele, None).await.unwrap();
+    downloader.download_single_file(ele, None, None).await.unwrap();
 
     info!(
         "Downloaded file {} from game build {}",
@@ -1726,7 +1726,7 @@ async fn install_game(
                 info!("Downloading {} ({}/{})", relative, idx + 1, total);
             }
 
-            if let Err(e) = downloader.download_single_file(entry, None).await {
+            if let Err(e) = downloader.download_single_file(entry, None, None).await {
                 let msg = format!("download of '{}' failed: {}", relative, e);
                 emit_error(&msg);
                 return Err(e.into());

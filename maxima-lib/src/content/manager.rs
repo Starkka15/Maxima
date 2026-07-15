@@ -172,7 +172,15 @@ pub struct GameDownloader {
     entries: Vec<ZipFileEntry>,
 
     cancel_token: CancellationToken,
+    // Retry-safe whole-file counter: incremented once per file *after* it
+    // finishes (see downloader.rs), so it never over-counts on retries. Drives
+    // `is_done()`. Coarse for display — with 16 multi-GB files in flight it can
+    // sit near 0 for minutes, which looked like a frozen install.
     completed_bytes: Arc<AtomicUsize>,
+    // Live per-chunk counter for DISPLAY only: bytes advance as they stream, so
+    // `percentage_done()` moves smoothly while big files are still downloading.
+    // Retry/rollback handled in `download_single_file`. Not used for `is_done()`.
+    live_bytes: Arc<AtomicUsize>,
     total_count: usize,
     total_bytes: usize,
     notify: Arc<Notify>,
@@ -211,6 +219,7 @@ impl GameDownloader {
             entries,
             cancel_token: CancellationToken::new(),
             completed_bytes: Arc::new(AtomicUsize::new(0)),
+            live_bytes: Arc::new(AtomicUsize::new(0)),
             total_count,
             total_bytes,
             notify: Arc::new(Notify::new()),
@@ -218,7 +227,7 @@ impl GameDownloader {
     }
 
     pub fn download(&self) {
-        let (downloader_arc, entries, cancel_token, completed_bytes, notify) =
+        let (downloader_arc, entries, cancel_token, completed_bytes, live_bytes, notify) =
             self.prepare_download_vars();
         let total_count = self.total_count;
         tokio::spawn(async move {
@@ -228,6 +237,7 @@ impl GameDownloader {
                 entries,
                 cancel_token,
                 completed_bytes,
+                live_bytes,
                 notify,
             )
             .await;
@@ -244,6 +254,7 @@ impl GameDownloader {
         Vec<ZipFileEntry>,
         CancellationToken,
         Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
         Arc<Notify>,
     ) {
         (
@@ -251,6 +262,7 @@ impl GameDownloader {
             self.entries.clone(),
             self.cancel_token.clone(),
             self.completed_bytes.clone(),
+            self.live_bytes.clone(),
             self.notify.clone(),
         )
     }
@@ -261,6 +273,7 @@ impl GameDownloader {
         entries: Vec<ZipFileEntry>,
         cancel_token: CancellationToken,
         completed_bytes: Arc<AtomicUsize>,
+        live_bytes: Arc<AtomicUsize>,
         notify: Arc<Notify>,
     ) -> Result<(), DownloaderError> {
         let mut handles = Vec::with_capacity(total_count);
@@ -271,6 +284,7 @@ impl GameDownloader {
 
             let cancel_token = cancel_token.clone();
             let completed_bytes = completed_bytes.clone();
+            let live_bytes = live_bytes.clone();
 
             handles.push(async move {
                 if ele.name().contains("Cleanup") {
@@ -280,7 +294,7 @@ impl GameDownloader {
                 tokio::select! {
                     result = downloader.download_single_file(&ele, Some(Box::new(move |bytes| {
                         completed_bytes.fetch_add(bytes, Ordering::SeqCst);
-                    }))) => {
+                    })), Some(live_bytes)) => {
                         if let Err(err) = result {
                             error!("File download failed: {}", err);
                         }
@@ -356,8 +370,14 @@ impl GameDownloader {
     }
 
     pub fn percentage_done(&self) -> f64 {
-        let completed = self.completed_bytes.load(Ordering::SeqCst);
-        (completed as f64 / self.total_bytes as f64) * 100.0
+        // Display uses the LIVE per-chunk counter so the bar moves as bytes
+        // stream in (not just when whole files finish). Clamp to 100: the live
+        // counter can momentarily overshoot total_bytes on the boundary between
+        // a retry rollback and re-add, and `total_bytes` carries a +1 for the
+        // end-of-install touchup that live bytes never account for.
+        let live = self.live_bytes.load(Ordering::SeqCst);
+        let pct = (live as f64 / self.total_bytes as f64) * 100.0;
+        pct.clamp(0.0, 100.0)
     }
 
     pub fn bytes_downloaded(&self) -> usize {
