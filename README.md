@@ -66,3 +66,6 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md)
  - [Nick Whelan](https://github.com/headassbtw) (UI)
  - [Paweł Lidwin](https://github.com/imLinguin) (Core)
 
+## AI Disclosure
+
+This project is developed with AI assistance. See **[AI.md](AI.md)** for how AI is used here, the ethical obligations behind it, and how upstream credit and licensing are handled.
