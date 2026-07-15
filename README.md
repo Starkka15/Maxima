@@ -265,3 +265,8 @@ This fork tracks [ArmchairDevelopers/Maxima](https://github.com/ArmchairDevelope
 ## License
 
 GPL-3.0-or-later — same as upstream. See [LICENSE](./LICENSE).
+
+## AI Disclosure
+
+This project is developed with AI assistance. See **[AI.md](AI.md)** for how AI is used
+here, the ethical obligations behind it, and how upstream credit and licensing are handled.
