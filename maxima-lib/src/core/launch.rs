@@ -421,7 +421,7 @@ async fn request_opaque_ooa_token(access_token: &str) -> Result<String, AuthErro
 pub async fn mx_linux_setup() -> Result<(), NativeError> {
     use crate::unix::wine::{
         check_runtime_validity, check_wine_validity, get_lutris_runtimes, install_runtime,
-        install_wine, setup_wine_registry,
+        install_wine, proton_dir, setup_wine_registry,
     };
 
     info!("Verifying wine dependencies...");
@@ -429,7 +429,21 @@ pub async fn mx_linux_setup() -> Result<(), NativeError> {
     let skip = std::env::var("MAXIMA_DISABLE_WINE_VERIFICATION").is_ok();
     if !skip {
         if !check_wine_validity().await? {
-            install_wine().await?;
+            // Don't hard-fail the launch if the (network-dependent) update can't
+            // be completed -- e.g. a GitHub asset-naming change or an outage --
+            // as long as a Proton runtime is already installed. Fall back to it
+            // instead of blocking the game. A first run with nothing installed
+            // still surfaces the error, since there is no runtime to fall back to.
+            if let Err(err) = install_wine().await {
+                if proton_dir()?.exists() {
+                    log::warn!(
+                        "Wine update failed ({:?}); launching with the installed Proton runtime.",
+                        err
+                    );
+                } else {
+                    return Err(err);
+                }
+            }
         }
         let runtimes = get_lutris_runtimes().await?;
         if !check_runtime_validity("eac_runtime", &runtimes).await? {
