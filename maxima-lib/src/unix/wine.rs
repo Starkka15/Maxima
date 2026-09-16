@@ -29,7 +29,14 @@ use crate::util::{
 };
 
 lazy_static! {
-    static ref PROTON_PATTERN: Regex = Regex::new(r"GE-Proton\d+-\d+\.tar\.gz").unwrap();
+    // Match the x86_64 GE-Proton tarball across both of GloriousEggroll's naming
+    // schemes: the plain name used up to GE-Proton11-3 (`GE-Proton11-3.tar.gz`)
+    // and the arch-suffixed name introduced afterwards alongside the aarch64
+    // builds (`GE-Proton11-6-x86_64.tar.gz`). Anchored so the optional `-x86_64`
+    // is the ONLY accepted suffix -- the `-aarch64` tarball must never match,
+    // since Maxima is x86_64-only (see the compile_error in lib.rs).
+    static ref PROTON_PATTERN: Regex =
+        Regex::new(r"^GE-Proton\d+-\d+(?:-x86_64)?\.tar\.gz$").unwrap();
 }
 
 // A Proton verb to use
